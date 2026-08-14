@@ -72,10 +72,7 @@ impl OllamaClient {
         if !response.status().is_success() {
             return Err(Error::Ollama(format!("status {}", response.status())));
         }
-        let body: GenerateResponse = response
-            .json()
-            .await
-            .map_err(|error| Error::Ollama(error.to_string()))?;
+        let body: GenerateResponse = response.json().await.map_err(map_reqwest)?;
         Ok(body.response)
     }
 }
@@ -165,6 +162,23 @@ mod tests {
         match err {
             Error::ModelNotFound { model } => assert_eq!(model, "nope"),
             other => panic!("expected ModelNotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_maps_non_404_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = OllamaClient::new(server.uri()).expect("client");
+        let err = client.generate("m", "p").await.expect_err("status");
+        match err {
+            Error::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
+            other => panic!("expected Ollama status error, got {other:?}"),
         }
     }
 
