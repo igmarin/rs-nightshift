@@ -977,6 +977,7 @@ dependencies = [
  "clap",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "which",
