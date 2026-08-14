@@ -19,8 +19,8 @@ pub struct RunRequest {
     pub allow_dirty: bool,
     /// Write the Writer article after PASSED (later task).
     pub article: bool,
-    /// Optional early stop.
-    pub until: Option<Until>,
+    /// Stage to stop after (required until the full pipeline exists).
+    pub until: Until,
 }
 
 /// Run implemented stages. This slice supports `--until pm` only.
@@ -34,12 +34,7 @@ pub async fn run<G: Generator>(
         return Err(Error::Artifact("goal must not be empty".into()));
     }
     match request.until {
-        Some(Until::Pm) => {}
-        None => {
-            return Err(Error::Artifact(
-                "full pipeline is not implemented yet; pass --until pm".into(),
-            ));
-        }
+        Until::Pm => {}
     }
     if !repo_exists(&request.repo) {
         return Err(Error::Artifact(format!(
@@ -119,7 +114,7 @@ mod tests {
                 name: Some("status".into()),
                 allow_dirty: false,
                 article: true,
-                until: Some(Until::Pm),
+                until: Until::Pm,
             },
         )
         .await
@@ -148,7 +143,7 @@ mod tests {
                 name: None,
                 allow_dirty: false,
                 article: true,
-                until: Some(Until::Pm),
+                until: Until::Pm,
             },
         )
         .await
@@ -161,33 +156,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_rejects_missing_until() {
+    async fn path_escaping_name_stays_inside_artifacts() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).expect("repo");
-        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let out = tmp.path().join("artifacts");
+        let store = ArtifactStore::new(&out);
         let gen = ScriptedGenerator::new();
-        let err = run(
+        gen.push_text(complete_story());
+        let run = run(
             &gen,
             &store,
             "2026-08-14",
             &RunRequest {
                 goal: "x".into(),
                 repo,
-                name: None,
+                name: Some("../../outside".into()),
                 allow_dirty: false,
                 article: true,
-                until: None,
+                until: Until::Pm,
             },
         )
         .await
-        .expect_err("full run");
-        match err {
-            Error::Artifact(msg) => {
-                assert!(msg.contains("--until pm"), "{msg}");
-            }
-            other => panic!("expected Artifact, got {other:?}"),
-        }
+        .expect("run");
+        assert!(
+            run.path.starts_with(&out),
+            "run dir escaped artifacts: {}",
+            run.path.display()
+        );
+        assert!(!tmp.path().join("outside").exists());
+        assert_eq!(
+            run.path.file_name().and_then(|n| n.to_str()),
+            Some("2026-08-14_outside")
+        );
     }
 
     #[tokio::test]
@@ -209,7 +210,7 @@ mod tests {
                 name: Some("fail".into()),
                 allow_dirty: false,
                 article: true,
-                until: Some(Until::Pm),
+                until: Until::Pm,
             },
         )
         .await
@@ -237,7 +238,7 @@ mod tests {
                 name: None,
                 allow_dirty: false,
                 article: true,
-                until: Some(Until::Pm),
+                until: Until::Pm,
             },
         )
         .await

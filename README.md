@@ -17,7 +17,7 @@ models, `codegraph`, and `graphify`.
 ```text
 nightshift doctor
 nightshift status [--out DIR]
-nightshift run --goal TEXT --repo PATH [--name SLUG] [--out DIR] [--until pm]
+nightshift run --goal TEXT --repo PATH --until pm [--name SLUG] [--out DIR]
 ```
 
 `doctor` exits `0` if the environment is ready, `2` if a required check failed.

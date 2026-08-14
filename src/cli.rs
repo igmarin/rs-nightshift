@@ -51,9 +51,9 @@ pub enum Command {
         #[arg(long = "article", default_value_t = true, overrides_with = "article")]
         #[arg(long = "no-article", action = clap::ArgAction::SetFalse)]
         article: bool,
-        /// Stop after this stage instead of running the full pipeline.
+        /// Stop after this stage. Required until the full pipeline exists.
         #[arg(long, value_enum)]
-        until: Option<Until>,
+        until: Until,
     },
 }
 
@@ -120,7 +120,7 @@ mod tests {
                 assert_eq!(out, PathBuf::from("artifacts"));
                 assert!(!allow_dirty);
                 assert!(article);
-                assert_eq!(until, Some(Until::Pm));
+                assert_eq!(until, Until::Pm);
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -141,6 +141,8 @@ mod tests {
             "/tmp/ns",
             "--allow-dirty",
             "--no-article",
+            "--until",
+            "pm",
         ])
         .expect("parse");
         match cli.command {
@@ -156,18 +158,28 @@ mod tests {
                 assert_eq!(out, PathBuf::from("/tmp/ns"));
                 assert!(allow_dirty);
                 assert!(!article);
-                assert_eq!(until, None);
+                assert_eq!(until, Until::Pm);
             }
             other => panic!("expected Run, got {other:?}"),
         }
     }
 
     #[test]
-    fn run_requires_goal_and_repo() {
+    fn run_requires_goal_repo_and_until() {
         let err = Cli::try_parse_from(["nightshift", "run"]).expect_err("required");
         let text = err.to_string();
         assert!(
-            text.contains("required") || text.contains("--goal") || text.contains("--repo"),
+            text.contains("required")
+                || text.contains("--goal")
+                || text.contains("--repo")
+                || text.contains("--until"),
+            "{text}"
+        );
+        let err = Cli::try_parse_from(["nightshift", "run", "--goal", "x", "--repo", "."])
+            .expect_err("until required");
+        let text = err.to_string();
+        assert!(
+            text.contains("--until") || text.contains("required"),
             "{text}"
         );
     }
