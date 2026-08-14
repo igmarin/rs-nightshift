@@ -7,7 +7,7 @@ license = "MIT"
 description = "Autonomous local multi-agent software development pipeline harness around Ollama"
 repository = "https://github.com/igmarin/rs-nightshift"
 readme = "README.md"
-rust-version = "1.82"
+rust-version = "1.88"
 keywords = ["ollama", "agents", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 

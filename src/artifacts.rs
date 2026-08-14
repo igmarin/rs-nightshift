@@ -65,13 +65,18 @@ impl ArtifactStore {
 
     /// Create `YYYY-MM-DD_<slug>/`, seed state files, and point `latest` at it.
     pub fn create_run(&self, date: &str, slug: &str) -> Result<RunDir, Error> {
-        validate_date(date)?;
+        validate_date_format(date)?;
         std::fs::create_dir_all(&self.root)?;
         let slug = slugify(slug);
         let mut dir_name = format!("{date}_{slug}");
         let mut path = self.root.join(&dir_name);
         let mut suffix = 2;
         while path.exists() {
+            if suffix > 10_000 {
+                return Err(Error::Artifact(
+                    "too many runs with same date and slug; clean up old runs".into(),
+                ));
+            }
             dir_name = format!("{date}_{slug}-{suffix}");
             path = self.root.join(&dir_name);
             suffix += 1;
@@ -84,6 +89,9 @@ impl ArtifactStore {
     }
 }
 
+/// Internal pipeline state written to `pipeline_state.json`.
+/// Reserved for future use: currently only `stage="created", iteration=0` is written.
+/// Consumers may read this to track run progress across iterations.
 #[derive(Serialize)]
 struct PipelineState<'a> {
     stage: &'a str,
@@ -91,7 +99,9 @@ struct PipelineState<'a> {
     last_error: Option<&'a str>,
 }
 
-fn validate_date(date: &str) -> Result<(), Error> {
+/// Validates that `date` matches the format `YYYY-MM-DD`.
+/// Does NOT validate calendar correctness (e.g., 2026-02-31 passes format).
+fn validate_date_format(date: &str) -> Result<(), Error> {
     let bytes = date.as_bytes();
     let ok = bytes.len() == 10
         && bytes[4] == b'-'
@@ -126,7 +136,14 @@ fn update_latest(root: &std::path::Path, dir_name: &str) -> Result<(), Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    std::os::unix::fs::symlink(dir_name, latest)?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(dir_name, &latest)?;
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(dir_name, &latest)?;
+    }
     Ok(())
 }
 
@@ -226,6 +243,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn create_run_writes_dated_dir_state_and_latest() {
         let (_tmp, store) = store();
         let run = store
@@ -245,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn second_run_moves_latest_symlink() {
         let (_tmp, store) = store();
         store.create_run("2026-08-14", "one").expect("first");
