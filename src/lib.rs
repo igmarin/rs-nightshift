@@ -4,6 +4,7 @@
 //! The library holds check and model contracts used by the `nightshift` binary.
 //! Process exit happens only in `main`.
 
+pub mod artifacts;
 pub mod cli;
 pub mod doctor;
 pub mod error;

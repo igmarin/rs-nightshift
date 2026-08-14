@@ -16,9 +16,13 @@ models, `codegraph`, and `graphify`.
 
 ```text
 nightshift doctor
+nightshift status [--out DIR]
 ```
 
-Exit `0` if the environment is ready, `2` if a required check failed.
+`doctor` exits `0` if the environment is ready, `2` if a required check failed.
+
+`status` prints `PASSED`, `FAILED`, or `REQUIRES_HUMAN_REVIEW` from
+`./artifacts/latest/04_qa_report.json`. It exits `2` when no QA report exists.
 
 ## Development
 

@@ -23,6 +23,10 @@ pub enum Error {
     /// An I/O operation failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Artifact directory or report handling failed.
+    #[error("artifact error: {0}")]
+    Artifact(String),
 }
 
 #[cfg(test)]
@@ -51,5 +55,11 @@ mod tests {
         };
         assert_eq!(missing.to_string(), "Ollama model not found: nope");
         assert_eq!(Error::Timeout.to_string(), "Ollama request timed out");
+    }
+
+    #[test]
+    fn artifact_error_displays_message() {
+        let error = Error::Artifact("no latest run".into());
+        assert_eq!(error.to_string(), "artifact error: no latest run");
     }
 }

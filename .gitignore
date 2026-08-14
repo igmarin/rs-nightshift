@@ -3,6 +3,9 @@
 debug
 target
 
+# Nightshift run output
+/artifacts/
+
 # Downloaded rs-guard CI binary
 /rs-guard
 /rs-guard-x86_64-unknown-linux-gnu
