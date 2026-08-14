@@ -190,6 +190,7 @@ impl HttpModelCatalog {
     pub fn new(base_url: impl Into<String>) -> Result<Self, Error> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            .no_proxy()
             .build()
             .map_err(|error| Error::Ollama(error.to_string()))?;
         Ok(Self {
@@ -531,6 +532,22 @@ mod tests {
         let catalog = HttpModelCatalog::new(server.uri()).expect("catalog");
         let models = catalog.list_models().await.expect("tags");
         assert_eq!(models, vec!["llama3.1:8b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn http_catalog_maps_invalid_json() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/tags"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_raw("not-json", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let catalog = HttpModelCatalog::new(server.uri()).expect("catalog");
+        let err = catalog.list_models().await.expect_err("json");
+        assert!(matches!(err, Error::Ollama(_)));
     }
 
     #[tokio::test]

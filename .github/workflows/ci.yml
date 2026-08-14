@@ -66,7 +66,8 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-      - uses: taiki-e/install-action@v2
+      # Pinned from taiki-e/install-action@v2.85.13.
+      - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1
         with:
           tool: cargo-llvm-cov
       - run: cargo llvm-cov --workspace --fail-under-lines 85
