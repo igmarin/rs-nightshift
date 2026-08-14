@@ -1,6 +1,7 @@
 //! Sequential Ollama HTTP client.
 
 use crate::error::Error;
+use crate::generate::ROLE_TEMPERATURE;
 use serde::Deserialize;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -21,6 +22,12 @@ struct GenerateRequest<'a> {
     prompt: &'a str,
     stream: bool,
     keep_alive: i32,
+    options: GenerateOptions,
+}
+
+#[derive(serde::Serialize)]
+struct GenerateOptions {
+    temperature: f32,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +57,16 @@ impl OllamaClient {
 
     /// Complete `prompt` with `model`. Unloads the model after the call (`keep_alive: 0`).
     pub async fn generate(&self, model: &str, prompt: &str) -> Result<String, Error> {
+        self.generate_with(model, prompt, ROLE_TEMPERATURE).await
+    }
+
+    /// Complete `prompt` with an explicit sampling temperature.
+    pub async fn generate_with(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: f32,
+    ) -> Result<String, Error> {
         let _guard = self.generate_lock.lock().await;
         let url = format!("{}/api/generate", self.base_url.trim_end_matches('/'));
         let response = self
@@ -60,6 +77,7 @@ impl OllamaClient {
                 prompt,
                 stream: false,
                 keep_alive: 0,
+                options: GenerateOptions { temperature },
             })
             .send()
             .await
@@ -139,6 +157,29 @@ mod tests {
         assert_eq!(body["model"], "qwen2.5-coder:7b");
         assert_eq!(body["prompt"], "say hi");
         assert_eq!(body["stream"], false);
+        assert_eq!(body["keep_alive"], 0);
+        assert_eq!(body["options"]["temperature"], 0.2);
+    }
+
+    #[tokio::test]
+    async fn generate_with_sends_requested_temperature() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"response":"ok","done":true}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = OllamaClient::new(server.uri()).expect("client");
+        client
+            .generate_with("gemma2:9b", "draft", 0.5)
+            .await
+            .expect("generate");
+        let body = capture_generate_body(&server).await;
+        assert_eq!(body["options"]["temperature"], 0.5);
         assert_eq!(body["keep_alive"], 0);
     }
 

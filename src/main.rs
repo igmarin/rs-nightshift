@@ -5,6 +5,8 @@ use rs_nightshift::artifacts::{write_status, ArtifactStore};
 use rs_nightshift::cli::{Cli, Command};
 use rs_nightshift::doctor::{run_doctor, write_report, HttpModelCatalog, PathHost};
 use rs_nightshift::models::DEFAULT_OLLAMA_URL;
+use rs_nightshift::ollama::OllamaClient;
+use rs_nightshift::pipeline::{local_date, run, RunRequest};
 use std::io::{self, Write};
 use std::process;
 
@@ -28,5 +30,32 @@ async fn real_main() -> anyhow::Result<()> {
             let code = write_status(&ArtifactStore::new(out), io::stdout())?;
             process::exit(code);
         }
+        Command::Run {
+            goal,
+            repo,
+            name,
+            out,
+            allow_dirty,
+            article,
+            until,
+        } => {
+            let client = OllamaClient::new(DEFAULT_OLLAMA_URL)?;
+            let run_dir = run(
+                &client,
+                &ArtifactStore::new(out),
+                &local_date()?,
+                &RunRequest {
+                    goal,
+                    repo,
+                    name,
+                    allow_dirty,
+                    article,
+                    until,
+                },
+            )
+            .await?;
+            writeln!(io::stdout(), "{}", run_dir.path.display())?;
+        }
     }
+    Ok(())
 }

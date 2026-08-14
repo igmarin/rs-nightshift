@@ -1,6 +1,6 @@
 //! Command-line interface.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// Overnight local multi-agent engineering harness.
@@ -10,6 +10,13 @@ pub struct Cli {
     /// Subcommand to run.
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// Stop the pipeline after this stage (debug / tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Until {
+    /// Product-manager user story only.
+    Pm,
 }
 
 /// Supported commands.
@@ -22,6 +29,31 @@ pub enum Command {
         /// Artifact root (default: `./artifacts`).
         #[arg(long, default_value = crate::artifacts::DEFAULT_OUT_DIR)]
         out: PathBuf,
+    },
+    /// Run one overnight job (or stop early with `--until`).
+    Run {
+        /// Business goal for the job.
+        #[arg(long)]
+        goal: String,
+        /// Path to the target git checkout.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Directory slug (default: slugified goal).
+        #[arg(long)]
+        name: Option<String>,
+        /// Artifact root (default: `./artifacts`).
+        #[arg(long, default_value = crate::artifacts::DEFAULT_OUT_DIR)]
+        out: PathBuf,
+        /// Allow a dirty target working tree.
+        #[arg(long)]
+        allow_dirty: bool,
+        /// Write `05_article_draft.md` after a passing run (default).
+        #[arg(long = "article", default_value_t = true, overrides_with = "article")]
+        #[arg(long = "no-article", action = clap::ArgAction::SetFalse)]
+        article: bool,
+        /// Stop after this stage instead of running the full pipeline.
+        #[arg(long, value_enum)]
+        until: Option<Until>,
     },
 }
 
@@ -57,5 +89,86 @@ mod tests {
         let err = Cli::try_parse_from(["nightshift", "fly"]).expect_err("unknown");
         let text = err.to_string();
         assert!(text.contains("unrecognized subcommand"), "{text}");
+    }
+
+    #[test]
+    fn parses_run_until_pm() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "run",
+            "--goal",
+            "add status",
+            "--repo",
+            "/tmp/app",
+            "--until",
+            "pm",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run {
+                goal,
+                repo,
+                name,
+                out,
+                allow_dirty,
+                article,
+                until,
+            } => {
+                assert_eq!(goal, "add status");
+                assert_eq!(repo, PathBuf::from("/tmp/app"));
+                assert_eq!(name, None);
+                assert_eq!(out, PathBuf::from("artifacts"));
+                assert!(!allow_dirty);
+                assert!(article);
+                assert_eq!(until, Some(Until::Pm));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_no_article_and_name() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "run",
+            "--goal",
+            "x",
+            "--repo",
+            ".",
+            "--name",
+            "my-job",
+            "--out",
+            "/tmp/ns",
+            "--allow-dirty",
+            "--no-article",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run {
+                name,
+                out,
+                allow_dirty,
+                article,
+                until,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("my-job"));
+                assert_eq!(out, PathBuf::from("/tmp/ns"));
+                assert!(allow_dirty);
+                assert!(!article);
+                assert_eq!(until, None);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_requires_goal_and_repo() {
+        let err = Cli::try_parse_from(["nightshift", "run"]).expect_err("required");
+        let text = err.to_string();
+        assert!(
+            text.contains("required") || text.contains("--goal") || text.contains("--repo"),
+            "{text}"
+        );
     }
 }
