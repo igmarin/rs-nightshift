@@ -8,3 +8,4 @@ pub mod cli;
 pub mod doctor;
 pub mod error;
 pub mod models;
+pub mod ollama;

@@ -262,6 +262,10 @@ mod tests {
             match &self.result {
                 Ok(models) => Ok(models.clone()),
                 Err(Error::Ollama(msg)) => Err(Error::Ollama(msg.clone())),
+                Err(Error::ModelNotFound { model }) => Err(Error::ModelNotFound {
+                    model: model.clone(),
+                }),
+                Err(Error::Timeout) => Err(Error::Timeout),
                 Err(Error::Io(e)) => Err(Error::Io(std::io::Error::new(e.kind(), e.to_string()))),
             }
         }
