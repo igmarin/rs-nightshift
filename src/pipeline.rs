@@ -23,27 +23,47 @@ pub struct RunRequest {
     pub until: Option<Until>,
 }
 
-/// Run implemented stages. Task 4 stops after PM when `--until pm`.
+/// Run implemented stages. This slice supports `--until pm` only.
 pub async fn run<G: Generator>(
     generator: &G,
     store: &ArtifactStore,
     date: &str,
     request: &RunRequest,
 ) -> Result<RunDir, Error> {
+    if request.goal.trim().is_empty() {
+        return Err(Error::Artifact("goal must not be empty".into()));
+    }
+    match request.until {
+        Some(Until::Pm) => {}
+        None => {
+            return Err(Error::Artifact(
+                "full pipeline is not implemented yet; pass --until pm".into(),
+            ));
+        }
+    }
     if !repo_exists(&request.repo) {
         return Err(Error::Artifact(format!(
             "repo is not a directory: {}",
             request.repo.display()
         )));
     }
+    let _ = (request.allow_dirty, request.article);
     let slug = request.name.as_deref().unwrap_or(request.goal.as_str());
     let run = store.create_run(date, slug)?;
     run.append_log("stage=pm")?;
-    crate::pm::write_user_story(generator, &run, &request.goal).await?;
-    run.write_state("pm", 0, None)?;
-    run.append_log("stage=pm done")?;
-    let _ = (request.allow_dirty, request.article, request.until);
-    Ok(run)
+    match crate::pm::write_user_story(generator, &run, &request.goal).await {
+        Ok(()) => {
+            run.write_state("pm", 0, None)?;
+            run.append_log("stage=pm done")?;
+            Ok(run)
+        }
+        Err(error) => {
+            let msg = error.to_string();
+            run.write_state("pm", 0, Some(&msg))?;
+            run.append_log(&format!("stage=pm failed: {msg}"))?;
+            Err(error)
+        }
+    }
 }
 
 /// Local calendar date as `YYYY-MM-DD` (`date +%Y-%m-%d` on Unix).
@@ -109,6 +129,97 @@ mod tests {
         let state = std::fs::read_to_string(run.path.join("pipeline_state.json")).expect("state");
         assert!(state.contains("\"pm\"") || state.contains("pm"), "{state}");
         assert_eq!(gen.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_rejects_empty_goal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        let err = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "   ".into(),
+                repo,
+                name: None,
+                allow_dirty: false,
+                article: true,
+                until: Some(Until::Pm),
+            },
+        )
+        .await
+        .expect_err("empty goal");
+        match err {
+            Error::Artifact(msg) => assert!(msg.contains("empty"), "{msg}"),
+            other => panic!("expected Artifact, got {other:?}"),
+        }
+        assert!(!tmp.path().join("artifacts").exists());
+    }
+
+    #[tokio::test]
+    async fn run_rejects_missing_until() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        let err = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "x".into(),
+                repo,
+                name: None,
+                allow_dirty: false,
+                article: true,
+                until: None,
+            },
+        )
+        .await
+        .expect_err("full run");
+        match err {
+            Error::Artifact(msg) => {
+                assert!(msg.contains("--until pm"), "{msg}");
+            }
+            other => panic!("expected Artifact, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_records_pm_failure_in_state() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        gen.push_text("no headings");
+        gen.push_text("still no headings");
+        let err = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "x".into(),
+                repo,
+                name: Some("fail".into()),
+                allow_dirty: false,
+                article: true,
+                until: Some(Until::Pm),
+            },
+        )
+        .await
+        .expect_err("invalid story");
+        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        let latest = store.root().join("latest").join("pipeline_state.json");
+        let state = std::fs::read_to_string(latest).expect("state");
+        assert!(state.contains("\"pm\""), "{state}");
+        assert!(state.contains("last_error"), "{state}");
+        assert!(state.contains("01_user_story.md"), "{state}");
     }
 
     #[tokio::test]

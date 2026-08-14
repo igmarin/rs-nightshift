@@ -3,7 +3,9 @@
 use crate::error::Error;
 use crate::ollama::OllamaClient;
 use async_trait::async_trait;
+#[cfg(test)]
 use std::collections::VecDeque;
+#[cfg(test)]
 use std::sync::Mutex;
 
 /// Default sampling temperature for PM, Tech Lead, Dev, and QA.
@@ -24,6 +26,7 @@ impl Generator for OllamaClient {
 }
 
 /// One recorded [`Generator::generate`] invocation.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerateCall {
     /// Model tag passed to generate.
@@ -35,12 +38,14 @@ pub struct GenerateCall {
 }
 
 /// Queue of scripted replies for tests.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct ScriptedGenerator {
     replies: Mutex<VecDeque<Result<String, Error>>>,
     calls: Mutex<Vec<GenerateCall>>,
 }
 
+#[cfg(test)]
 impl ScriptedGenerator {
     /// Empty script.
     #[must_use]
@@ -71,6 +76,7 @@ impl ScriptedGenerator {
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl Generator for ScriptedGenerator {
     async fn generate(&self, model: &str, prompt: &str, temperature: f32) -> Result<String, Error> {
@@ -109,5 +115,16 @@ mod tests {
         assert_eq!(calls[0].model, "llama3.1:8b");
         assert_eq!(calls[0].prompt, "goal");
         assert!((calls[0].temperature - ROLE_TEMPERATURE).abs() < f32::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn scripted_push_err_is_returned() {
+        let gen = ScriptedGenerator::new();
+        gen.push_err(Error::Timeout);
+        let err = gen
+            .generate("m", "p", ROLE_TEMPERATURE)
+            .await
+            .expect_err("scripted error");
+        assert!(matches!(err, Error::Timeout));
     }
 }

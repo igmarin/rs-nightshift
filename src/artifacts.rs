@@ -114,8 +114,6 @@ impl RunDir {
 }
 
 /// Internal pipeline state written to `pipeline_state.json`.
-/// Reserved for future use: currently only `stage="created", iteration=0` is written.
-/// Consumers may read this to track run progress across iterations.
 #[derive(Serialize)]
 struct PipelineState<'a> {
     stage: &'a str,
