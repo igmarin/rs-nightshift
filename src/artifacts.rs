@@ -65,6 +65,7 @@ impl ArtifactStore {
 
     /// Create `YYYY-MM-DD_<slug>/`, seed state files, and point `latest` at it.
     pub fn create_run(&self, date: &str, slug: &str) -> Result<RunDir, Error> {
+        validate_date(date)?;
         std::fs::create_dir_all(&self.root)?;
         let slug = slugify(slug);
         let mut dir_name = format!("{date}_{slug}");
@@ -88,6 +89,23 @@ struct PipelineState<'a> {
     stage: &'a str,
     iteration: u8,
     last_error: Option<&'a str>,
+}
+
+fn validate_date(date: &str) -> Result<(), Error> {
+    let bytes = date.as_bytes();
+    let ok = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit);
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Artifact(format!(
+            "run date must be YYYY-MM-DD, got {date:?}"
+        )))
+    }
 }
 
 fn write_pipeline_state(run: &std::path::Path) -> Result<(), Error> {
@@ -182,6 +200,18 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = ArtifactStore::new(tmp.path());
         (tmp, store)
+    }
+
+    #[test]
+    fn create_run_rejects_path_escaping_date() {
+        let (tmp, store) = store();
+        let err = store.create_run("../oops", "x").expect_err("escaped date");
+        match err {
+            Error::Artifact(msg) => assert!(msg.contains("YYYY-MM-DD"), "{msg}"),
+            other => panic!("expected Artifact, got {other:?}"),
+        }
+        assert!(!tmp.path().join("oops").exists());
+        assert!(!store.root().exists() || store.root().read_dir().expect("read").next().is_none());
     }
 
     #[test]
