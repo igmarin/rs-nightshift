@@ -27,6 +27,15 @@ pub enum Error {
     /// Artifact directory or report handling failed.
     #[error("artifact error: {0}")]
     Artifact(String),
+
+    /// Model output failed schema validation (after optional repair).
+    #[error("invalid artifact {artifact}: {reason}")]
+    InvalidArtifact {
+        /// Artifact file that failed validation.
+        artifact: &'static str,
+        /// Human-readable validation failure.
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -61,5 +70,17 @@ mod tests {
     fn artifact_error_displays_message() {
         let error = Error::Artifact("no latest run".into());
         assert_eq!(error.to_string(), "artifact error: no latest run");
+    }
+
+    #[test]
+    fn invalid_artifact_displays_file_and_reason() {
+        let error = Error::InvalidArtifact {
+            artifact: "01_user_story.md",
+            reason: "missing headings: Out of Scope".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "invalid artifact 01_user_story.md: missing headings: Out of Scope"
+        );
     }
 }

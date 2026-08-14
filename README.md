@@ -17,12 +17,17 @@ models, `codegraph`, and `graphify`.
 ```text
 nightshift doctor
 nightshift status [--out DIR]
+nightshift run --goal TEXT --repo PATH --until pm [--name SLUG] [--out DIR]
 ```
 
 `doctor` exits `0` if the environment is ready, `2` if a required check failed.
 
 `status` prints `PASSED`, `FAILED`, or `REQUIRES_HUMAN_REVIEW` from
 `./artifacts/latest/04_qa_report.json`. It exits `2` when no QA report exists.
+
+`run --until pm` writes `artifacts/YYYY-MM-DD_<slug>/01_user_story.md` with
+Problem Statement, User Stories, Acceptance Criteria, and Out of Scope. One
+`llama3.2:3b` repair is attempted if those headings are missing.
 
 ## Development
 

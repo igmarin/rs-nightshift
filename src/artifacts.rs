@@ -82,16 +82,38 @@ impl ArtifactStore {
             suffix += 1;
         }
         std::fs::create_dir_all(&path)?;
-        write_pipeline_state(&path)?;
-        std::fs::write(path.join("run.log"), b"")?;
+        let run = RunDir { path };
+        run.write_state("created", 0, None)?;
+        std::fs::write(run.path.join("run.log"), b"")?;
         update_latest(&self.root, &dir_name)?;
-        Ok(RunDir { path })
+        Ok(run)
+    }
+}
+
+impl RunDir {
+    /// Overwrite `pipeline_state.json`.
+    pub fn write_state(
+        &self,
+        stage: &str,
+        iteration: u8,
+        last_error: Option<&str>,
+    ) -> Result<(), Error> {
+        write_pipeline_state(&self.path, stage, iteration, last_error)
+    }
+
+    /// Append a line to `run.log`.
+    pub fn append_log(&self, line: &str) -> Result<(), Error> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.path.join("run.log"))?;
+        writeln!(file, "{line}")?;
+        Ok(())
     }
 }
 
 /// Internal pipeline state written to `pipeline_state.json`.
-/// Reserved for future use: currently only `stage="created", iteration=0` is written.
-/// Consumers may read this to track run progress across iterations.
 #[derive(Serialize)]
 struct PipelineState<'a> {
     stage: &'a str,
@@ -118,11 +140,16 @@ fn validate_date_format(date: &str) -> Result<(), Error> {
     }
 }
 
-fn write_pipeline_state(run: &std::path::Path) -> Result<(), Error> {
+fn write_pipeline_state(
+    run: &std::path::Path,
+    stage: &str,
+    iteration: u8,
+    last_error: Option<&str>,
+) -> Result<(), Error> {
     let state = PipelineState {
-        stage: "created",
-        iteration: 0,
-        last_error: None,
+        stage,
+        iteration,
+        last_error,
     };
     let bytes = serde_json::to_vec_pretty(&state).map_err(|e| Error::Artifact(e.to_string()))?;
     std::fs::write(run.join("pipeline_state.json"), bytes)?;

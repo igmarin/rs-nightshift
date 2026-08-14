@@ -8,5 +8,8 @@ pub mod artifacts;
 pub mod cli;
 pub mod doctor;
 pub mod error;
+pub mod generate;
 pub mod models;
 pub mod ollama;
+pub mod pipeline;
+pub mod pm;

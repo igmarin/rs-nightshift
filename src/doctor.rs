@@ -267,6 +267,10 @@ mod tests {
                 }),
                 Err(Error::Timeout) => Err(Error::Timeout),
                 Err(Error::Artifact(msg)) => Err(Error::Artifact(msg.clone())),
+                Err(Error::InvalidArtifact { artifact, reason }) => Err(Error::InvalidArtifact {
+                    artifact,
+                    reason: reason.clone(),
+                }),
                 Err(Error::Io(e)) => Err(Error::Io(std::io::Error::new(e.kind(), e.to_string()))),
             }
         }
