@@ -1,0 +1,10 @@
+#![deny(missing_docs)]
+//! rs-nightshift — local multi-agent overnight engineering harness around Ollama.
+//!
+//! The library holds check and model contracts used by the `nightshift` binary.
+//! Process exit happens only in `main`.
+
+pub mod cli;
+pub mod doctor;
+pub mod error;
+pub mod models;

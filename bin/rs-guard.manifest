@@ -1,0 +1,4 @@
+# Pinned rs-guard release for CI download and checksum verification.
+RS_GUARD_VERSION="v1.6.0"
+RS_GUARD_ASSET="rs-guard-x86_64-unknown-linux-gnu"
+RS_GUARD_SHA256="f1fda276f393f87efd0f3f883415645ae15a7902105ebf09b25a95af650593c7"
