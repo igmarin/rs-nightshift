@@ -3,6 +3,7 @@
 use clap::Parser;
 use rs_nightshift::artifacts::{write_status, ArtifactStore};
 use rs_nightshift::cli::{Cli, Command};
+use rs_nightshift::context::PathProbe;
 use rs_nightshift::doctor::{run_doctor, write_report, HttpModelCatalog, PathHost};
 use rs_nightshift::models::DEFAULT_OLLAMA_URL;
 use rs_nightshift::ollama::OllamaClient;
@@ -52,6 +53,7 @@ async fn real_main() -> anyhow::Result<()> {
                     article,
                     until,
                 },
+                &PathProbe,
             )
             .await?;
             writeln!(io::stdout(), "{}", run_dir.path.display())?;

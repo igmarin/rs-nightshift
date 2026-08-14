@@ -17,6 +17,8 @@ pub struct Cli {
 pub enum Until {
     /// Product-manager user story only.
     Pm,
+    /// User story plus tech spec.
+    TechLead,
 }
 
 /// Supported commands.
@@ -89,6 +91,25 @@ mod tests {
         let err = Cli::try_parse_from(["nightshift", "fly"]).expect_err("unknown");
         let text = err.to_string();
         assert!(text.contains("unrecognized subcommand"), "{text}");
+    }
+
+    #[test]
+    fn parses_run_until_tech_lead() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "run",
+            "--goal",
+            "x",
+            "--repo",
+            ".",
+            "--until",
+            "tech-lead",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run { until, .. } => assert_eq!(until, Until::TechLead),
+            other => panic!("expected Run, got {other:?}"),
+        }
     }
 
     #[test]

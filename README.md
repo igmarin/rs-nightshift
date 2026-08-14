@@ -17,7 +17,7 @@ models, `codegraph`, and `graphify`.
 ```text
 nightshift doctor
 nightshift status [--out DIR]
-nightshift run --goal TEXT --repo PATH --until pm [--name SLUG] [--out DIR]
+nightshift run --goal TEXT --repo PATH --until pm|tech-lead [--name SLUG] [--out DIR]
 ```
 
 `doctor` exits `0` if the environment is ready, `2` if a required check failed.
@@ -25,9 +25,11 @@ nightshift run --goal TEXT --repo PATH --until pm [--name SLUG] [--out DIR]
 `status` prints `PASSED`, `FAILED`, or `REQUIRES_HUMAN_REVIEW` from
 `./artifacts/latest/04_qa_report.json`. It exits `2` when no QA report exists.
 
-`run --until pm` writes `artifacts/YYYY-MM-DD_<slug>/01_user_story.md` with
-Problem Statement, User Stories, Acceptance Criteria, and Out of Scope. One
-`llama3.2:3b` repair is attempted if those headings are missing.
+`run --until pm` writes `01_user_story.md` with Problem Statement, User Stories,
+Acceptance Criteria, and Out of Scope. `--until tech-lead` also writes
+`02_tech_spec.md` from `codegraph` (and `graphify query` when a graph exists).
+One `llama3.2:3b` repair is attempted if validation fails. Spec paths must be a
+subset of tool output. Missing `graphify` is a warning, not a hard fail.
 
 ## Development
 
