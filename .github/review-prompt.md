@@ -16,13 +16,34 @@ from suggestions. Label every finding `[Critical]`, `[Security]`, `[Important]`,
 
 ---
 
+## PR-type triage (do this first)
+
+Before reviewing, classify the PR into exactly one type based on the files it touches:
+
+| Type | Typical paths |
+| --- | --- |
+| **pipeline/library** | `src/**`, `tests/**`, `Cargo.toml` dependencies |
+| **CI/release workflow** | `.github/workflows/**`, `.github/*.md`, `deny.toml`, `dist-workspace.toml`, `rust-toolchain.toml` |
+| **shell/install script** | `scripts/**`, `bin/**`, generated `install.sh` |
+| **docs-only** | `README.md`, `LICENSE`, `docs/**`, other markdown |
+
+When a PR spans several types, review each file under the rules for its own type.
+
+Apply the Nightshift invariants (INV-1..INV-11) and the rustdoc / test / coverage
+expectations **only** to pipeline/library changes. Do **not** raise `[Important]` for
+missing rustdoc, missing unit tests, or coverage concerns on CI/release workflow,
+shell/install script, or docs-only PRs. For those types, focus on the
+**Release & CI integrity** axis below, plus correctness and readability.
+
+---
+
 ## Approval Standard
 
 Approve a change when it improves overall code health and follows project conventions,
 even if it is not perfect. Do not block merely because the implementation differs from
 how you would have written it.
 
-## Five Review Axes
+## Six Review Axes
 
 ### 1. Correctness
 - Does the code match the documented CLI and artifact contracts?
@@ -52,6 +73,23 @@ how you would have written it.
 - One Ollama generate at a time.
 - Test logs passed to the QA reasoner are truncated (~32 KiB).
 - Generate has a bounded timeout (default 10 minutes).
+
+### 6. Release & CI integrity
+
+Apply to CI/release workflow, shell/install script, and docs-only PRs (and to any
+workflow or script file inside a pipeline PR).
+
+- Third-party actions are pinned to a full commit SHA, not a tag or branch.
+- Workflow `permissions` are least-privilege: read-only by default, `contents: write`
+  only on the job that publishes a release.
+- No `pull_request_target` workflow checks out or executes the untrusted head ref.
+- `actions/checkout` uses `persist-credentials: false` wherever the job does not push.
+- Release artifacts ship SHA256 checksums alongside every tarball.
+- Any `install.sh` verifies the SHA256 checksum **before** executing or installing the
+  downloaded binary, and uses `set -euo pipefail`. Treat `scripts/rs-guard-install.sh`
+  as the standard to mirror.
+- No secrets are echoed into logs, written to artifacts, or passed as command arguments.
+- No crates.io publish step for 0.1.0; release publishing is GitHub Releases only.
 
 ---
 
@@ -84,6 +122,13 @@ The pipeline must not commit. Morning review is human-owned.
 - Shell interpolation of model output.
 - Removing tests that cover doctor, path sandbox, iteration cap, or `keep_alive: 0`.
 - Blocking primitives across `.await` points.
+- An `install.sh` that executes or installs a downloaded binary without SHA256
+  verification.
+- Unpinned third-party actions (tag or branch instead of a full commit SHA) in a
+  workflow that has write permissions or access to secrets.
+- Shell interpolation of untrusted input — `${{ github.event.* }}`, PR titles, branch
+  names, issue bodies — inside a workflow `run:` step. Pass such values through `env:`
+  and quote them.
 
 **What tooling already enforces (do not flag unless the change breaks them):**
 - `cargo fmt --all -- --check`
@@ -91,6 +136,9 @@ The pipeline must not commit. Morning review is human-owned.
 - `cargo test` + `cargo test --doc`
 - `cargo deny check` + `cargo audit`
 - `cargo llvm-cov --fail-under-lines 85`
+
+The 85% line-coverage gate is enforced by CI, so never compute, estimate, or argue about
+the coverage ratio. Flag only changes that remove or weaken existing tests.
 
 ---
 
