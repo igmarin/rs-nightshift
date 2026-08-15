@@ -90,6 +90,24 @@ fn ollama_url_env_and_flag_precedence_are_consistent() {
     assert!(!flag_report.contains("env invalid"), "{flag_report}");
 }
 
+#[test]
+fn doctor_rejects_ollama_credentials_without_echoing_userinfo() {
+    let output = nightshift(&[
+        "doctor",
+        "--ollama-url",
+        "http://user:secret@127.0.0.1:11434",
+    ]);
+    let combined = format!(
+        "{}{}",
+        stdout(&output),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(2), "exit: {:?}", output.status);
+    assert!(combined.contains("[FAIL] ollama-url"), "{combined}");
+    assert!(!combined.contains("user"), "{combined}");
+    assert!(!combined.contains("secret"), "{combined}");
+}
+
 fn path_arg(path: &Path) -> &str {
     path.to_str().expect("utf-8 temp path")
 }

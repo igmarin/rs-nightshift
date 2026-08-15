@@ -294,20 +294,16 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/generate"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_raw(
-                    format!(
-                        r#"{{"response":{},"done":true}}"#,
-                        serde_json::to_string(&complete_story()).expect("story JSON")
-                    )
-                    .to_string(),
-                    "application/json",
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"response":{},"done":true}}"#,
+                    serde_json::to_string(&complete_story()).expect("story JSON")
                 ),
-            )
+                "application/json",
+            ))
             .mount(&server)
             .await;
-        let origin = server.uri().replacen("http://", "http://user:secret@", 1);
-        let client = OllamaClient::new(origin).expect("client");
+        let client = OllamaClient::new(server.uri()).expect("client");
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(tmp.path().join("repo")).expect("repo");
         let store = ArtifactStore::new(tmp.path().join("artifacts"));
@@ -340,7 +336,6 @@ mod tests {
             1,
             "origin must be logged once: {log}"
         );
-        assert!(!log.contains("secret"), "{log}");
     }
 
     #[tokio::test]
