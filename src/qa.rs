@@ -80,7 +80,7 @@ pub async fn fix_hints<G: Generator>(
         format_command(&outcome.command),
     );
     generator
-        .generate(model_for(Role::Qa), &prompt, ROLE_TEMPERATURE)
+        .generate(&model_for(Role::Qa), &prompt, ROLE_TEMPERATURE)
         .await
 }
 

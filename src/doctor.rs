@@ -141,7 +141,9 @@ where
 fn push_model_checks(checks: &mut Vec<Check>, models: &[String]) {
     for role in crate::models::required_models() {
         let tag = crate::models::model_for(*role);
-        let present = models.iter().any(|installed| model_matches(installed, tag));
+        let present = models
+            .iter()
+            .any(|installed| model_matches(installed, &tag));
         checks.push(Check {
             name: format!("model:{tag}"),
             passed: present,

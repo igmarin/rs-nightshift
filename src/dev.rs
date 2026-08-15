@@ -159,7 +159,7 @@ pub async fn write_and_apply_patch<G: Generator>(
     let slices = file_slices(repo, files, 16_384);
     let draft = generator
         .generate(
-            model_for(Role::Dev),
+            &model_for(Role::Dev),
             &dev_prompt(goal, spec, &slices, hints),
             ROLE_TEMPERATURE,
         )
@@ -169,7 +169,7 @@ pub async fn write_and_apply_patch<G: Generator>(
         Err(error) => {
             let repaired = generator
                 .generate(
-                    model_for(Role::Router),
+                    &model_for(Role::Router),
                     &format!(
                         "Rewrite as a valid unified diff. Problem: {error}.\nOriginal:\n{draft}\n"
                     ),
