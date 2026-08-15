@@ -33,7 +33,7 @@ impl Generator for OllamaClient {
     }
 
     fn redacted_origin(&self) -> Option<String> {
-        Some(self.redacted_origin().to_owned())
+        Some(OllamaClient::redacted_origin(self).to_owned())
     }
 }
 

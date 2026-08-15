@@ -9,30 +9,60 @@ use tokio::sync::Mutex;
 /// Default generate timeout.
 pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Validate an Ollama HTTP(S) origin and return its trimmed form.
+/// Validate an Ollama HTTP(S) origin and return its normalized form.
 pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
-    let parsed = reqwest::Url::parse(value).map_err(|_| Error::InvalidOllamaUrl {
+    let mut parsed = reqwest::Url::parse(value).map_err(|_| Error::InvalidOllamaUrl {
         url: redact_ollama_url(value),
     })?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
         return Err(Error::InvalidOllamaUrl {
             url: redact_ollama_url(value),
         });
     }
-    Ok(value.to_owned())
+    parsed.set_path("");
+    Ok(parsed.to_string().trim_end_matches('/').to_owned())
 }
 
 /// Redact password credentials from an Ollama URL before reporting it.
 #[must_use]
 pub fn redact_ollama_url(value: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(value) else {
+        return redact_unparsed_url(value);
+    };
+    if parsed.password().is_some() && parsed.set_password(Some("[REDACTED]")).is_err() {
+        return redact_unparsed_url(value);
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+fn redact_unparsed_url(value: &str) -> String {
+    let end = value.find(['?', '#']).unwrap_or(value.len());
+    let value = &value[..end];
+    let Some(authority_start) = value.find("://").map(|index| index + 3) else {
         return value.to_owned();
     };
-    if parsed.password().is_some() {
-        let _ = parsed.set_password(Some("[REDACTED]"));
-    }
-    parsed.to_string()
+    let authority_end = value[authority_start..]
+        .find('/')
+        .map(|index| authority_start + index)
+        .unwrap_or(value.len());
+    let authority = &value[authority_start..authority_end];
+    let Some(userinfo_end) = authority.rfind('@') else {
+        return value.to_owned();
+    };
+    let userinfo_end = authority_start + userinfo_end;
+    format!(
+        "{}[REDACTED]@{}",
+        &value[..authority_start],
+        &value[userinfo_end + 1..]
+    )
 }
 
 /// HTTP client that talks to one Ollama origin, one generate at a time.
@@ -320,10 +350,43 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_origin_ollama_urls() {
+        for value in [
+            "http://example.test/path",
+            "http://example.test?token=secret",
+            "http://example.test#fragment",
+        ] {
+            assert!(
+                validate_ollama_url(value).is_err(),
+                "expected origin rejection for {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_trailing_slash() {
+        assert_eq!(
+            validate_ollama_url("http://example.test:11434/").expect("valid origin"),
+            "http://example.test:11434"
+        );
+    }
+
+    #[test]
     fn redacts_ollama_password() {
         let redacted = redact_ollama_url("http://user:secret@example.test:11434");
         assert!(redacted.contains("user"), "{redacted}");
         assert!(!redacted.contains("secret"), "{redacted}");
         assert!(redacted.contains("REDACTED"), "{redacted}");
+    }
+
+    #[test]
+    fn redacts_malformed_credentials() {
+        let error = match OllamaClient::new("http://user:secret@[invalid") {
+            Ok(_) => panic!("invalid URL must fail"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
     }
 }
