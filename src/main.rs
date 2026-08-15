@@ -25,8 +25,7 @@ async fn real_main() -> anyhow::Result<()> {
     match cli.command {
         Command::Doctor => {
             let catalog = HttpModelCatalog::new(&ollama_url)?;
-            let report = run_doctor(&catalog, &PathHost).await?;
-            let mut report = report;
+            let mut report = run_doctor(&catalog, &PathHost).await?;
             report.checks.insert(
                 0,
                 Check {
@@ -69,7 +68,6 @@ async fn real_main() -> anyhow::Result<()> {
                 &ProcessTestRunner::default(),
             )
             .await?;
-            run_dir.append_log(&format!("ollama origin={}", redact_ollama_url(&ollama_url)))?;
             writeln!(io::stdout(), "{}", run_dir.path.display())?;
         }
     }
