@@ -757,6 +757,43 @@ diff --git a/hello.txt b/hello.txt
     }
 
     #[tokio::test]
+    async fn writer_failure_after_pass_keeps_qa_passed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        std::fs::write(repo.join("nightshift.toml"), "[test]\ncommand = \"true\"\n").expect("toml");
+        git_init(&repo);
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        qa_story_spec_and_patches(&gen, &[PATCH_V1]);
+        gen.push_text("   \n");
+        let runner = crate::testrun::ScriptedRunner::new();
+        runner.push_outcome(0, "ok", &["true".into()]);
+        let err = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "greet".into(),
+                repo,
+                name: Some("writer-fail".into()),
+                allow_dirty: false,
+                article: true,
+                until: None,
+            },
+            &HelloProbe,
+            &runner,
+        )
+        .await
+        .expect_err("writer");
+        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        let latest = store.root().join("latest");
+        let report =
+            crate::qa::read_qa_report(&crate::artifacts::RunDir { path: latest }).expect("report");
+        assert_eq!(report.status, crate::artifacts::QaStatus::Passed);
+    }
+
+    #[tokio::test]
     async fn qa_failing_tests_freeze_after_three_dev_attempts() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().join("repo");

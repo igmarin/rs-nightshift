@@ -68,6 +68,9 @@ Progress is always appended to `artifacts/latest/run.log` (no TTY required).
 ## Morning checklist
 
 1. `nightshift status` — read `PASSED` / `FAILED` / `REQUIRES_HUMAN_REVIEW`.
+   `status` is the QA verdict. If Writer failed after green tests the process
+   exits non-zero, `run.log` notes the missing article, and `status` still
+   prints `PASSED`.
 2. `git diff` in the target repo (unstaged). Edit if needed.
 3. Open `artifacts/latest/05_article_draft.md` if the run used `--article`.
 4. `git commit` or restore. Nightshift will not do this for you.

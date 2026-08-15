@@ -5,6 +5,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+User=nightshift
+Group=nightshift
+NoNewPrivileges=true
 # The binary does not daemonize. Start detached:
 #   systemctl start --no-block nightshift.service
 WorkingDirectory=/var/lib/nightshift/repo
