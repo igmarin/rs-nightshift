@@ -7,6 +7,7 @@
 pub mod artifacts;
 pub mod cli;
 pub mod context;
+pub mod dev;
 pub mod doctor;
 pub mod error;
 pub mod generate;

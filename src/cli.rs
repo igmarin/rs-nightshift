@@ -19,6 +19,8 @@ pub enum Until {
     Pm,
     /// User story plus tech spec.
     TechLead,
+    /// Spec plus applied working-tree patch (no commit).
+    Dev,
 }
 
 /// Supported commands.
@@ -91,6 +93,25 @@ mod tests {
         let err = Cli::try_parse_from(["nightshift", "fly"]).expect_err("unknown");
         let text = err.to_string();
         assert!(text.contains("unrecognized subcommand"), "{text}");
+    }
+
+    #[test]
+    fn parses_run_until_dev() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "run",
+            "--goal",
+            "x",
+            "--repo",
+            ".",
+            "--until",
+            "dev",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run { until, .. } => assert_eq!(until, Until::Dev),
+            other => panic!("expected Run, got {other:?}"),
+        }
     }
 
     #[test]

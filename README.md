@@ -17,7 +17,7 @@ models, `codegraph`, and `graphify`.
 ```text
 nightshift doctor
 nightshift status [--out DIR]
-nightshift run --goal TEXT --repo PATH --until pm|tech-lead [--name SLUG] [--out DIR]
+nightshift run --goal TEXT --repo PATH --until pm|tech-lead|dev [--name SLUG] [--out DIR] [--allow-dirty]
 ```
 
 `doctor` exits `0` if the environment is ready, `2` if a required check failed.
@@ -30,6 +30,9 @@ Acceptance Criteria, and Out of Scope. `--until tech-lead` also writes
 `02_tech_spec.md` from `codegraph` (and `graphify query` when a graph exists).
 One `llama3.2:3b` repair is attempted if validation fails. Spec paths must be a
 subset of tool output. Missing `graphify` is a warning, not a hard fail.
+`--until dev` writes `03_diff.patch`, runs `git apply --check`, then applies.
+The target tree becomes dirty; the pipeline never commits. Dirty trees need
+`--allow-dirty`.
 
 ## Development
 

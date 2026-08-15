@@ -40,6 +40,10 @@ pub enum Error {
     /// `codegraph` / `graphify` context gathering failed.
     #[error("context tools: {0}")]
     Context(String),
+
+    /// Git inspect or apply failed (never commit/push/reset/clean).
+    #[error("git: {0}")]
+    Git(String),
 }
 
 #[cfg(test)]
@@ -92,5 +96,11 @@ mod tests {
     fn context_error_displays_message() {
         let error = Error::Context("codegraph is not on PATH".into());
         assert_eq!(error.to_string(), "context tools: codegraph is not on PATH");
+    }
+
+    #[test]
+    fn git_error_displays_message() {
+        let error = Error::Git("apply --check failed".into());
+        assert_eq!(error.to_string(), "git: apply --check failed");
     }
 }
