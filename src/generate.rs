@@ -11,6 +11,9 @@ use std::sync::Mutex;
 /// Default sampling temperature for PM, Tech Lead, Dev, and QA.
 pub const ROLE_TEMPERATURE: f32 = 0.2;
 
+/// Sampling temperature for the Writer article draft.
+pub const WRITER_TEMPERATURE: f32 = 0.5;
+
 /// Sequential text completion.
 #[async_trait]
 pub trait Generator: Send + Sync {

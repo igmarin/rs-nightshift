@@ -1,0 +1,16 @@
+[Unit]
+Description=rs-nightshift overnight job
+Documentation=https://github.com/igmarin/rs-nightshift
+After=network-online.target
+
+[Service]
+Type=oneshot
+# The binary does not daemonize. systemd or tmux keeps it alive after SSH hangup.
+WorkingDirectory=/var/lib/nightshift/repo
+ExecStart=/usr/local/bin/nightshift run --goal "replace this goal" --repo /var/lib/nightshift/repo --out /var/lib/nightshift/artifacts
+StandardOutput=append:/var/lib/nightshift/artifacts/service.log
+StandardError=append:/var/lib/nightshift/artifacts/service.log
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target
