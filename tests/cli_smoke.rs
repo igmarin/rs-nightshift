@@ -64,18 +64,30 @@ fn status_on_empty_out_dir_reports_no_run() {
 #[test]
 fn ollama_url_env_and_flag_precedence_are_consistent() {
     let env_output = nightshift_with_env(&["doctor"], &[("NIGHTSHIFT_OLLAMA_URL", "env invalid")]);
-    let env_error = String::from_utf8_lossy(&env_output.stderr);
-    assert!(!env_output.status.success(), "invalid env URL must fail");
-    assert!(env_error.contains("env invalid"), "{env_error}");
+    let env_report = stdout(&env_output);
+    assert_eq!(
+        env_output.status.code(),
+        Some(2),
+        "exit: {:?}",
+        env_output.status
+    );
+    assert!(env_report.contains("[FAIL] ollama-url"), "{env_report}");
+    assert!(env_report.contains("env invalid"), "{env_report}");
 
     let flag_output = nightshift_with_env(
         &["doctor", "--ollama-url", "flag invalid"],
         &[("NIGHTSHIFT_OLLAMA_URL", "env invalid")],
     );
-    let flag_error = String::from_utf8_lossy(&flag_output.stderr);
-    assert!(!flag_output.status.success(), "invalid flag URL must fail");
-    assert!(flag_error.contains("flag invalid"), "{flag_error}");
-    assert!(!flag_error.contains("env invalid"), "{flag_error}");
+    let flag_report = stdout(&flag_output);
+    assert_eq!(
+        flag_output.status.code(),
+        Some(2),
+        "exit: {:?}",
+        flag_output.status
+    );
+    assert!(flag_report.contains("[FAIL] ollama-url"), "{flag_report}");
+    assert!(flag_report.contains("flag invalid"), "{flag_report}");
+    assert!(!flag_report.contains("env invalid"), "{flag_report}");
 }
 
 fn path_arg(path: &Path) -> &str {
