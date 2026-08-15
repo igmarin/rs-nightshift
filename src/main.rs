@@ -4,9 +4,8 @@ use clap::Parser;
 use rs_nightshift::artifacts::{write_status, ArtifactStore};
 use rs_nightshift::cli::{Cli, Command};
 use rs_nightshift::context::PathProbe;
-use rs_nightshift::doctor::{run_doctor, write_report, HttpModelCatalog, PathHost};
-use rs_nightshift::models::DEFAULT_OLLAMA_URL;
-use rs_nightshift::ollama::OllamaClient;
+use rs_nightshift::doctor::{run_doctor, write_report, Check, HttpModelCatalog, PathHost};
+use rs_nightshift::ollama::{redact_ollama_url, OllamaClient};
 use rs_nightshift::pipeline::{local_date, run, RunRequest};
 use rs_nightshift::testrun::ProcessTestRunner;
 use std::io::{self, Write};
@@ -21,10 +20,22 @@ async fn main() {
 }
 
 async fn real_main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let ollama_url = cli.ollama_url;
+    match cli.command {
         Command::Doctor => {
-            let catalog = HttpModelCatalog::new(DEFAULT_OLLAMA_URL)?;
+            let catalog = HttpModelCatalog::new(&ollama_url)?;
             let report = run_doctor(&catalog, &PathHost).await?;
+            let mut report = report;
+            report.checks.insert(
+                0,
+                Check {
+                    name: "ollama-url".into(),
+                    passed: true,
+                    required: false,
+                    detail: format!("using {}", redact_ollama_url(&ollama_url)),
+                },
+            );
             write_report(&report, io::stdout())?;
             process::exit(report.exit_code());
         }
@@ -41,7 +52,7 @@ async fn real_main() -> anyhow::Result<()> {
             article,
             until,
         } => {
-            let client = OllamaClient::new(DEFAULT_OLLAMA_URL)?;
+            let client = OllamaClient::new(&ollama_url)?;
             let run_dir = run(
                 &client,
                 &ArtifactStore::new(out),
@@ -58,6 +69,7 @@ async fn real_main() -> anyhow::Result<()> {
                 &ProcessTestRunner::default(),
             )
             .await?;
+            run_dir.append_log(&format!("ollama origin={}", redact_ollama_url(&ollama_url)))?;
             writeln!(io::stdout(), "{}", run_dir.path.display())?;
         }
     }

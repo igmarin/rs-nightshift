@@ -5,6 +5,13 @@ use thiserror::Error;
 /// Recoverable library failure.
 #[derive(Error, Debug)]
 pub enum Error {
+    /// The configured Ollama URL is not a reachable HTTP origin shape.
+    #[error("invalid Ollama URL {url:?}: expected an http:// or https:// URL with a host")]
+    InvalidOllamaUrl {
+        /// The operator-provided URL, with credentials redacted when possible.
+        url: String,
+    },
+
     /// An HTTP call to Ollama failed.
     #[error("Ollama request failed: {0}")]
     Ollama(String),

@@ -7,6 +7,14 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "nightshift", version, about)]
 pub struct Cli {
+    /// Ollama HTTP origin used by `doctor` and `run`.
+    #[arg(
+        long,
+        env = "NIGHTSHIFT_OLLAMA_URL",
+        default_value = crate::models::DEFAULT_OLLAMA_URL,
+        global = true
+    )]
+    pub ollama_url: String,
     /// Subcommand to run.
     #[command(subcommand)]
     pub command: Command,
@@ -72,6 +80,18 @@ mod tests {
     fn parses_doctor() {
         let cli = Cli::try_parse_from(["nightshift", "doctor"]).expect("parse");
         assert_eq!(cli.command, Command::Doctor);
+    }
+
+    #[test]
+    fn parses_ollama_url_after_subcommand() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "doctor",
+            "--ollama-url",
+            "http://example.test",
+        ])
+        .expect("parse URL after doctor");
+        assert_eq!(cli.ollama_url, "http://example.test");
     }
 
     #[test]
