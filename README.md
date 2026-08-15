@@ -127,9 +127,11 @@ Releases are built by [`.github/workflows/release.yml`](.github/workflows/releas
 in [`dist-workspace.toml`](dist-workspace.toml)):
 
 1. Bump `version` in `Cargo.toml` (and `Cargo.lock`) and merge it.
-2. Tag the merge commit: `git tag v0.1.0`.
-3. `git push origin v0.1.0`.
-4. Keep generated action pins configured in `[dist.github-action-commits]` in
+2. Move the `[Unreleased]` entries in `CHANGELOG.md` into a new version section
+   before tagging; `dist` uses that section as the GitHub Release notes.
+3. Tag the merge commit: `git tag v0.1.0`.
+4. `git push origin v0.1.0`.
+5. Keep generated action pins configured in `[dist.github-action-commits]` in
    `dist-workspace.toml`; verify them with `scripts/check-action-pins.sh`.
 
 The tag triggers `release.yml`, which first runs the CI-equivalent gate in
