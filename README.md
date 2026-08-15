@@ -50,7 +50,7 @@ after installing.
   init` once if the index is missing. It never rebuilds a full graphify corpus.
 
 ```text
-nightshift doctor
+nightshift doctor [--ollama-url URL]
 ```
 
 `doctor` exits `0` if the environment is ready, `2` if a required check failed.

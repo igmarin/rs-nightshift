@@ -39,6 +39,7 @@ pub fn redact_ollama_url(value: &str) -> String {
 pub struct OllamaClient {
     client: reqwest::Client,
     base_url: String,
+    redacted_base_url: String,
     generate_lock: Mutex<()>,
 }
 
@@ -77,9 +78,16 @@ impl OllamaClient {
             .map_err(|error| Error::Ollama(error.to_string()))?;
         Ok(Self {
             client,
+            redacted_base_url: redact_ollama_url(&base_url),
             base_url,
             generate_lock: Mutex::new(()),
         })
+    }
+
+    /// Redacted origin used for operator-facing run logs.
+    #[must_use]
+    pub fn redacted_origin(&self) -> &str {
+        &self.redacted_base_url
     }
 
     /// Complete `prompt` with `model`. Unloads the model after the call (`keep_alive: 0`).
