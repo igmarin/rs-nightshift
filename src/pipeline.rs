@@ -3,9 +3,10 @@
 use crate::artifacts::{ArtifactStore, RunDir};
 use crate::cli::Until;
 use crate::context::{gather, ContextProbe};
+use crate::dev::{read_tech_spec, working_tree_dirty, write_and_apply_patch};
 use crate::error::Error;
 use crate::generate::Generator;
-use crate::techlead::{read_user_story, write_tech_spec};
+use crate::techlead::{impacted_files, read_user_story, write_tech_spec};
 use std::path::{Path, PathBuf};
 
 /// Arguments for one `nightshift run`.
@@ -41,7 +42,7 @@ where
         return Err(Error::Artifact("goal must not be empty".into()));
     }
     match request.until {
-        Until::Pm | Until::TechLead => {}
+        Until::Pm | Until::TechLead | Until::Dev => {}
     }
     if !repo_exists(&request.repo) {
         return Err(Error::Artifact(format!(
@@ -49,7 +50,15 @@ where
             request.repo.display()
         )));
     }
-    let _ = (request.allow_dirty, request.article);
+    let _ = request.article;
+    if matches!(request.until, Until::Dev)
+        && working_tree_dirty(&request.repo)?
+        && !request.allow_dirty
+    {
+        return Err(Error::Git(
+            "working tree is dirty; pass --allow-dirty or commit/restore first".into(),
+        ));
+    }
     let slug = request.name.as_deref().unwrap_or(request.goal.as_str());
     let run = store.create_run(date, slug)?;
     run.append_log("stage=pm")?;
@@ -79,16 +88,32 @@ where
         run.append_log(&format!("warn: {warning}"))?;
     }
     run.append_log("stage=tech-lead")?;
-    match write_tech_spec(generator, &run, &request.goal, &story, &bundle).await {
+    if let Err(error) = write_tech_spec(generator, &run, &request.goal, &story, &bundle).await {
+        let msg = error.to_string();
+        run.write_state("tech-lead", 0, Some(&msg))?;
+        run.append_log(&format!("stage=tech-lead failed: {msg}"))?;
+        return Err(error);
+    }
+    run.write_state("tech-lead", 0, None)?;
+    run.append_log("stage=tech-lead done")?;
+    if request.until == Until::TechLead {
+        return Ok(run);
+    }
+
+    let spec = read_tech_spec(&run)?;
+    let files = impacted_files(&spec);
+    run.append_log("stage=dev")?;
+    match write_and_apply_patch(generator, &run, &request.repo, &request.goal, &spec, &files).await
+    {
         Ok(()) => {
-            run.write_state("tech-lead", 0, None)?;
-            run.append_log("stage=tech-lead done")?;
+            run.write_state("dev", 0, None)?;
+            run.append_log("stage=dev done")?;
             Ok(run)
         }
         Err(error) => {
             let msg = error.to_string();
-            run.write_state("tech-lead", 0, Some(&msg))?;
-            run.append_log(&format!("stage=tech-lead failed: {msg}"))?;
+            run.write_state("dev", 0, Some(&msg))?;
+            run.append_log(&format!("stage=dev failed: {msg}"))?;
             Err(error)
         }
     }
@@ -357,6 +382,146 @@ apply the patch
         let state = std::fs::read_to_string(run.path.join("pipeline_state.json")).expect("state");
         assert!(state.contains("tech-lead"), "{state}");
         assert_eq!(gen.calls().len(), 2);
+    }
+
+    fn git_init(repo: &Path) {
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo)
+            .status()
+            .expect("init")
+            .success());
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "dev@example.com"])
+            .current_dir(repo)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Dev"])
+            .current_dir(repo)
+            .status();
+        std::fs::write(repo.join("hello.txt"), "hello\n").expect("hello");
+        assert!(std::process::Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(repo)
+            .status()
+            .expect("add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .status()
+            .expect("commit")
+            .success());
+    }
+
+    struct HelloProbe;
+
+    impl crate::context::ContextProbe for HelloProbe {
+        fn codegraph_available(&self) -> bool {
+            true
+        }
+        fn graphify_available(&self) -> bool {
+            false
+        }
+        fn has_codegraph_index(&self, _repo: &Path) -> bool {
+            true
+        }
+        fn has_graphify_graph(&self, _repo: &Path) -> bool {
+            false
+        }
+        fn run_codegraph(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
+            Ok("hello.txt".into())
+        }
+        fn run_graphify(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
+            Err(Error::Context("unused".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn dirty_tree_without_allow_dirty_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        git_init(&repo);
+        std::fs::write(repo.join("extra"), "x").expect("dirty");
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        let err = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "x".into(),
+                repo,
+                name: None,
+                allow_dirty: false,
+                article: true,
+                until: Until::Dev,
+            },
+            &HelloProbe,
+        )
+        .await
+        .expect_err("dirty");
+        match err {
+            Error::Git(msg) => assert!(msg.contains("dirty"), "{msg}"),
+            other => panic!("expected Git, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_until_dev_applies_patch_without_commit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        git_init(&repo);
+        let before = crate::dev::head_commit(&repo).expect("head");
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        gen.push_text(complete_story());
+        gen.push_text(
+            r#"
+## Impacted files
+- hello.txt
+
+## Interfaces / signatures
+hello
+
+## TDD plan
+n/a
+
+## Out of scope
+commit
+"#,
+        );
+        gen.push_text(
+            "\
+diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello
++hello world
+",
+        );
+        let run = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "greet".into(),
+                repo: repo.clone(),
+                name: Some("dev".into()),
+                allow_dirty: false,
+                article: true,
+                until: Until::Dev,
+            },
+            &HelloProbe,
+        )
+        .await
+        .expect("run");
+        assert!(run.path.join(crate::dev::PATCH_FILE).is_file());
+        assert!(crate::dev::working_tree_dirty(&repo).expect("dirty"));
+        assert_eq!(crate::dev::head_commit(&repo).expect("head"), before);
     }
 
     #[test]

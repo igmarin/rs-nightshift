@@ -272,6 +272,7 @@ mod tests {
                     reason: reason.clone(),
                 }),
                 Err(Error::Context(msg)) => Err(Error::Context(msg.clone())),
+                Err(Error::Git(msg)) => Err(Error::Git(msg.clone())),
                 Err(Error::Io(e)) => Err(Error::Io(std::io::Error::new(e.kind(), e.to_string()))),
             }
         }

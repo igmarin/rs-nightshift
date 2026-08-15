@@ -131,7 +131,7 @@ fn looks_like_repo_file(token: &str) -> bool {
         return false;
     }
     let lower = token.to_ascii_lowercase();
-    const EXTS: &[&str] = &[".rs", ".toml", ".md", ".yml", ".yaml", ".json"];
+    const EXTS: &[&str] = &[".rs", ".toml", ".md", ".yml", ".yaml", ".json", ".txt"];
     EXTS.iter().any(|ext| lower.ends_with(ext))
 }
 
