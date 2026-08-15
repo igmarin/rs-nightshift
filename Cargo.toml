@@ -29,3 +29,8 @@ which = "7"
 
 [dev-dependencies]
 wiremock = "0.6"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
