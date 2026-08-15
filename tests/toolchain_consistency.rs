@@ -1,15 +1,20 @@
+//! Guards against drift between the repository's Rust toolchain declarations.
+
 use std::{fs, path::Path};
+
 struct Declaration {
     source: &'static str,
     value: String,
     version: (u64, u64),
 }
+
 #[test]
 fn toolchain_declarations_are_consistent() {
     if let Err(error) = check_declarations(Path::new(env!("CARGO_MANIFEST_DIR"))) {
         panic!("{error}");
     }
 }
+
 fn check_declarations(root: &Path) -> Result<(), String> {
     let sources = [
         ("Cargo.toml", "rust-version"),
@@ -58,10 +63,12 @@ fn check_declarations(root: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
 fn read_source(root: &Path, source: &'static str) -> Result<String, String> {
     fs::read_to_string(root.join(source))
         .map_err(|error| format!("{source}: could not read source: {error}"))
 }
+
 fn assignment(contents: &str, source: &'static str, key: &str) -> Result<String, String> {
     let mut values = contents.lines().filter_map(|line| {
         let line = line.trim();
@@ -81,6 +88,7 @@ fn assignment(contents: &str, source: &'static str, key: &str) -> Result<String,
     }
     parse_scalar(source, key, &value)
 }
+
 fn workflow_toolchains(contents: &str) -> Result<Vec<String>, String> {
     let values = contents
         .lines()
@@ -105,6 +113,7 @@ fn workflow_toolchains(contents: &str) -> Result<Vec<String>, String> {
         .map(|value| parse_scalar(".github/workflows/ci.yml", "toolchain", &value))
         .collect()
 }
+
 fn parse_scalar(source: &'static str, key: &str, value: &str) -> Result<String, String> {
     let value = value.split('#').next().unwrap_or_default().trim();
     let value = if value.starts_with('"') || value.starts_with('\'') {
@@ -121,6 +130,7 @@ fn parse_scalar(source: &'static str, key: &str, value: &str) -> Result<String, 
     }
     Ok(value.to_owned())
 }
+
 fn parse_declaration(source: &'static str, value: String) -> Result<Declaration, String> {
     let components = value.split('.').collect::<Vec<_>>();
     if !(2..=3).contains(&components.len())
