@@ -60,11 +60,13 @@ nightshift doctor
 ```text
 nightshift doctor
 nightshift status [--out DIR]
-nightshift run --goal TEXT --repo PATH [--name SLUG] [--out DIR] [--allow-dirty] [--article|--no-article] [--until pm|tech-lead|dev|qa]
+nightshift run --goal TEXT --repo PATH [--ollama-url URL] [--name SLUG] [--out DIR] [--allow-dirty] [--article|--no-article] [--until pm|tech-lead|dev|qa]
 ```
 
 Omit `--until` for a full run: PM → Tech Lead → Dev apply → QA (max 3) → Writer
 (if `--article`, default on, and QA `PASSED`).
+
+Global `--ollama-url` is accepted after `doctor`, reads `NIGHTSHIFT_OLLAMA_URL`, and defaults to `http://127.0.0.1:11434`; the flag takes precedence.
 
 `--until` is a debug stop. `--allow-dirty` is required when the target tree is
 already dirty. The test argv comes from `nightshift.toml` or a detector

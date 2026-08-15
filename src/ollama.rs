@@ -9,6 +9,32 @@ use tokio::sync::Mutex;
 /// Default generate timeout.
 pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Validate an Ollama HTTP(S) origin and return its trimmed form.
+pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
+    let value = value.trim();
+    let parsed = reqwest::Url::parse(value).map_err(|_| Error::InvalidOllamaUrl {
+        url: redact_ollama_url(value),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(Error::InvalidOllamaUrl {
+            url: redact_ollama_url(value),
+        });
+    }
+    Ok(value.to_owned())
+}
+
+/// Redact password credentials from an Ollama URL before reporting it.
+#[must_use]
+pub fn redact_ollama_url(value: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(value) else {
+        return value.to_owned();
+    };
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(Some("[REDACTED]"));
+    }
+    parsed.to_string()
+}
+
 /// HTTP client that talks to one Ollama origin, one generate at a time.
 pub struct OllamaClient {
     client: reqwest::Client,
@@ -43,6 +69,7 @@ impl OllamaClient {
 
     /// Client with an explicit request timeout (used in tests).
     pub fn with_timeout(base_url: impl Into<String>, timeout: Duration) -> Result<Self, Error> {
+        let base_url = validate_ollama_url(&base_url.into())?;
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .no_proxy()
@@ -50,7 +77,7 @@ impl OllamaClient {
             .map_err(|error| Error::Ollama(error.to_string()))?;
         Ok(Self {
             client,
-            base_url: base_url.into(),
+            base_url,
             generate_lock: Mutex::new(()),
         })
     }
@@ -271,5 +298,24 @@ mod tests {
             1,
             "two generates must not overlap"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_ollama_url() {
+        let error = match OllamaClient::new("not a URL") {
+            Ok(_) => panic!("invalid URL must fail"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(text.contains("not a URL"), "{text}");
+        assert!(text.contains("http://"), "{text}");
+    }
+
+    #[test]
+    fn redacts_ollama_password() {
+        let redacted = redact_ollama_url("http://user:secret@example.test:11434");
+        assert!(redacted.contains("user"), "{redacted}");
+        assert!(!redacted.contains("secret"), "{redacted}");
+        assert!(redacted.contains("REDACTED"), "{redacted}");
     }
 }
