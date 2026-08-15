@@ -28,9 +28,9 @@ pub async fn write_article<G: Generator>(
     run: &RunDir,
     goal: &str,
 ) -> Result<(), Error> {
-    let story = std::fs::read_to_string(run.path.join(USER_STORY_FILE)).unwrap_or_default();
-    let spec = std::fs::read_to_string(run.path.join(TECH_SPEC_FILE)).unwrap_or_default();
-    let qa = std::fs::read_to_string(run.path.join(QA_REPORT_FILE)).unwrap_or_default();
+    let story = std::fs::read_to_string(run.path.join(USER_STORY_FILE))?;
+    let spec = std::fs::read_to_string(run.path.join(TECH_SPEC_FILE))?;
+    let qa = std::fs::read_to_string(run.path.join(QA_REPORT_FILE))?;
     let draft = generator
         .generate(
             model_for(Role::Writer),
@@ -60,6 +60,9 @@ mod tests {
         let run = ArtifactStore::new(tmp.path())
             .create_run("2026-08-14", "art")
             .expect("run");
+        std::fs::write(run.path.join(USER_STORY_FILE), "story").expect("story");
+        std::fs::write(run.path.join(TECH_SPEC_FILE), "spec").expect("spec");
+        std::fs::write(run.path.join(QA_REPORT_FILE), "{}").expect("qa");
         let gen = ScriptedGenerator::new();
         gen.push_text("# Draft\nThe tree is dirty; nothing was committed.\n");
         write_article(&gen, &run, "greet").await.expect("writer");
@@ -76,6 +79,9 @@ mod tests {
         let run = ArtifactStore::new(tmp.path())
             .create_run("2026-08-14", "empty")
             .expect("run");
+        std::fs::write(run.path.join(USER_STORY_FILE), "story").expect("story");
+        std::fs::write(run.path.join(TECH_SPEC_FILE), "spec").expect("spec");
+        std::fs::write(run.path.join(QA_REPORT_FILE), "{}").expect("qa");
         let gen = ScriptedGenerator::new();
         gen.push_text("   \n");
         let err = write_article(&gen, &run, "x").await.expect_err("empty");

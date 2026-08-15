@@ -5,8 +5,10 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# The binary does not daemonize. systemd or tmux keeps it alive after SSH hangup.
+# The binary does not daemonize. Start detached:
+#   systemctl start --no-block nightshift.service
 WorkingDirectory=/var/lib/nightshift/repo
+ExecStartPre=/usr/bin/install -d /var/lib/nightshift/artifacts
 ExecStart=/usr/local/bin/nightshift run --goal "replace this goal" --repo /var/lib/nightshift/repo --out /var/lib/nightshift/artifacts
 StandardOutput=append:/var/lib/nightshift/artifacts/service.log
 StandardError=append:/var/lib/nightshift/artifacts/service.log

@@ -61,7 +61,7 @@ nightshift run --goal "…" --repo /path/to/checkout --out ./artifacts
 ```
 
 systemd: copy [`contrib/nightshift.service`](contrib/nightshift.service), edit
-the goal and paths, then `systemctl start nightshift.service`.
+the goal and paths, then `systemctl start --no-block nightshift.service`.
 
 Progress is always appended to `artifacts/latest/run.log` (no TTY required).
 

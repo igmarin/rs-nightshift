@@ -29,7 +29,7 @@ pub struct RunRequest {
     pub until: Option<Until>,
 }
 
-/// Run implemented stages through `--until pm`, `tech-lead`, `dev`, or `qa`.
+/// Run implemented stages. Omit `until` for QA plus Writer when `--article`.
 pub async fn run<G, C, T>(
     generator: &G,
     store: &ArtifactStore,
@@ -55,7 +55,6 @@ where
             request.repo.display()
         )));
     }
-    let _ = request.article;
     if matches!(request.until, None | Some(Until::Dev | Until::Qa))
         && working_tree_dirty(&request.repo)?
         && !request.allow_dirty
