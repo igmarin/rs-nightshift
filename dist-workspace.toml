@@ -25,3 +25,9 @@ rust-toolchain-version = "1.88.0"
 plan-jobs = ["./release-checks"]
 # No crates.io publish: this is a binary-only release.
 publish-jobs = []
+
+# Keep generated GitHub Actions pinned to commit SHAs.
+[dist.github-action-commits]
+"actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"

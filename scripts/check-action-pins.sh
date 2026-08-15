@@ -12,6 +12,10 @@ while IFS=: read -r file line content; do
   fi
 
   reference="${BASH_REMATCH[1]}"
+  reference="${reference#\"}"
+  reference="${reference%\"}"
+  reference="${reference#\'}"
+  reference="${reference%\'}"
   [[ "$reference" == ./* ]] && continue
   if [[ ! "$reference" =~ ^[^@]+@[0-9a-fA-F]{40}$ ]]; then
     printf '%s:%s: unpinned action reference: %s\n' "$file" "$line" "$reference" >&2
