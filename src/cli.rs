@@ -84,14 +84,26 @@ mod tests {
 
     #[test]
     fn parses_ollama_url_after_subcommand() {
-        let cli = Cli::try_parse_from([
+        let doctor = Cli::try_parse_from([
             "nightshift",
             "doctor",
             "--ollama-url",
             "http://example.test",
         ])
         .expect("parse URL after doctor");
-        assert_eq!(cli.ollama_url, "http://example.test");
+        assert_eq!(doctor.ollama_url, "http://example.test");
+        let run = Cli::try_parse_from([
+            "nightshift",
+            "run",
+            "--goal",
+            "x",
+            "--repo",
+            ".",
+            "--ollama-url",
+            "http://run.example",
+        ])
+        .expect("parse URL after run");
+        assert_eq!(run.ollama_url, "http://run.example");
     }
 
     #[test]
