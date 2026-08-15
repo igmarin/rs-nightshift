@@ -25,7 +25,7 @@ pub fn missing_user_story_headings(markdown: &str) -> Vec<&'static str> {
         .collect()
 }
 
-fn has_atx_heading(markdown: &str, title: &str) -> bool {
+pub(crate) fn has_atx_heading(markdown: &str, title: &str) -> bool {
     markdown.lines().any(|line| {
         let trimmed = line.trim();
         let rest = match trimmed.strip_prefix('#') {

@@ -2,8 +2,10 @@
 
 use crate::artifacts::{ArtifactStore, RunDir};
 use crate::cli::Until;
+use crate::context::{gather, ContextProbe};
 use crate::error::Error;
 use crate::generate::Generator;
+use crate::techlead::{read_user_story, write_tech_spec};
 use std::path::{Path, PathBuf};
 
 /// Arguments for one `nightshift run`.
@@ -23,18 +25,23 @@ pub struct RunRequest {
     pub until: Until,
 }
 
-/// Run implemented stages. This slice supports `--until pm` only.
-pub async fn run<G: Generator>(
+/// Run implemented stages through `--until pm` or `--until tech-lead`.
+pub async fn run<G, C>(
     generator: &G,
     store: &ArtifactStore,
     date: &str,
     request: &RunRequest,
-) -> Result<RunDir, Error> {
+    context: &C,
+) -> Result<RunDir, Error>
+where
+    G: Generator,
+    C: ContextProbe,
+{
     if request.goal.trim().is_empty() {
         return Err(Error::Artifact("goal must not be empty".into()));
     }
     match request.until {
-        Until::Pm => {}
+        Until::Pm | Until::TechLead => {}
     }
     if !repo_exists(&request.repo) {
         return Err(Error::Artifact(format!(
@@ -46,16 +53,42 @@ pub async fn run<G: Generator>(
     let slug = request.name.as_deref().unwrap_or(request.goal.as_str());
     let run = store.create_run(date, slug)?;
     run.append_log("stage=pm")?;
-    match crate::pm::write_user_story(generator, &run, &request.goal).await {
+    if let Err(error) = crate::pm::write_user_story(generator, &run, &request.goal).await {
+        let msg = error.to_string();
+        run.write_state("pm", 0, Some(&msg))?;
+        run.append_log(&format!("stage=pm failed: {msg}"))?;
+        return Err(error);
+    }
+    run.write_state("pm", 0, None)?;
+    run.append_log("stage=pm done")?;
+    if request.until == Until::Pm {
+        return Ok(run);
+    }
+
+    let story = read_user_story(&run)?;
+    let bundle = match gather(context, &request.repo, &request.goal) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            let msg = error.to_string();
+            run.write_state("tech-lead", 0, Some(&msg))?;
+            run.append_log(&format!("stage=tech-lead failed: {msg}"))?;
+            return Err(error);
+        }
+    };
+    for warning in &bundle.warnings {
+        run.append_log(&format!("warn: {warning}"))?;
+    }
+    run.append_log("stage=tech-lead")?;
+    match write_tech_spec(generator, &run, &request.goal, &story, &bundle).await {
         Ok(()) => {
-            run.write_state("pm", 0, None)?;
-            run.append_log("stage=pm done")?;
+            run.write_state("tech-lead", 0, None)?;
+            run.append_log("stage=tech-lead done")?;
             Ok(run)
         }
         Err(error) => {
             let msg = error.to_string();
-            run.write_state("pm", 0, Some(&msg))?;
-            run.append_log(&format!("stage=pm failed: {msg}"))?;
+            run.write_state("tech-lead", 0, Some(&msg))?;
+            run.append_log(&format!("stage=tech-lead failed: {msg}"))?;
             Err(error)
         }
     }
@@ -116,6 +149,7 @@ mod tests {
                 article: true,
                 until: Until::Pm,
             },
+            &crate::context::PathProbe,
         )
         .await
         .expect("run");
@@ -145,6 +179,7 @@ mod tests {
                 article: true,
                 until: Until::Pm,
             },
+            &crate::context::PathProbe,
         )
         .await
         .expect_err("empty goal");
@@ -176,6 +211,7 @@ mod tests {
                 article: true,
                 until: Until::Pm,
             },
+            &crate::context::PathProbe,
         )
         .await
         .expect("run");
@@ -212,6 +248,7 @@ mod tests {
                 article: true,
                 until: Until::Pm,
             },
+            &crate::context::PathProbe,
         )
         .await
         .expect_err("invalid story");
@@ -240,6 +277,7 @@ mod tests {
                 article: true,
                 until: Until::Pm,
             },
+            &crate::context::PathProbe,
         )
         .await
         .expect_err("missing repo");
@@ -248,6 +286,77 @@ mod tests {
             other => panic!("expected Artifact, got {other:?}"),
         }
         assert!(!tmp.path().join("artifacts").exists());
+    }
+
+    struct TlProbe;
+
+    impl crate::context::ContextProbe for TlProbe {
+        fn codegraph_available(&self) -> bool {
+            true
+        }
+        fn graphify_available(&self) -> bool {
+            false
+        }
+        fn has_codegraph_index(&self, _repo: &Path) -> bool {
+            true
+        }
+        fn has_graphify_graph(&self, _repo: &Path) -> bool {
+            false
+        }
+        fn run_codegraph(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
+            Ok("src/cli.rs src/pipeline.rs".into())
+        }
+        fn run_graphify(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
+            Err(Error::Context("graphify unused".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_until_tech_lead_writes_spec() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let out = tmp.path().join("artifacts");
+        let store = ArtifactStore::new(&out);
+        let gen = ScriptedGenerator::new();
+        gen.push_text(complete_story());
+        gen.push_text(
+            r#"
+## Impacted files
+- src/cli.rs
+- src/pipeline.rs
+
+## Interfaces / signatures
+run()
+
+## TDD plan
+write a failing test
+
+## Out of scope
+apply the patch
+"#,
+        );
+        let run = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "add status".into(),
+                repo,
+                name: Some("tl".into()),
+                allow_dirty: false,
+                article: true,
+                until: Until::TechLead,
+            },
+            &TlProbe,
+        )
+        .await
+        .expect("run");
+        assert!(run.path.join(crate::pm::USER_STORY_FILE).is_file());
+        assert!(run.path.join(crate::techlead::TECH_SPEC_FILE).is_file());
+        let state = std::fs::read_to_string(run.path.join("pipeline_state.json")).expect("state");
+        assert!(state.contains("tech-lead"), "{state}");
+        assert_eq!(gen.calls().len(), 2);
     }
 
     #[test]

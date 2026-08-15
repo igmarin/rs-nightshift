@@ -36,6 +36,10 @@ pub enum Error {
         /// Human-readable validation failure.
         reason: String,
     },
+
+    /// `codegraph` / `graphify` context gathering failed.
+    #[error("context tools: {0}")]
+    Context(String),
 }
 
 #[cfg(test)]
@@ -82,5 +86,11 @@ mod tests {
             error.to_string(),
             "invalid artifact 01_user_story.md: missing headings: Out of Scope"
         );
+    }
+
+    #[test]
+    fn context_error_displays_message() {
+        let error = Error::Context("codegraph is not on PATH".into());
+        assert_eq!(error.to_string(), "context tools: codegraph is not on PATH");
     }
 }
