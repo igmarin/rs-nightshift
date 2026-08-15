@@ -8,6 +8,7 @@ use rs_nightshift::doctor::{run_doctor, write_report, HttpModelCatalog, PathHost
 use rs_nightshift::models::DEFAULT_OLLAMA_URL;
 use rs_nightshift::ollama::OllamaClient;
 use rs_nightshift::pipeline::{local_date, run, RunRequest};
+use rs_nightshift::testrun::ProcessTestRunner;
 use std::io::{self, Write};
 use std::process;
 
@@ -54,6 +55,7 @@ async fn real_main() -> anyhow::Result<()> {
                     until,
                 },
                 &PathProbe,
+                &ProcessTestRunner::default(),
             )
             .await?;
             writeln!(io::stdout(), "{}", run_dir.path.display())?;

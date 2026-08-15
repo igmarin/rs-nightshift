@@ -15,4 +15,6 @@ pub mod models;
 pub mod ollama;
 pub mod pipeline;
 pub mod pm;
+pub mod qa;
 pub mod techlead;
+pub mod testrun;

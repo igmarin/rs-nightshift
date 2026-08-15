@@ -17,7 +17,7 @@ models, `codegraph`, and `graphify`.
 ```text
 nightshift doctor
 nightshift status [--out DIR]
-nightshift run --goal TEXT --repo PATH --until pm|tech-lead|dev [--name SLUG] [--out DIR] [--allow-dirty]
+nightshift run --goal TEXT --repo PATH --until pm|tech-lead|dev|qa [--name SLUG] [--out DIR] [--allow-dirty]
 ```
 
 `doctor` exits `0` if the environment is ready, `2` if a required check failed.
@@ -32,7 +32,10 @@ One `llama3.2:3b` repair is attempted if validation fails. Spec paths must be a
 subset of tool output. Missing `graphify` is a warning, not a hard fail.
 `--until dev` writes `03_diff.patch`, runs `git apply --check`, then applies.
 The target tree becomes dirty; the pipeline never commits. Dirty trees need
-`--allow-dirty`.
+`--allow-dirty`. `--until qa` runs the repo test command from `nightshift.toml`
+or a detector (`cargo test`, `bundle exec rspec`, `mix test`, `pytest`). The
+command never comes from a model. Failures retry Dev at most three times, then
+write `04_qa_report.json` with `REQUIRES_HUMAN_REVIEW`.
 
 ## Development
 

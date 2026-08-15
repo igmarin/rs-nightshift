@@ -21,6 +21,8 @@ pub enum Until {
     TechLead,
     /// Spec plus applied working-tree patch (no commit).
     Dev,
+    /// Dev plus test loop (max 3) and `04_qa_report.json`.
+    Qa,
 }
 
 /// Supported commands.
@@ -93,6 +95,25 @@ mod tests {
         let err = Cli::try_parse_from(["nightshift", "fly"]).expect_err("unknown");
         let text = err.to_string();
         assert!(text.contains("unrecognized subcommand"), "{text}");
+    }
+
+    #[test]
+    fn parses_run_until_qa() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "run",
+            "--goal",
+            "x",
+            "--repo",
+            ".",
+            "--until",
+            "qa",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run { until, .. } => assert_eq!(until, Until::Qa),
+            other => panic!("expected Run, got {other:?}"),
+        }
     }
 
     #[test]

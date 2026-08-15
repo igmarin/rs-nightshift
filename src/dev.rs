@@ -129,12 +129,18 @@ fn file_slices(repo: &Path, files: &[PathBuf], max_bytes: usize) -> String {
     out
 }
 
-fn dev_prompt(goal: &str, spec: &str, slices: &str) -> String {
+fn dev_prompt(goal: &str, spec: &str, slices: &str, hints: &str) -> String {
+    let hints_block = if hints.is_empty() {
+        String::new()
+    } else {
+        format!("\nQA fix hints from the last failing run:\n{hints}\n")
+    };
     format!(
         "You are the developer for one overnight job.\n\
          Goal:\n{goal}\n\n\
          Tech spec:\n{spec}\n\n\
-         File slices (only these files):\n{slices}\n\n\
+         File slices (only these files):\n{slices}\n\
+         {hints_block}\n\
          Reply with a unified diff only (`diff --git` / `--- a/` / `+++ b/`).\n\
          Do not include files outside the spec. Do not use absolute paths or `..`.\n"
     )
@@ -148,12 +154,13 @@ pub async fn write_and_apply_patch<G: Generator>(
     goal: &str,
     spec: &str,
     files: &[PathBuf],
+    hints: &str,
 ) -> Result<(), Error> {
     let slices = file_slices(repo, files, 16_384);
     let draft = generator
         .generate(
             model_for(Role::Dev),
-            &dev_prompt(goal, spec, &slices),
+            &dev_prompt(goal, spec, &slices, hints),
             ROLE_TEMPERATURE,
         )
         .await?;
@@ -310,6 +317,7 @@ diff --git a/missing.txt b/missing.txt
             "greet",
             "## Impacted files\n- hello.txt\n",
             &[PathBuf::from("hello.txt")],
+            "",
         )
         .await
         .expect("dev");

@@ -1,12 +1,14 @@
 //! Overnight pipeline orchestration.
 
-use crate::artifacts::{ArtifactStore, RunDir};
+use crate::artifacts::{ArtifactStore, QaStatus, RunDir};
 use crate::cli::Until;
 use crate::context::{gather, ContextProbe};
 use crate::dev::{read_tech_spec, working_tree_dirty, write_and_apply_patch};
 use crate::error::Error;
 use crate::generate::Generator;
+use crate::qa::{fix_hints, report_from_outcome, truncate_log, write_qa_report, MAX_ITERATIONS};
 use crate::techlead::{impacted_files, read_user_story, write_tech_spec};
+use crate::testrun::{detect_test_command, TestRunner};
 use std::path::{Path, PathBuf};
 
 /// Arguments for one `nightshift run`.
@@ -26,23 +28,25 @@ pub struct RunRequest {
     pub until: Until,
 }
 
-/// Run implemented stages through `--until pm` or `--until tech-lead`.
-pub async fn run<G, C>(
+/// Run implemented stages through `--until pm`, `tech-lead`, `dev`, or `qa`.
+pub async fn run<G, C, T>(
     generator: &G,
     store: &ArtifactStore,
     date: &str,
     request: &RunRequest,
     context: &C,
+    tests: &T,
 ) -> Result<RunDir, Error>
 where
     G: Generator,
     C: ContextProbe,
+    T: TestRunner,
 {
     if request.goal.trim().is_empty() {
         return Err(Error::Artifact("goal must not be empty".into()));
     }
     match request.until {
-        Until::Pm | Until::TechLead | Until::Dev => {}
+        Until::Pm | Until::TechLead | Until::Dev | Until::Qa => {}
     }
     if !repo_exists(&request.repo) {
         return Err(Error::Artifact(format!(
@@ -51,7 +55,7 @@ where
         )));
     }
     let _ = request.article;
-    if matches!(request.until, Until::Dev)
+    if matches!(request.until, Until::Dev | Until::Qa)
         && working_tree_dirty(&request.repo)?
         && !request.allow_dirty
     {
@@ -102,21 +106,95 @@ where
 
     let spec = read_tech_spec(&run)?;
     let files = impacted_files(&spec);
-    run.append_log("stage=dev")?;
-    match write_and_apply_patch(generator, &run, &request.repo, &request.goal, &spec, &files).await
-    {
-        Ok(()) => {
-            run.write_state("dev", 0, None)?;
-            run.append_log("stage=dev done")?;
-            Ok(run)
-        }
-        Err(error) => {
+    let test_argv = if request.until == Until::Qa {
+        Some(detect_test_command(&request.repo)?)
+    } else {
+        None
+    };
+
+    let mut hints = String::new();
+    for iteration in 1..=MAX_ITERATIONS {
+        run.append_log(&format!("stage=dev iteration={iteration}"))?;
+        if let Err(error) = write_and_apply_patch(
+            generator,
+            &run,
+            &request.repo,
+            &request.goal,
+            &spec,
+            &files,
+            &hints,
+        )
+        .await
+        {
             let msg = error.to_string();
-            run.write_state("dev", 0, Some(&msg))?;
+            run.write_state("dev", iteration, Some(&msg))?;
             run.append_log(&format!("stage=dev failed: {msg}"))?;
-            Err(error)
+            if request.until == Until::Dev || iteration == MAX_ITERATIONS {
+                if request.until == Until::Qa {
+                    let report = crate::artifacts::QaReport {
+                        status: QaStatus::RequiresHumanReview,
+                        iteration,
+                        command: test_argv
+                            .as_ref()
+                            .map(|a| crate::testrun::format_command(a))
+                            .unwrap_or_default(),
+                        exit_code: -1,
+                        summary: "dev apply failed".into(),
+                        fix_hints: msg.clone(),
+                    };
+                    write_qa_report(&run, &report)?;
+                }
+                return Err(error);
+            }
+            hints = msg;
+            continue;
         }
+        run.write_state("dev", iteration, None)?;
+        run.append_log("stage=dev done")?;
+        if request.until == Until::Dev {
+            return Ok(run);
+        }
+
+        let argv = test_argv.as_ref().expect("qa requires argv");
+        run.append_log(&format!("stage=qa iteration={iteration}"))?;
+        let outcome = tests.run(&request.repo, argv)?;
+        let log = truncate_log(&outcome.output);
+        run.append_log(&format!(
+            "tests exit={} bytes={}",
+            outcome.exit_code,
+            log.len()
+        ))?;
+        if outcome.exit_code == 0 {
+            let report = report_from_outcome(&outcome, iteration, QaStatus::Passed, String::new());
+            write_qa_report(&run, &report)?;
+            run.write_state("qa", iteration, None)?;
+            run.append_log("stage=qa PASSED")?;
+            return Ok(run);
+        }
+        if iteration == MAX_ITERATIONS {
+            let report = report_from_outcome(
+                &outcome,
+                iteration,
+                QaStatus::RequiresHumanReview,
+                hints.clone(),
+            );
+            write_qa_report(&run, &report)?;
+            run.write_state("qa", iteration, Some("REQUIRES_HUMAN_REVIEW"))?;
+            run.append_log("stage=qa REQUIRES_HUMAN_REVIEW")?;
+            return Err(Error::Artifact("REQUIRES_HUMAN_REVIEW".into()));
+        }
+        hints = match fix_hints(generator, &outcome).await {
+            Ok(text) => text,
+            Err(error) => {
+                run.append_log(&format!("qa hints failed: {error}"))?;
+                log
+            }
+        };
+        let failed = report_from_outcome(&outcome, iteration, QaStatus::Failed, hints.clone());
+        write_qa_report(&run, &failed)?;
+        run.write_state("qa", iteration, Some("FAILED"))?;
     }
+    Err(Error::Artifact("REQUIRES_HUMAN_REVIEW".into()))
 }
 
 /// Local calendar date as `YYYY-MM-DD` (`date +%Y-%m-%d` on Unix).
@@ -175,6 +253,7 @@ mod tests {
                 until: Until::Pm,
             },
             &crate::context::PathProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -205,6 +284,7 @@ mod tests {
                 until: Until::Pm,
             },
             &crate::context::PathProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect_err("empty goal");
@@ -237,6 +317,7 @@ mod tests {
                 until: Until::Pm,
             },
             &crate::context::PathProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -274,6 +355,7 @@ mod tests {
                 until: Until::Pm,
             },
             &crate::context::PathProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect_err("invalid story");
@@ -303,6 +385,7 @@ mod tests {
                 until: Until::Pm,
             },
             &crate::context::PathProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect_err("missing repo");
@@ -374,6 +457,7 @@ apply the patch
                 until: Until::TechLead,
             },
             &TlProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -401,7 +485,7 @@ apply the patch
             .status();
         std::fs::write(repo.join("hello.txt"), "hello\n").expect("hello");
         assert!(std::process::Command::new("git")
-            .args(["add", "hello.txt"])
+            .args(["add", "."])
             .current_dir(repo)
             .status()
             .expect("add")
@@ -459,6 +543,7 @@ apply the patch
                 until: Until::Dev,
             },
             &HelloProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect_err("dirty");
@@ -516,12 +601,177 @@ diff --git a/hello.txt b/hello.txt
                 until: Until::Dev,
             },
             &HelloProbe,
+            &crate::testrun::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
         assert!(run.path.join(crate::dev::PATCH_FILE).is_file());
         assert!(crate::dev::working_tree_dirty(&repo).expect("dirty"));
         assert_eq!(crate::dev::head_commit(&repo).expect("head"), before);
+    }
+
+    fn qa_story_spec_and_patches(gen: &ScriptedGenerator, patches: &[&str]) {
+        gen.push_text(complete_story());
+        gen.push_text(
+            r#"
+## Impacted files
+- hello.txt
+
+## Interfaces / signatures
+hello
+
+## TDD plan
+n/a
+
+## Out of scope
+commit
+"#,
+        );
+        for patch in patches {
+            gen.push_text(*patch);
+        }
+    }
+
+    const PATCH_V1: &str = "\
+diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello
++hello world
+";
+    const PATCH_V2: &str = "\
+diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello world
++hello world!
+";
+    const PATCH_V3: &str = "\
+diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello world!
++still broken
+";
+
+    #[tokio::test]
+    async fn qa_passing_tests_write_passed_report() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        std::fs::write(repo.join("nightshift.toml"), "[test]\ncommand = \"true\"\n").expect("toml");
+        git_init(&repo);
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        qa_story_spec_and_patches(&gen, &[PATCH_V1]);
+        let runner = crate::testrun::ScriptedRunner::new();
+        runner.push_outcome(0, "ok", &["true".into()]);
+        let run = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "greet".into(),
+                repo,
+                name: Some("qa-pass".into()),
+                allow_dirty: false,
+                article: true,
+                until: Until::Qa,
+            },
+            &HelloProbe,
+            &runner,
+        )
+        .await
+        .expect("run");
+        let report = crate::qa::read_qa_report(&run).expect("report");
+        assert_eq!(report.status, crate::artifacts::QaStatus::Passed);
+        assert_eq!(report.iteration, 1);
+        assert_eq!(report.command, "true");
+        assert_eq!(report.exit_code, 0);
+        let calls = runner.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, ["true"]);
+    }
+
+    #[tokio::test]
+    async fn qa_failing_tests_freeze_after_three_dev_attempts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        std::fs::write(
+            repo.join("nightshift.toml"),
+            "[test]\ncommand = \"false\"\n",
+        )
+        .expect("toml");
+        git_init(&repo);
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        gen.push_text(complete_story());
+        gen.push_text(
+            r#"
+## Impacted files
+- hello.txt
+
+## Interfaces / signatures
+hello
+
+## TDD plan
+n/a
+
+## Out of scope
+commit
+"#,
+        );
+        gen.push_text(PATCH_V1);
+        gen.push_text("hint one");
+        gen.push_text(PATCH_V2);
+        gen.push_text("hint two");
+        gen.push_text(PATCH_V3);
+        let runner = crate::testrun::ScriptedRunner::new();
+        runner.push_outcome(1, "fail 1", &["false".into()]);
+        runner.push_outcome(1, "fail 2", &["false".into()]);
+        runner.push_outcome(1, "fail 3", &["false".into()]);
+        let err = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "greet".into(),
+                repo,
+                name: Some("qa-fail".into()),
+                allow_dirty: false,
+                article: true,
+                until: Until::Qa,
+            },
+            &HelloProbe,
+            &runner,
+        )
+        .await
+        .expect_err("freeze");
+        match err {
+            Error::Artifact(msg) => assert!(msg.contains("REQUIRES_HUMAN_REVIEW"), "{msg}"),
+            other => panic!("expected Artifact, got {other:?}"),
+        }
+        let latest = store.root().join("latest");
+        let report =
+            crate::qa::read_qa_report(&crate::artifacts::RunDir { path: latest }).expect("report");
+        assert_eq!(
+            report.status,
+            crate::artifacts::QaStatus::RequiresHumanReview
+        );
+        assert_eq!(report.iteration, 3);
+        assert_eq!(report.command, "false");
+        let test_calls = runner.calls.lock().expect("calls");
+        assert_eq!(test_calls.len(), 3);
+        let dev_calls = gen
+            .calls()
+            .into_iter()
+            .filter(|c| c.model == crate::models::model_for(crate::models::Role::Dev))
+            .count();
+        assert_eq!(dev_calls, 3);
     }
 
     #[test]
