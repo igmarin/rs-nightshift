@@ -129,6 +129,7 @@ in [`dist-workspace.toml`](dist-workspace.toml)):
 1. Bump `version` in `Cargo.toml` (and `Cargo.lock`) and merge it.
 2. Tag the merge commit: `git tag v0.1.0`.
 3. `git push origin v0.1.0`.
+4. After `dist generate`, re-pin workflow actions and run `scripts/check-action-pins.sh`.
 
 The tag triggers `release.yml`, which first runs the CI-equivalent gate in
 [`.github/workflows/release-checks.yml`](.github/workflows/release-checks.yml)
