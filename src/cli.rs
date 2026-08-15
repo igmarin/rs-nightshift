@@ -57,9 +57,9 @@ pub enum Command {
         #[arg(long = "article", default_value_t = true, overrides_with = "article")]
         #[arg(long = "no-article", action = clap::ArgAction::SetFalse)]
         article: bool,
-        /// Stop after this stage. Required until the full pipeline exists.
+        /// Stop after this stage. Omit to run QA and optionally Writer.
         #[arg(long, value_enum)]
-        until: Until,
+        until: Option<Until>,
     },
 }
 
@@ -111,7 +111,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Run { until, .. } => assert_eq!(until, Until::Qa),
+            Command::Run { until, .. } => assert_eq!(until, Some(Until::Qa)),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -130,7 +130,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Run { until, .. } => assert_eq!(until, Until::Dev),
+            Command::Run { until, .. } => assert_eq!(until, Some(Until::Dev)),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -149,7 +149,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Run { until, .. } => assert_eq!(until, Until::TechLead),
+            Command::Run { until, .. } => assert_eq!(until, Some(Until::TechLead)),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -183,7 +183,7 @@ mod tests {
                 assert_eq!(out, PathBuf::from("artifacts"));
                 assert!(!allow_dirty);
                 assert!(article);
-                assert_eq!(until, Until::Pm);
+                assert_eq!(until, Some(Until::Pm));
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -204,8 +204,6 @@ mod tests {
             "/tmp/ns",
             "--allow-dirty",
             "--no-article",
-            "--until",
-            "pm",
         ])
         .expect("parse");
         match cli.command {
@@ -221,28 +219,18 @@ mod tests {
                 assert_eq!(out, PathBuf::from("/tmp/ns"));
                 assert!(allow_dirty);
                 assert!(!article);
-                assert_eq!(until, Until::Pm);
+                assert_eq!(until, None);
             }
             other => panic!("expected Run, got {other:?}"),
         }
     }
 
     #[test]
-    fn run_requires_goal_repo_and_until() {
+    fn run_requires_goal_and_repo() {
         let err = Cli::try_parse_from(["nightshift", "run"]).expect_err("required");
         let text = err.to_string();
         assert!(
-            text.contains("required")
-                || text.contains("--goal")
-                || text.contains("--repo")
-                || text.contains("--until"),
-            "{text}"
-        );
-        let err = Cli::try_parse_from(["nightshift", "run", "--goal", "x", "--repo", "."])
-            .expect_err("until required");
-        let text = err.to_string();
-        assert!(
-            text.contains("--until") || text.contains("required"),
+            text.contains("required") || text.contains("--goal") || text.contains("--repo"),
             "{text}"
         );
     }

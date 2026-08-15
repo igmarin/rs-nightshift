@@ -9,6 +9,7 @@ use crate::generate::Generator;
 use crate::qa::{fix_hints, report_from_outcome, truncate_log, write_qa_report, MAX_ITERATIONS};
 use crate::techlead::{impacted_files, read_user_story, write_tech_spec};
 use crate::testrun::{detect_test_command, TestRunner};
+use crate::writer::write_article;
 use std::path::{Path, PathBuf};
 
 /// Arguments for one `nightshift run`.
@@ -24,11 +25,11 @@ pub struct RunRequest {
     pub allow_dirty: bool,
     /// Write the Writer article after PASSED (later task).
     pub article: bool,
-    /// Stage to stop after (required until the full pipeline exists).
-    pub until: Until,
+    /// Optional early stop. `None` runs QA and Writer (when `--article`).
+    pub until: Option<Until>,
 }
 
-/// Run implemented stages through `--until pm`, `tech-lead`, `dev`, or `qa`.
+/// Run implemented stages. Omit `until` for QA plus Writer when `--article`.
 pub async fn run<G, C, T>(
     generator: &G,
     store: &ArtifactStore,
@@ -46,7 +47,7 @@ where
         return Err(Error::Artifact("goal must not be empty".into()));
     }
     match request.until {
-        Until::Pm | Until::TechLead | Until::Dev | Until::Qa => {}
+        None | Some(Until::Pm | Until::TechLead | Until::Dev | Until::Qa) => {}
     }
     if !repo_exists(&request.repo) {
         return Err(Error::Artifact(format!(
@@ -54,8 +55,7 @@ where
             request.repo.display()
         )));
     }
-    let _ = request.article;
-    if matches!(request.until, Until::Dev | Until::Qa)
+    if matches!(request.until, None | Some(Until::Dev | Until::Qa))
         && working_tree_dirty(&request.repo)?
         && !request.allow_dirty
     {
@@ -74,7 +74,7 @@ where
     }
     run.write_state("pm", 0, None)?;
     run.append_log("stage=pm done")?;
-    if request.until == Until::Pm {
+    if request.until == Some(Until::Pm) {
         return Ok(run);
     }
 
@@ -100,13 +100,13 @@ where
     }
     run.write_state("tech-lead", 0, None)?;
     run.append_log("stage=tech-lead done")?;
-    if request.until == Until::TechLead {
+    if request.until == Some(Until::TechLead) {
         return Ok(run);
     }
 
     let spec = read_tech_spec(&run)?;
     let files = impacted_files(&spec);
-    let test_argv = if request.until == Until::Qa {
+    let test_argv = if matches!(request.until, None | Some(Until::Qa)) {
         Some(detect_test_command(&request.repo)?)
     } else {
         None
@@ -129,8 +129,8 @@ where
             let msg = error.to_string();
             run.write_state("dev", iteration, Some(&msg))?;
             run.append_log(&format!("stage=dev failed: {msg}"))?;
-            if request.until == Until::Dev || iteration == MAX_ITERATIONS {
-                if request.until == Until::Qa {
+            if request.until == Some(Until::Dev) || iteration == MAX_ITERATIONS {
+                if matches!(request.until, None | Some(Until::Qa)) {
                     let report = crate::artifacts::QaReport {
                         status: QaStatus::RequiresHumanReview,
                         iteration,
@@ -151,7 +151,7 @@ where
         }
         run.write_state("dev", iteration, None)?;
         run.append_log("stage=dev done")?;
-        if request.until == Until::Dev {
+        if request.until == Some(Until::Dev) {
             return Ok(run);
         }
 
@@ -169,7 +169,26 @@ where
             write_qa_report(&run, &report)?;
             run.write_state("qa", iteration, None)?;
             run.append_log("stage=qa PASSED")?;
-            return Ok(run);
+            if request.until == Some(Until::Qa) {
+                return Ok(run);
+            }
+            if !request.article {
+                return Ok(run);
+            }
+            run.append_log("stage=writer")?;
+            match write_article(generator, &run, &request.goal).await {
+                Ok(()) => {
+                    run.write_state("writer", iteration, None)?;
+                    run.append_log("stage=writer done")?;
+                    return Ok(run);
+                }
+                Err(error) => {
+                    let msg = error.to_string();
+                    run.write_state("writer", iteration, Some(&msg))?;
+                    run.append_log(&format!("stage=writer failed: {msg}"))?;
+                    return Err(error);
+                }
+            }
         }
         if iteration == MAX_ITERATIONS {
             let report = report_from_outcome(
@@ -250,7 +269,7 @@ mod tests {
                 name: Some("status".into()),
                 allow_dirty: false,
                 article: true,
-                until: Until::Pm,
+                until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -281,7 +300,7 @@ mod tests {
                 name: None,
                 allow_dirty: false,
                 article: true,
-                until: Until::Pm,
+                until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -314,7 +333,7 @@ mod tests {
                 name: Some("../../outside".into()),
                 allow_dirty: false,
                 article: true,
-                until: Until::Pm,
+                until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -352,7 +371,7 @@ mod tests {
                 name: Some("fail".into()),
                 allow_dirty: false,
                 article: true,
-                until: Until::Pm,
+                until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -382,7 +401,7 @@ mod tests {
                 name: None,
                 allow_dirty: false,
                 article: true,
-                until: Until::Pm,
+                until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -454,7 +473,7 @@ apply the patch
                 name: Some("tl".into()),
                 allow_dirty: false,
                 article: true,
-                until: Until::TechLead,
+                until: Some(Until::TechLead),
             },
             &TlProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -540,7 +559,7 @@ apply the patch
                 name: None,
                 allow_dirty: false,
                 article: true,
-                until: Until::Dev,
+                until: Some(Until::Dev),
             },
             &HelloProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -598,7 +617,7 @@ diff --git a/hello.txt b/hello.txt
                 name: Some("dev".into()),
                 allow_dirty: false,
                 article: true,
-                until: Until::Dev,
+                until: Some(Until::Dev),
             },
             &HelloProbe,
             &crate::testrun::ProcessTestRunner::default(),
@@ -679,7 +698,7 @@ diff --git a/hello.txt b/hello.txt
                 name: Some("qa-pass".into()),
                 allow_dirty: false,
                 article: true,
-                until: Until::Qa,
+                until: Some(Until::Qa),
             },
             &HelloProbe,
             &runner,
@@ -694,6 +713,84 @@ diff --git a/hello.txt b/hello.txt
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, ["true"]);
+        assert!(!run.path.join(crate::writer::ARTICLE_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn full_run_writes_article_when_tests_pass() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        std::fs::write(repo.join("nightshift.toml"), "[test]\ncommand = \"true\"\n").expect("toml");
+        git_init(&repo);
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        qa_story_spec_and_patches(&gen, &[PATCH_V1]);
+        gen.push_text("# Article\nNothing was committed.\n");
+        let runner = crate::testrun::ScriptedRunner::new();
+        runner.push_outcome(0, "ok", &["true".into()]);
+        let run = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "greet".into(),
+                repo,
+                name: Some("full".into()),
+                allow_dirty: false,
+                article: true,
+                until: None,
+            },
+            &HelloProbe,
+            &runner,
+        )
+        .await
+        .expect("run");
+        assert!(run.path.join(crate::pm::USER_STORY_FILE).is_file());
+        assert!(run.path.join(crate::techlead::TECH_SPEC_FILE).is_file());
+        assert!(run.path.join(crate::dev::PATCH_FILE).is_file());
+        assert!(run.path.join(crate::qa::QA_REPORT_FILE).is_file());
+        assert!(run.path.join(crate::writer::ARTICLE_FILE).is_file());
+        assert!(run.path.join("run.log").is_file());
+        let log = std::fs::read_to_string(run.path.join("run.log")).expect("log");
+        assert!(log.contains("stage=writer done"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn writer_failure_after_pass_keeps_qa_passed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        std::fs::write(repo.join("nightshift.toml"), "[test]\ncommand = \"true\"\n").expect("toml");
+        git_init(&repo);
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let gen = ScriptedGenerator::new();
+        qa_story_spec_and_patches(&gen, &[PATCH_V1]);
+        gen.push_text("   \n");
+        let runner = crate::testrun::ScriptedRunner::new();
+        runner.push_outcome(0, "ok", &["true".into()]);
+        let err = run(
+            &gen,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "greet".into(),
+                repo,
+                name: Some("writer-fail".into()),
+                allow_dirty: false,
+                article: true,
+                until: None,
+            },
+            &HelloProbe,
+            &runner,
+        )
+        .await
+        .expect_err("writer");
+        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        let latest = store.root().join("latest");
+        let report =
+            crate::qa::read_qa_report(&crate::artifacts::RunDir { path: latest }).expect("report");
+        assert_eq!(report.status, crate::artifacts::QaStatus::Passed);
     }
 
     #[tokio::test]
@@ -744,7 +841,7 @@ commit
                 name: Some("qa-fail".into()),
                 allow_dirty: false,
                 article: true,
-                until: Until::Qa,
+                until: Some(Until::Qa),
             },
             &HelloProbe,
             &runner,

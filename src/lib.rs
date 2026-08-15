@@ -18,3 +18,4 @@ pub mod pm;
 pub mod qa;
 pub mod techlead;
 pub mod testrun;
+pub mod writer;

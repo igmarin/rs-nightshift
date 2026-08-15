@@ -1,41 +1,95 @@
 # rs-nightshift
 
-Rust CLI harness that runs one unattended software-engineering job against a
-local Ollama server. The operator starts `nightshift` on the **server** (tmux or
-systemd), disconnects, and reviews the working-tree diff in the morning.
+Rust CLI that runs **one** unattended software-engineering job on a **server**.
+The operator SSHs in, starts `nightshift` under tmux or systemd, and disconnects.
+In the morning they review the dirty working tree in Zed (or a terminal) and
+either commit or restore.
 
-The pipeline never commits.
+The pipeline never commits, pushes, resets, or cleans.
 
-## Status
+## Server vs laptop
 
-This repository is being built in stacked PRs. The first slice is
-`nightshift doctor`: it checks whether the server has Rust, Ollama, the required
-models, `codegraph`, and `graphify`.
+```text
+[laptop]  SSH start  →  [server: tmux or systemd]
+                         nightshift run --goal … --repo …
+                         (operator disconnects; process keeps running)
+[laptop]  SSH / Zed  ←  morning: status, git diff, commit or restore
+```
+
+`nightshift` does not daemonize itself.
+
+## Prerequisites (server)
+
+- Rust (mise or rustup)
+- Ollama listening on `127.0.0.1:11434` with these tags:
+  `llama3.2:3b`, `llama3.1:8b`, `mistral-nemo:12b`, `qwen2.5-coder:7b`,
+  `deepseek-r1:7b`, `gemma2:9b`, `phi3.5:latest`
+- `codegraph` and `graphify` on `PATH`
+- Pre-build `.codegraph/` in the target repo (`codegraph init`). Optional:
+  `graphify-out/graph.json` for Tech Lead context. Nightshift will `codegraph
+  init` once if the index is missing. It never rebuilds a full graphify corpus.
+
+```text
+nightshift doctor
+```
+
+`doctor` exits `0` if the environment is ready, `2` if a required check failed.
 
 ## Commands
 
 ```text
 nightshift doctor
 nightshift status [--out DIR]
-nightshift run --goal TEXT --repo PATH --until pm|tech-lead|dev|qa [--name SLUG] [--out DIR] [--allow-dirty]
+nightshift run --goal TEXT --repo PATH [--name SLUG] [--out DIR] [--allow-dirty] [--article|--no-article] [--until pm|tech-lead|dev|qa]
 ```
 
-`doctor` exits `0` if the environment is ready, `2` if a required check failed.
+Omit `--until` for a full run: PM → Tech Lead → Dev apply → QA (max 3) → Writer
+(if `--article`, default on, and QA `PASSED`).
 
-`status` prints `PASSED`, `FAILED`, or `REQUIRES_HUMAN_REVIEW` from
-`./artifacts/latest/04_qa_report.json`. It exits `2` when no QA report exists.
+`--until` is a debug stop. `--allow-dirty` is required when the target tree is
+already dirty. The test argv comes from `nightshift.toml` or a detector
+(`cargo test`, `bundle exec rspec`, `mix test`, `pytest`) — never from a model.
 
-`run --until pm` writes `01_user_story.md` with Problem Statement, User Stories,
-Acceptance Criteria, and Out of Scope. `--until tech-lead` also writes
-`02_tech_spec.md` from `codegraph` (and `graphify query` when a graph exists).
-One `llama3.2:3b` repair is attempted if validation fails. Spec paths must be a
-subset of tool output. Missing `graphify` is a warning, not a hard fail.
-`--until dev` writes `03_diff.patch`, runs `git apply --check`, then applies.
-The target tree becomes dirty; the pipeline never commits. Dirty trees need
-`--allow-dirty`. `--until qa` runs the repo test command from `nightshift.toml`
-or a detector (`cargo test`, `bundle exec rspec`, `mix test`, `pytest`). The
-command never comes from a model. Failures retry Dev at most three times, then
-write `04_qa_report.json` with `REQUIRES_HUMAN_REVIEW`.
+## Detach overnight
+
+tmux:
+
+```text
+tmux new -s nightshift
+nightshift run --goal "…" --repo /path/to/checkout --out ./artifacts
+# detach: Ctrl-b d
+```
+
+systemd: copy [`contrib/nightshift.service`](contrib/nightshift.service), edit
+the goal and paths, then `systemctl start --no-block nightshift.service`.
+
+Progress is always appended to `artifacts/latest/run.log` (no TTY required).
+
+## Morning checklist
+
+1. `nightshift status` — read `PASSED` / `FAILED` / `REQUIRES_HUMAN_REVIEW`.
+   `status` is the QA verdict. If Writer failed after green tests the process
+   exits non-zero, `run.log` notes the missing article, and `status` still
+   prints `PASSED`.
+2. `git diff` in the target repo (unstaged). Edit if needed.
+3. Open `artifacts/latest/05_article_draft.md` if the run used `--article`.
+4. `git commit` or restore. Nightshift will not do this for you.
+
+If QA froze (`REQUIRES_HUMAN_REVIEW`), the last apply may still be in the tree.
+Restore with your usual git workflow (`git checkout -- .` / `git restore`).
+
+## Artifacts
+
+`artifacts/YYYY-MM-DD_<slug>/` (and `artifacts/latest`):
+
+| File | When |
+| :--- | :--- |
+| `01_user_story.md` | PM |
+| `02_tech_spec.md` | Tech Lead (`codegraph` / optional `graphify query`) |
+| `03_diff.patch` | Dev (`git apply --check` then apply) |
+| `04_qa_report.json` | QA |
+| `05_article_draft.md` | Writer, only if PASSED and `--article` |
+| `pipeline_state.json`, `run.log` | always |
 
 ## Development
 
