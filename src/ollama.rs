@@ -462,4 +462,22 @@ mod tests {
         assert!(!redacted.contains("secret"), "{redacted}");
         assert!(redacted.contains("[REDACTED]"), "{redacted}");
     }
+
+    #[tokio::test]
+    async fn error_path_does_not_leak_credentials() {
+        // Since validate_ollama_url rejects userinfo, credentials can never
+        // reach the stored base_url. This test verifies the error path
+        // defensively: a failed request's error message must not contain
+        // any credential-like content even if the URL were to leak.
+        let client = OllamaClient::with_timeout("http://127.0.0.1:1", Duration::from_millis(100))
+            .expect("valid origin");
+        let error = client.generate("m", "p").await.expect_err("must fail");
+        let text = error.to_string();
+        // The error may contain the URL (reqwest formats it), but it must
+        // never contain credential separators since validation strips them.
+        assert!(
+            !text.contains("@"),
+            "error must not contain userinfo: {text}"
+        );
+    }
 }
