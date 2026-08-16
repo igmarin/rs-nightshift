@@ -25,6 +25,10 @@ rust-toolchain-version = "1.88.0"
 plan-jobs = ["./release-checks"]
 # No crates.io publish: this is a binary-only release.
 publish-jobs = []
+# Allow hand-edits to the generated GitHub Actions workflow so we can
+# apply least-privilege permissions (cargo-dist 0.32.0 has no config key
+# for workflow-level permissions). `dist plan` tolerates the drift.
+allow-dirty = ["ci"]
 
 # Keep generated GitHub Actions pinned to commit SHAs.
 [dist.github-action-commits]
