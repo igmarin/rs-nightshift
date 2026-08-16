@@ -41,7 +41,7 @@ async fn real_main() -> anyhow::Result<()> {
                     process::exit(report.exit_code());
                 }
             };
-            let catalog = HttpModelCatalog::new(&validated_url)?;
+            let catalog = HttpModelCatalog::new(validated_url.as_str())?;
             let mut report = run_doctor(&catalog, &PathHost).await?;
             report.checks.insert(
                 0,
@@ -68,7 +68,7 @@ async fn real_main() -> anyhow::Result<()> {
             article,
             until,
         } => {
-            let client = OllamaClient::new(&ollama_url)?;
+            let client = OllamaClient::new(ollama_url.as_str())?;
             let run_dir = run(
                 &client,
                 &ArtifactStore::new(out),

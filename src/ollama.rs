@@ -47,14 +47,33 @@ pub fn redact_ollama_url(value: &str) -> String {
     }
     parsed.set_query(None);
     parsed.set_fragment(None);
-    parsed.to_string().trim_end_matches('/').to_owned()
+    let result = parsed.to_string().trim_end_matches('/').to_owned();
+    // If the parsed URL still contains @, the original value may have
+    // credentials in an unexpected position (e.g. a non-http scheme where
+    // Url::parse treats userinfo as part of the path). Fall back to the
+    // conservative unparsed redactor so credentials never leak.
+    if result.contains('@') {
+        redact_unparsed_url(value)
+    } else {
+        result
+    }
 }
 
 fn redact_unparsed_url(value: &str) -> String {
     let end = value.find(['?', '#']).unwrap_or(value.len());
     let value = &value[..end];
-    let Some(authority_start) = value.find("://").map(|index| index + 3) else {
-        return value.to_owned();
+    let authority_start = match value.find("://") {
+        Some(index) => index + 3,
+        None => {
+            // No scheme separator; conservatively redact anything before
+            // the first @ (up to the first /) so malformed URLs without a
+            // scheme cannot leak userinfo-like credentials.
+            let slash = value.find('/').unwrap_or(value.len());
+            return match value[..slash].rfind('@') {
+                Some(at) => format!("[REDACTED]@{}", &value[at + 1..]),
+                None => value.to_owned(),
+            };
+        }
     };
     let authority_end = value[authority_start..]
         .find('/')
@@ -418,5 +437,14 @@ mod tests {
         let text = error.to_string();
         assert!(!text.contains("secret"), "{text}");
         assert!(text.contains("[REDACTED]"), "{text}");
+    }
+
+    #[test]
+    fn redacts_unparsed_url_without_scheme() {
+        // A malformed URL without :// must still redact userinfo-like content
+        // so credentials never leak into error messages.
+        let redacted = redact_ollama_url("user:secret@host");
+        assert!(!redacted.contains("secret"), "{redacted}");
+        assert!(redacted.contains("[REDACTED]"), "{redacted}");
     }
 }
