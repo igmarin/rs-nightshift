@@ -29,18 +29,25 @@ pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
 }
 
-/// Redact password credentials from an Ollama URL before reporting it.
+/// Redact userinfo credentials from an Ollama URL before reporting it.
+///
+/// Both the username and password are stripped so that neither credential
+/// form (username-only tokens or username/password pairs) leaks into
+/// operator-facing logs or error messages. Only the scheme, host, and port
+/// are preserved.
 #[must_use]
 pub fn redact_ollama_url(value: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(value) else {
         return redact_unparsed_url(value);
     };
-    if parsed.password().is_some() && parsed.set_password(Some("[REDACTED]")).is_err() {
+    // Clear the entire userinfo so username-only and username-password
+    // credentials are both removed before the URL is reported.
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
         return redact_unparsed_url(value);
     }
     parsed.set_query(None);
     parsed.set_fragment(None);
-    parsed.to_string()
+    parsed.to_string().trim_end_matches('/').to_owned()
 }
 
 fn redact_unparsed_url(value: &str) -> String {
@@ -372,11 +379,34 @@ mod tests {
     }
 
     #[test]
-    fn redacts_ollama_password() {
+    fn redacts_ollama_userinfo_username_and_password() {
         let redacted = redact_ollama_url("http://user:secret@example.test:11434");
-        assert!(redacted.contains("user"), "{redacted}");
+        assert!(!redacted.contains("user"), "{redacted}");
         assert!(!redacted.contains("secret"), "{redacted}");
-        assert!(redacted.contains("REDACTED"), "{redacted}");
+        assert!(!redacted.contains('@'), "{redacted}");
+        assert_eq!(redacted, "http://example.test:11434");
+    }
+
+    #[test]
+    fn redacts_ollama_userinfo_username_only() {
+        let redacted = redact_ollama_url("http://api-token@example.test:11434");
+        assert!(!redacted.contains("api-token"), "{redacted}");
+        assert!(!redacted.contains('@'), "{redacted}");
+        assert_eq!(redacted, "http://example.test:11434");
+    }
+
+    #[test]
+    fn redacts_ollama_userinfo_preserves_scheme_host_port() {
+        let redacted = redact_ollama_url("https://token:pass@host.local:8080");
+        assert_eq!(redacted, "https://host.local:8080");
+    }
+
+    #[test]
+    fn redacts_ollama_userinfo_no_credentials() {
+        assert_eq!(
+            redact_ollama_url("http://example.test:11434"),
+            "http://example.test:11434"
+        );
     }
 
     #[test]
