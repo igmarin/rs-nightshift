@@ -63,15 +63,32 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("nightshift.toml"))
 }
 
+/// Whether `NIGHTSHIFT_CONFIG` was explicitly set by the operator.
+fn config_path_is_explicit() -> bool {
+    std::env::var_os("NIGHTSHIFT_CONFIG").is_some()
+}
+
 /// Load models configuration from a specific file path.
 ///
-/// A missing file is treated as an empty configuration (all defaults).
-/// A read or parse error is returned so the caller can surface it to the
-/// operator instead of silently falling back to defaults.
+/// A missing file is treated as an empty configuration (all defaults)
+/// when it is the ambient default path. When `NIGHTSHIFT_CONFIG` was
+/// explicitly set and the file is missing, an error is returned so the
+/// operator learns about the mistake instead of silently falling back.
+/// Read and parse errors are always returned.
 pub fn load_models_config_from(path: &Path) -> Result<ModelsConfig, Error> {
+    load_models_config_from_inner(path, config_path_is_explicit())
+}
+
+fn load_models_config_from_inner(path: &Path, explicit_path: bool) -> Result<ModelsConfig, Error> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if explicit_path {
+                return Err(Error::Config {
+                    path: path.display().to_string(),
+                    message: "file not found (NIGHTSHIFT_CONFIG was set explicitly)".into(),
+                });
+            }
             return Ok(ModelsConfig::default());
         }
         Err(error) => {
@@ -89,10 +106,18 @@ pub fn load_models_config_from(path: &Path) -> Result<ModelsConfig, Error> {
 
 /// Load the models configuration from the ambient config path.
 ///
-/// Errors are swallowed here so the pipeline stays infallible at runtime;
-/// `doctor` surfaces config problems via [`load_models_config_from`].
+/// Errors are logged to stderr so the operator sees them in `run.log`
+/// even in the unattended SSH/tmux workflow, then defaults are used so
+/// the pipeline stays infallible. `doctor` surfaces the same errors via
+/// [`load_models_config_from`].
 fn load_models_config() -> ModelsConfig {
-    load_models_config_from(&config_path()).unwrap_or_default()
+    match load_models_config_from(&config_path()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("warning: {error}; using default models");
+            ModelsConfig::default()
+        }
+    }
 }
 
 /// Resolve the model tag for a role using the given config, falling back to defaults.
@@ -172,11 +197,24 @@ mod tests {
     }
 
     #[test]
-    fn load_config_from_missing_file_uses_defaults() {
+    fn load_config_from_missing_default_file_uses_defaults() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nightshift.toml");
-        let config = load_models_config_from(&path).expect("missing file is ok");
+        // explicit=false: ambient default path missing is Ok (all defaults).
+        let config = load_models_config_from_inner(&path, false).expect("missing default is ok");
         assert!(config.role_models.is_empty());
+    }
+
+    #[test]
+    fn load_config_from_missing_explicit_file_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nightshift.toml");
+        // explicit=true: NIGHTSHIFT_CONFIG was set, so a missing file is an error.
+        let error =
+            load_models_config_from_inner(&path, true).expect_err("missing explicit must error");
+        let text = error.to_string();
+        assert!(text.contains("config error"), "{text}");
+        assert!(text.contains("NIGHTSHIFT_CONFIG"), "{text}");
     }
 
     #[test]
@@ -188,7 +226,7 @@ mod tests {
             "role_models = { Dev = \"qwen2.5-coder:14b\", Router = \"llama3.2:3b\" }\n",
         )
         .expect("write");
-        let config = load_models_config_from(&path).expect("valid config");
+        let config = load_models_config_from_inner(&path, false).expect("valid config");
         assert_eq!(
             config.role_models.get("Dev"),
             Some(&"qwen2.5-coder:14b".to_string())
@@ -200,7 +238,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nightshift.toml");
         std::fs::write(&path, "not = valid = toml\n").expect("write");
-        let error = load_models_config_from(&path).expect_err("malformed must error");
+        let error = load_models_config_from_inner(&path, false).expect_err("malformed must error");
         let text = error.to_string();
         assert!(text.contains("config error"), "{text}");
         assert!(text.contains("nightshift.toml"), "{text}");
