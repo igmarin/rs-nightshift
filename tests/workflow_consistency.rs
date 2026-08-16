@@ -25,6 +25,7 @@ const REQUIRED_GATES: &[(&str, &str)] = &[
         "cargo clippy --all-targets --all-features -- -D warnings",
     ),
     ("test", "cargo test"),
+    ("doc-test", "cargo test --doc"),
     (
         "coverage",
         "cargo llvm-cov --workspace --fail-under-lines 85",
