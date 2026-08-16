@@ -1,91 +1,205 @@
 # rs-nightshift
 
-Rust CLI that runs **one** unattended software-engineering job on a **server**.
-The operator SSHs in, starts `nightshift` under tmux or systemd, and disconnects.
-In the morning they review the dirty working tree in Zed (or a terminal) and
-either commit or restore.
+Runs one unattended software-engineering job on a server while you sleep.
 
-The pipeline never commits, pushes, resets, or cleans.
+You SSH in, start `nightshift run` under tmux or systemd, and disconnect. In the
+morning you review the dirty working tree and either commit or restore. The
+pipeline never commits, pushes, resets, or cleans — that's your call.
+
+## How it works
+
+```text
+You:  nightshift run --goal "add status command" --repo ~/projects/my-app
+        │
+        ▼
+  PM stage         writes 01_user_story.md      (llama3.1:8b)
+        │
+        ▼
+  Tech Lead        writes 02_tech_spec.md       (mistral-nemo:12b)
+  stage            uses codegraph + graphify for repo context
+        │
+        ▼
+  Dev stage        writes 03_diff.patch          (qwen2.5-coder:7b)
+  (max 3           applies it with git apply
+   iterations)        │
+        │            ▼
+        │         QA stage        runs your test suite      (deepseek-r1:7b)
+        │         (tests fail?)──→ reasons about the failure
+        │              │               sends hints back to Dev
+        │              ▼
+        ▼         tests pass
+  Writer stage     writes 05_article_draft.md   (gemma2:9b)
+        │
+        ▼
+  Done.  Artifacts in artifacts/YYYY-MM-DD_<slug>/
+```
+
+The pipeline never commits, pushes, resets, or cleans. In the morning you get a
+dirty working tree and a set of artifacts — you decide what to keep.
 
 ## Install
-
-Prebuilt `nightshift` binaries are published on every `vX.Y.Z` tag for Linux
-(`x86_64`, `aarch64`) and macOS (`x86_64`, `aarch64`):
 
 ```text
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/igmarin/rs-nightshift/releases/latest/download/rs-nightshift-installer.sh | sh
 ```
 
-The script picks the tarball for the host triple, verifies the published
-`sha256` checksum, and installs `nightshift` on `PATH` (`$CARGO_HOME/bin`,
-usually `~/.cargo/bin`; add it to `PATH` if your shell does not already). Each
-release also carries per-target `.tar.xz` archives and a `sha256.sum` file for
-manual installs.
+The script picks the right tarball for your platform, verifies the checksum, and
+puts `nightshift` on `PATH` (`~/.cargo/bin`). Prebuilt binaries are available
+for Linux (`x86_64`, `aarch64`) and macOS (`x86_64`, `aarch64`).
 
-The binary is portable, but a full `run` still needs a prepared server: Ollama
-with the role models plus `codegraph` and `graphify` on `PATH` — see
-[Prerequisites (server)](#prerequisites-server) and run `nightshift doctor`
-after installing.
+No Rust toolchain required on the server — the binary is self-contained.
 
-## Server vs laptop
+## Prerequisites
 
-```text
-[laptop]  SSH start  →  [server: tmux or systemd]
-                         nightshift run --goal … --repo …
-                         (operator disconnects; process keeps running)
-[laptop]  SSH / Zed  ←  morning: status, git diff, commit or restore
-```
+Before your first run, the server needs:
 
-`nightshift` does not daemonize itself.
-
-## Prerequisites (server)
-
-- Rust (mise or rustup)
-- Ollama listening on `127.0.0.1:11434` with these tags:
+- **Ollama** listening on `127.0.0.1:11434` with these models pulled:
   `llama3.2:3b`, `llama3.1:8b`, `mistral-nemo:12b`, `qwen2.5-coder:7b`,
   `deepseek-r1:7b`, `gemma2:9b`, `phi3.5:latest`
-- `codegraph` and `graphify` on `PATH`
-- Pre-build `.codegraph/` in the target repo (`codegraph init`). Optional:
-  `graphify-out/graph.json` for Tech Lead context. Nightshift will `codegraph
-  init` once if the index is missing. It never rebuilds a full graphify corpus.
+- **codegraph** and **graphify** on `PATH`
+- **Rust** (mise or rustup) — needed by the target repo's build, not by nightshift itself
+
+Check everything is ready:
+
+```text
+nightshift doctor
+```
+
+Exits `0` if the server is ready, `2` if a required check failed. You can also
+point at a non-default Ollama URL:
+
+```text
+nightshift doctor --ollama-url http://10.0.0.5:11434
+```
+
+## Quick start
+
+### 1. Prepare the target repo
+
+Nightshift needs a `.codegraph/` index in the target repo to give the Tech Lead
+stage structural context. Build it once:
+
+```text
+cd ~/projects/my-app
+codegraph init
+```
+
+Optional but recommended: run `graphify .` in the repo root to produce
+`graphify-out/graph.json` for richer Tech Lead context.
+
+### 2. Start the run
+
+Use tmux so you can disconnect:
+
+```text
+tmux new -s nightshift
+# inside tmux:
+nightshift run --goal "add a /health endpoint that returns 200 OK" --repo ~/projects/my-app
+# detach: Ctrl-b d
+```
+
+Or use systemd with the bundled
+[`contrib/nightshift.service`](contrib/nightshift.service) — edit the goal and
+paths, then `systemctl start --no-block nightshift.service`.
+
+Progress is always appended to `artifacts/latest/run.log` — no TTY needed.
+
+### 3. Check progress (optional)
+
+From another SSH session:
+
+```text
+tail -f ~/projects/my-app/artifacts/latest/run.log
+```
+
+You'll see lines like:
+
+```text
+stage=pm
+stage=pm done
+stage=tech-lead
+stage=tech-lead done
+stage=dev iteration=1
+stage=dev done
+```
+
+### 4. Morning: review the results
+
+```text
+nightshift status
+```
+
+This prints `PASSED`, `FAILED`, or `REQUIRES_HUMAN_REVIEW` based on the QA
+report. Then review what changed:
+
+```text
+cd ~/projects/my-app
+git diff
+```
+
+The pipeline applied a patch to your working tree (unstaged). Review it, edit if
+needed, and either commit or restore:
+
+```text
+git commit -am "add /health endpoint"
+# or restore:
+git restore <file>    # selective
+```
+
+Nightshift won't do this for you.
+
+## Artifacts
+
+Each run writes to `artifacts/YYYY-MM-DD_<slug>/` (and `artifacts/latest` points
+at the most recent):
+
+| File | When |
+| :--- | :--- |
+| `01_user_story.md` | PM stage |
+| `02_tech_spec.md` | Tech Lead stage |
+| `03_diff.patch` | Dev stage (also applied to the working tree) |
+| `04_qa_report.json` | QA stage |
+| `05_article_draft.md` | Writer stage (only if QA passed and `--article`) |
+| `pipeline_state.json` | Always (current stage, iteration, last error) |
+| `run.log` | Always (one line per stage transition) |
+
+## Commands
 
 ```text
 nightshift doctor [--ollama-url URL]
+nightshift status [--out DIR]
+nightshift run --goal TEXT --repo PATH [options]
 ```
 
-`doctor` exits `0` if the environment is ready, `2` if a required check failed.
+### `run` options
+
+| Flag | Default | What it does |
+| :--- | :------ | :----------- |
+| `--goal` | (required) | The business goal in plain English |
+| `--repo` | (required) | Path to the target git checkout |
+| `--name` | derived from goal | Override the artifact slug |
+| `--out` | `./artifacts` | Override the artifact root |
+| `--ollama-url` | `http://127.0.0.1:11434` | Ollama HTTP origin |
+| `--until` | (full run) | Stop after `pm`, `tech-lead`, `dev`, or `qa` |
+| `--article` / `--no-article` | `--article` | Enable/disable the Writer stage |
+| `--allow-dirty` | off | Allow running on a tree with uncommitted changes |
+
+`--until` is a debug stop — it halts the pipeline early so you can inspect
+intermediate artifacts. The test command is detected automatically (`cargo test`,
+`bundle exec rspec`, `mix test`, `pytest`) or set in `nightshift.toml` — never
+guessed by a model.
 
 ## Configuration
 
-All settings are optional — built-in defaults work without any configuration
-file. Precedence: **CLI flag > environment variable > `nightshift.toml` > built-in default**.
+Everything works out of the box with defaults. Two things you might override:
 
-### Ollama origin
-
-| Key | CLI flag | Env var | Default |
-| :--- | :--- | :--- | :--- |
-| Ollama URL | `--ollama-url` | `NIGHTSHIFT_OLLAMA_URL` | `http://127.0.0.1:11434` |
-
-Set via CLI flag or env var (not read from `nightshift.toml`). Invalid URLs
-are rejected by `doctor` and `run`.
-
-### `nightshift.toml`
-
-| Key | Env var | Default |
-| :--- | :--- | :--- |
-| File path | `NIGHTSHIFT_CONFIG` | `nightshift.toml` |
-| `[role_models]` table | — | built-in defaults (see below) |
-
-A sample file is at [`nightshift.toml.example`](nightshift.toml.example). Copy
-it to `nightshift.toml` in the directory where you run `nightshift`:
+**Ollama URL** — set via CLI flag or env var (not in `nightshift.toml`):
 
 ```text
-cp nightshift.toml.example nightshift.toml
+export NIGHTSHIFT_OLLAMA_URL=http://10.0.0.5:11434
 ```
 
-### Role-to-model mapping
-
-Override the default model for any role in `nightshift.toml`:
+**Model tags** — override per role in `nightshift.toml`:
 
 ```toml
 [role_models]
@@ -93,113 +207,31 @@ Dev = "qwen2.5-coder:14b"
 Qa = "deepseek-r1:14b"
 ```
 
-| Role | Default model | Responsibility |
-| :--- | :--- | :--- |
-| Router | `llama3.2:3b` | Fast schema repair and payload checks |
-| Pm | `llama3.1:8b` | User-story writer |
-| TechLead | `mistral-nemo:12b` | Architect / tech spec |
-| Dev | `qwen2.5-coder:7b` | Implementation / patch author |
-| Qa | `deepseek-r1:7b` | Test-failure reasoner |
-| Writer | `gemma2:9b` | Changelog and article writer |
-| Aux | `phi3.5:latest` | Lightweight sanity check |
+A sample file is at [`nightshift.toml.example`](nightshift.toml.example). Copy
+it to `nightshift.toml` in the directory where you run `nightshift`.
 
-## Commands
+Precedence: **CLI flag > env var > `nightshift.toml` > built-in default**.
 
-```text
-nightshift doctor
-nightshift status [--out DIR]
-nightshift run --goal TEXT --repo PATH [--ollama-url URL] [--name SLUG] [--out DIR] [--allow-dirty] [--article|--no-article] [--until pm|tech-lead|dev|qa]
-```
+For the full config reference, see [docs/configuration.md](docs/configuration.md).
 
-Omit `--until` for a full run: PM → Tech Lead → Dev apply → QA (max 3) → Writer
-(if `--article`, default on, and QA `PASSED`).
+## What to do when QA freezes
 
-Global `--ollama-url` is accepted after `doctor`, reads `NIGHTSHIFT_OLLAMA_URL`, and defaults to `http://127.0.0.1:11434`; the flag takes precedence. Invalid URLs are reported by `doctor` as failed required checks and exit with code `2`.
+If `nightshift status` prints `REQUIRES_HUMAN_REVIEW`, the pipeline tried 3 Dev
+iterations and tests still failed. The last patch may still be applied to your
+working tree.
 
-`--until` is a debug stop. `--allow-dirty` is required when the target tree is
-already dirty. The test argv comes from `nightshift.toml` or a detector
-(`cargo test`, `bundle exec rspec`, `mix test`, `pytest`) — never from a model.
+1. Read `artifacts/latest/04_qa_report.json` for the failure summary.
+2. Read `artifacts/latest/03_diff.patch` to see what was applied.
+3. Review `git diff` in the target repo.
+4. Fix it yourself, or restore selectively with `git restore <file>`.
 
-## Detach overnight
+## Further reading
 
-tmux:
-
-```text
-tmux new -s nightshift
-nightshift run --goal "…" --repo /path/to/checkout --out ./artifacts
-# detach: Ctrl-b d
-```
-
-systemd: copy [`contrib/nightshift.service`](contrib/nightshift.service), edit
-the goal and paths, then `systemctl start --no-block nightshift.service`.
-
-Progress is always appended to `artifacts/latest/run.log` (no TTY required).
-
-## Morning checklist
-
-1. `nightshift status` — read `PASSED` / `FAILED` / `REQUIRES_HUMAN_REVIEW`.
-   `status` is the QA verdict. If Writer failed after green tests the process
-   exits non-zero, `run.log` notes the missing article, and `status` still
-   prints `PASSED`.
-2. `git diff` in the target repo (unstaged). Edit if needed.
-3. Open `artifacts/latest/05_article_draft.md` if the run used `--article`.
-4. `git commit` or restore. Nightshift will not do this for you.
-
-If QA froze (`REQUIRES_HUMAN_REVIEW`), the last apply may still be in the tree.
-Restore with your usual git workflow (`git checkout -- .` / `git restore`).
-
-## Artifacts
-
-`artifacts/YYYY-MM-DD_<slug>/` (and `artifacts/latest`):
-
-| File | When |
-| :--- | :--- |
-| `01_user_story.md` | PM |
-| `02_tech_spec.md` | Tech Lead (`codegraph` / optional `graphify query`) |
-| `03_diff.patch` | Dev (`git apply --check` then apply) |
-| `04_qa_report.json` | QA |
-| `05_article_draft.md` | Writer, only if PASSED and `--article` |
-| `pipeline_state.json`, `run.log` | always |
-
-## Development
-
-```text
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-cargo llvm-cov --workspace --fail-under-lines 85
-```
-
-### Releasing
-
-Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml)
-(generated by [cargo-dist](https://opensource.axo.dev/cargo-dist/); config lives
-in [`dist-workspace.toml`](dist-workspace.toml)):
-
-1. Bump `version` in `Cargo.toml` (and `Cargo.lock`) and merge it.
-2. Move the `[Unreleased]` entries in `CHANGELOG.md` into a new version section
-   before tagging; `dist` uses that section as the GitHub Release notes.
-3. Tag the merge commit: `git tag v0.1.0`.
-4. `git push origin v0.1.0`.
-5. Keep generated action pins configured in `[dist.github-action-commits]` in
-   `dist-workspace.toml`; verify them with `scripts/check-action-pins.sh`.
-
-The tag triggers `release.yml`, which first runs the CI-equivalent gate in
-[`.github/workflows/release-checks.yml`](.github/workflows/release-checks.yml)
-(`fmt`, `clippy`, `test`, 85% line coverage), then builds each target on its
-native runner (`ubuntu-22.04`, `ubuntu-22.04-arm`, `macos-15-intel`,
-`macos-14`) — no cross-compilation or OpenSSL setup, since `reqwest` uses
-`rustls-tls`. It uploads the tarballs, `sha256` checksums, and the generated
-`rs-nightshift-installer.sh` to a GitHub Release. Nothing is published to
-crates.io.
-
-Regenerate the workflow after editing `dist-workspace.toml` with
-`dist init --yes` (or `dist generate`), and dry-run locally with
-`dist build --artifacts=local --target=$(rustc -vV | sed -n 's/host: //p')`.
-
-Pull requests are reviewed by [rs-guard](https://github.com/nebulaideas/rs-guard)
-using [`.github/review-prompt.md`](.github/review-prompt.md). Set the
-`DEEPSEEK_API_KEY` repository secret so the review workflow can post.
+- [docs/architecture.md](docs/architecture.md) — pipeline internals, module layout, prerequisites detail
+- [docs/configuration.md](docs/configuration.md) — full config reference with examples
+- [docs/decisions.md](docs/decisions.md) — why things are the way they are (ADRs)
+- [docs/development.md](docs/development.md) — contributing, CI gates, PR workflow
+- [docs/release.md](docs/release.md) — how to cut a release
 
 ## License
 
