@@ -39,9 +39,18 @@ artifacts to `artifacts/YYYY-MM-DD_<slug>/`. Use `--until pm|tech-lead|dev|qa`
 to stop early for debugging. Add `--allow-dirty` if the tree already has
 uncommitted changes.
 
-Detach with `tmux new -s nightshift` then Ctrl-b d, or use the bundled
-[`contrib/nightshift.service`](contrib/nightshift.service) with systemd. Progress
-is always appended to `artifacts/latest/run.log` — no TTY needed.
+Detach with tmux: start a session, run inside it, then Ctrl-b d:
+
+```text
+tmux new -s nightshift
+# inside tmux:
+nightshift run --goal "…" --repo ~/projects/my-app
+# detach: Ctrl-b d
+```
+
+Or use the bundled [`contrib/nightshift.service`](contrib/nightshift.service)
+with systemd. Progress is always appended to `artifacts/latest/run.log` — no TTY
+needed.
 
 ### The morning checklist
 
@@ -50,7 +59,8 @@ is always appended to `artifacts/latest/run.log` — no TTY needed.
 3. `git commit` or `git restore` — nightshift won't do this for you.
 
 If QA froze at `REQUIRES_HUMAN_REVIEW`, the last patch may still be in the tree.
-Restore with `git checkout -- .` or your usual workflow.
+Review `artifacts/latest/03_diff.patch` and restore selectively with
+`git checkout -- <file>` or `git restore <file>`.
 
 ### Configuration
 

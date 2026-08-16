@@ -45,7 +45,8 @@ blocks merge. Resolve the findings, push, and re-request review.
 
 ## CI gates
 
-CI (`.github/workflows/ci.yml`) runs on every push and pull request:
+CI (`.github/workflows/ci.yml`) runs on pushes to `main` and pull requests
+targeting `main`:
 
 - Format check (`cargo fmt --all -- --check`)
 - Clippy (`cargo clippy --all-targets --all-features -- -D warnings`)

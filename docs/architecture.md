@@ -23,8 +23,10 @@ disconnect. The process writes progress to `run.log` — no TTY required.
   `graphify-out/graph.json` for Tech Lead context. Nightshift will `codegraph
   init` once if the index is missing. It never rebuilds a full graphify corpus.
 
-Run `nightshift doctor` to verify all of the above. It exits `0` if the
-environment is ready, `2` if a required check failed.
+Run `nightshift doctor` to verify the host environment (Rust, Ollama, models,
+PATH tools). It exits `0` if ready, `2` if a required check failed. Doctor does
+not inspect the target repo — `.codegraph/` and `graphify-out/graph.json` are
+checked at run time by the Tech Lead stage.
 
 ## Pipeline stages
 
@@ -86,7 +88,7 @@ src/
 ├── pm.rs                # user-story writer
 ├── techlead.rs          # tech-spec writer
 ├── dev.rs               # patch author + git apply
-├── qa.rs                # test runner + QA report
+├── qa.rs                # QA logic: fix hints, report generation, log truncation
 ├── writer.rs            # article draft
 ├── generate.rs          # Generator trait (Ollama in prod, scripted in tests)
 ├── ollama.rs            # Ollama HTTP client + URL validation/redaction
@@ -100,7 +102,7 @@ src/
 ├── artifacts/
 │   ├── mod.rs           # ArtifactStore + RunDir
 │   ├── state.rs         # pipeline_state.json read/write
-│   ├── qa.rs            # QaReport + QaStatus
+│   ├── qa.rs            # QaReport struct + QaStatus enum + status rendering
 │   └── util.rs          # slugify
 ├── testrun.rs           # test command detection + runner
 └── error.rs             # Error enum (10 typed variants)
