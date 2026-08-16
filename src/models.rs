@@ -271,4 +271,18 @@ mod tests {
             "qwen2.5-coder:7b"
         );
     }
+
+    #[test]
+    fn example_config_parses_successfully() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        let example = Path::new(&manifest_dir).join("nightshift.toml.example");
+        let config = load_models_config_from(&example).expect("example must parse");
+        // The example file has all overrides commented out, so it should
+        // produce an empty role_models map (all defaults).
+        assert!(
+            config.role_models.is_empty(),
+            "example file should have no active overrides: {:?}",
+            config.role_models
+        );
+    }
 }

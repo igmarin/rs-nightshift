@@ -55,6 +55,54 @@ nightshift doctor [--ollama-url URL]
 
 `doctor` exits `0` if the environment is ready, `2` if a required check failed.
 
+## Configuration
+
+All settings are optional — built-in defaults work without any configuration
+file. Precedence: **CLI flag > environment variable > `nightshift.toml` > built-in default**.
+
+### Ollama origin
+
+| Key | CLI flag | Env var | Default |
+| :--- | :--- | :--- | :--- |
+| Ollama URL | `--ollama-url` | `NIGHTSHIFT_OLLAMA_URL` | `http://127.0.0.1:11434` |
+
+Set via CLI flag or env var (not read from `nightshift.toml`). Invalid URLs
+are rejected by `doctor` and `run`.
+
+### `nightshift.toml`
+
+| Key | Env var | Default |
+| :--- | :--- | :--- |
+| File path | `NIGHTSHIFT_CONFIG` | `nightshift.toml` |
+| `[role_models]` table | — | built-in defaults (see below) |
+
+A sample file is at [`nightshift.toml.example`](nightshift.toml.example). Copy
+it to `nightshift.toml` in the directory where you run `nightshift`:
+
+```text
+cp nightshift.toml.example nightshift.toml
+```
+
+### Role-to-model mapping
+
+Override the default model for any role in `nightshift.toml`:
+
+```toml
+[role_models]
+Dev = "qwen2.5-coder:14b"
+Qa = "deepseek-r1:14b"
+```
+
+| Role | Default model | Responsibility |
+| :--- | :--- | :--- |
+| Router | `llama3.2:3b` | Fast schema repair and payload checks |
+| Pm | `llama3.1:8b` | User-story writer |
+| TechLead | `mistral-nemo:12b` | Architect / tech spec |
+| Dev | `qwen2.5-coder:7b` | Implementation / patch author |
+| Qa | `deepseek-r1:7b` | Test-failure reasoner |
+| Writer | `gemma2:9b` | Changelog and article writer |
+| Aux | `phi3.5:latest` | Lightweight sanity check |
+
 ## Commands
 
 ```text
