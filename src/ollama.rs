@@ -20,6 +20,8 @@ pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
         || !matches!(parsed.path(), "" | "/")
         || parsed.query().is_some()
         || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
     {
         return Err(Error::InvalidOllamaUrl {
             url: redact_ollama_url(value),
@@ -381,12 +383,25 @@ mod tests {
             "http://example.test/path",
             "http://example.test?token=secret",
             "http://example.test#fragment",
+            "http://user:secret@example.test",
+            "http://api-token@example.test",
         ] {
             assert!(
                 validate_ollama_url(value).is_err(),
                 "expected origin rejection for {value}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_userinfo_without_leaking_credentials() {
+        let error =
+            validate_ollama_url("http://user:secret@example.test").expect_err("must reject");
+        let text = error.to_string();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("user"), "{text}");
+        // The redacted URL must not contain the credentials.
+        assert!(text.contains("example.test"), "{text}");
     }
 
     #[test]

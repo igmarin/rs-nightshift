@@ -306,8 +306,11 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let origin = server.uri().replacen("http://", "http://user:secret@", 1);
-        let client = OllamaClient::new(origin).expect("client");
+        // Use the wiremock origin directly (no userinfo — validate_ollama_url
+        // rejects credentials). The redaction of credentials is tested
+        // separately in the ollama::tests module.
+        let origin = server.uri();
+        let client = OllamaClient::new(origin.as_str()).expect("client");
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(tmp.path().join("repo")).expect("repo");
         let store = ArtifactStore::new(tmp.path().join("artifacts"));
