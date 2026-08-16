@@ -149,7 +149,7 @@ pub async fn write_tech_spec<G: Generator>(
 ) -> Result<(), Error> {
     let draft = generator
         .generate(
-            model_for(Role::TechLead),
+            &model_for(Role::TechLead),
             &tech_lead_prompt(goal, story, context),
             ROLE_TEMPERATURE,
         )
@@ -159,7 +159,7 @@ pub async fn write_tech_spec<G: Generator>(
         Err(error) => {
             let repaired = generator
                 .generate(
-                    model_for(Role::Router),
+                    &model_for(Role::Router),
                     &repair_prompt(&draft, &error.to_string(), &context.files),
                     ROLE_TEMPERATURE,
                 )

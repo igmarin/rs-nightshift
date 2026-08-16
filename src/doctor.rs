@@ -92,6 +92,39 @@ where
         },
     });
 
+    let config_path = crate::models::config_path();
+    match crate::models::load_models_config_from(&config_path) {
+        Ok(config) => {
+            let overrides = config.role_models.len();
+            checks.push(Check {
+                name: "config".into(),
+                passed: true,
+                required: false,
+                detail: if overrides == 0 {
+                    format!(
+                        "{} (no overrides; using default models)",
+                        config_path.display()
+                    )
+                } else {
+                    format!(
+                        "{} ({} override{})",
+                        config_path.display(),
+                        overrides,
+                        if overrides == 1 { "" } else { "s" }
+                    )
+                },
+            });
+        }
+        Err(error) => {
+            checks.push(Check {
+                name: "config".into(),
+                passed: false,
+                required: false,
+                detail: format!("{error}; using default models"),
+            });
+        }
+    }
+
     match catalog.list_models().await {
         Ok(models) => {
             checks.push(Check {
@@ -141,7 +174,9 @@ where
 fn push_model_checks(checks: &mut Vec<Check>, models: &[String]) {
     for role in crate::models::required_models() {
         let tag = crate::models::model_for(*role);
-        let present = models.iter().any(|installed| model_matches(installed, tag));
+        let present = models
+            .iter()
+            .any(|installed| model_matches(installed, &tag));
         checks.push(Check {
             name: format!("model:{tag}"),
             passed: present,
@@ -274,6 +309,10 @@ mod tests {
                 Err(Error::Context(msg)) => Err(Error::Context(msg.clone())),
                 Err(Error::Git(msg)) => Err(Error::Git(msg.clone())),
                 Err(Error::Io(e)) => Err(Error::Io(std::io::Error::new(e.kind(), e.to_string()))),
+                Err(Error::Config { path, message }) => Err(Error::Config {
+                    path: path.clone(),
+                    message: message.clone(),
+                }),
             }
         }
     }

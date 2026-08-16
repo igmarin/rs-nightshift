@@ -33,7 +33,7 @@ pub async fn write_article<G: Generator>(
     let qa = std::fs::read_to_string(run.path.join(QA_REPORT_FILE))?;
     let draft = generator
         .generate(
-            model_for(Role::Writer),
+            &model_for(Role::Writer),
             &writer_prompt(goal, &story, &spec, &qa),
             WRITER_TEMPERATURE,
         )
