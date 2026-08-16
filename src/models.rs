@@ -1,5 +1,9 @@
 //! Role to local Ollama model mapping.
 
+use crate::error::Error;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
 /// Default Ollama HTTP origin.
 pub const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
 
@@ -23,12 +27,19 @@ pub enum Role {
 }
 
 /// Configuration for role-to-model mapping from nightshift.toml.
-#[derive(Debug, serde::Deserialize)]
+///
+/// The TOML shape is a top-level `role_models` table mapping role names to
+/// model tags:
+///
+/// ```toml
+/// role_models = { Dev = "qwen2.5-coder:14b", Qa = "deepseek-r1:14b" }
+/// ```
+#[derive(Debug, Default, serde::Deserialize)]
 pub struct ModelsConfig {
     /// Role-to-model mappings that override the defaults.
     /// Format: role_name = "model_tag"
     #[serde(default)]
-    pub role_models: std::collections::BTreeMap<String, String>,
+    pub role_models: BTreeMap<String, String>,
 }
 
 /// Get the string name of a Role for config lookups.
@@ -44,25 +55,60 @@ fn role_name(role: Role) -> &'static str {
     }
 }
 
-/// Load the models configuration from nightshift.toml.
-fn load_models_config() -> ModelsConfig {
-    let config_path =
-        std::env::var("NIGHTSHIFT_CONFIG").unwrap_or_else(|_| "nightshift.toml".to_string());
-    let config_content = std::fs::read_to_string(config_path).unwrap_or_default();
-    toml::from_str(&config_content).unwrap_or_else(|_| ModelsConfig {
-        role_models: std::collections::BTreeMap::new(),
+/// Resolve the config file path from `NIGHTSHIFT_CONFIG` or the default.
+#[must_use]
+pub fn config_path() -> PathBuf {
+    std::env::var("NIGHTSHIFT_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("nightshift.toml"))
+}
+
+/// Load models configuration from a specific file path.
+///
+/// A missing file is treated as an empty configuration (all defaults).
+/// A read or parse error is returned so the caller can surface it to the
+/// operator instead of silently falling back to defaults.
+pub fn load_models_config_from(path: &Path) -> Result<ModelsConfig, Error> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ModelsConfig::default());
+        }
+        Err(error) => {
+            return Err(Error::Config {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            });
+        }
+    };
+    toml::from_str(&content).map_err(|error| Error::Config {
+        path: path.display().to_string(),
+        message: error.to_string(),
     })
 }
 
-/// Model tag assigned to a role, reading from nightshift.toml with fallback to defaults.
-pub fn model_for(role: Role) -> String {
-    let config = load_models_config();
+/// Load the models configuration from the ambient config path.
+///
+/// Errors are swallowed here so the pipeline stays infallible at runtime;
+/// `doctor` surfaces config problems via [`load_models_config_from`].
+fn load_models_config() -> ModelsConfig {
+    load_models_config_from(&config_path()).unwrap_or_default()
+}
+
+/// Resolve the model tag for a role using the given config, falling back to defaults.
+#[must_use]
+pub fn model_for_with_config(role: Role, config: &ModelsConfig) -> String {
     let role_name = role_name(role);
     config
         .role_models
         .get(role_name)
         .cloned()
         .unwrap_or_else(|| default_model_for(role).to_string())
+}
+
+/// Model tag assigned to a role, reading from nightshift.toml with fallback to defaults.
+pub fn model_for(role: Role) -> String {
+    model_for_with_config(role, &load_models_config())
 }
 
 /// Map a role to its default model tag.
@@ -126,11 +172,65 @@ mod tests {
     }
 
     #[test]
-    fn config_overrides_are_expected() {
+    fn load_config_from_missing_file_uses_defaults() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nightshift.toml");
+        let config = load_models_config_from(&path).expect("missing file is ok");
+        assert!(config.role_models.is_empty());
+    }
+
+    #[test]
+    fn load_config_from_valid_overrides_applies_them() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nightshift.toml");
+        std::fs::write(
+            &path,
+            "role_models = { Dev = \"qwen2.5-coder:14b\", Router = \"llama3.2:3b\" }\n",
+        )
+        .expect("write");
+        let config = load_models_config_from(&path).expect("valid config");
         assert_eq!(
-            model_for(Role::Router),
-            "llama3.2:3b",
-            "no config present, so router keeps its default"
+            config.role_models.get("Dev"),
+            Some(&"qwen2.5-coder:14b".to_string())
+        );
+    }
+
+    #[test]
+    fn load_config_from_malformed_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nightshift.toml");
+        std::fs::write(&path, "not = valid = toml\n").expect("write");
+        let error = load_models_config_from(&path).expect_err("malformed must error");
+        let text = error.to_string();
+        assert!(text.contains("config error"), "{text}");
+        assert!(text.contains("nightshift.toml"), "{text}");
+    }
+
+    #[test]
+    fn model_for_with_config_uses_override_when_present() {
+        let mut role_models = BTreeMap::new();
+        role_models.insert("Router".to_string(), "custom-model:latest".to_string());
+        let config = ModelsConfig { role_models };
+        assert_eq!(
+            model_for_with_config(Role::Router, &config),
+            "custom-model:latest"
+        );
+    }
+
+    #[test]
+    fn model_for_with_config_falls_back_to_default() {
+        let config = ModelsConfig::default();
+        assert_eq!(model_for_with_config(Role::Router, &config), "llama3.2:3b");
+    }
+
+    #[test]
+    fn model_for_with_config_ignores_unknown_role_keys() {
+        let mut role_models = BTreeMap::new();
+        role_models.insert("Typo".to_string(), "whatever".to_string());
+        let config = ModelsConfig { role_models };
+        assert_eq!(
+            model_for_with_config(Role::Dev, &config),
+            "qwen2.5-coder:7b"
         );
     }
 }

@@ -92,6 +92,39 @@ where
         },
     });
 
+    let config_path = crate::models::config_path();
+    match crate::models::load_models_config_from(&config_path) {
+        Ok(config) => {
+            let overrides = config.role_models.len();
+            checks.push(Check {
+                name: "config".into(),
+                passed: true,
+                required: false,
+                detail: if overrides == 0 {
+                    format!(
+                        "{} (no overrides; using default models)",
+                        config_path.display()
+                    )
+                } else {
+                    format!(
+                        "{} ({} override{})",
+                        config_path.display(),
+                        overrides,
+                        if overrides == 1 { "" } else { "s" }
+                    )
+                },
+            });
+        }
+        Err(error) => {
+            checks.push(Check {
+                name: "config".into(),
+                passed: false,
+                required: false,
+                detail: format!("{error}; using default models"),
+            });
+        }
+    }
+
     match catalog.list_models().await {
         Ok(models) => {
             checks.push(Check {
@@ -276,6 +309,10 @@ mod tests {
                 Err(Error::Context(msg)) => Err(Error::Context(msg.clone())),
                 Err(Error::Git(msg)) => Err(Error::Git(msg.clone())),
                 Err(Error::Io(e)) => Err(Error::Io(std::io::Error::new(e.kind(), e.to_string()))),
+                Err(Error::Config { path, message }) => Err(Error::Config {
+                    path: path.clone(),
+                    message: message.clone(),
+                }),
             }
         }
     }
