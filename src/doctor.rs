@@ -312,6 +312,9 @@ mod tests {
                     path: path.clone(),
                     message: message.clone(),
                 }),
+                Err(Error::InvalidOllamaUrl { url }) => {
+                    Err(Error::InvalidOllamaUrl { url: url.clone() })
+                }
             }
         }
     }
