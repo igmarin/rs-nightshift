@@ -9,10 +9,95 @@ use tokio::sync::Mutex;
 /// Default generate timeout.
 pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Validate an Ollama HTTP(S) origin and return its normalized form.
+pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
+    let value = value.trim();
+    let mut parsed = reqwest::Url::parse(value).map_err(|_| Error::InvalidOllamaUrl {
+        url: redact_ollama_url(value),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(Error::InvalidOllamaUrl {
+            url: redact_ollama_url(value),
+        });
+    }
+    parsed.set_path("");
+    Ok(parsed.to_string().trim_end_matches('/').to_owned())
+}
+
+/// Redact userinfo credentials from an Ollama URL before reporting it.
+///
+/// Both the username and password are stripped so that neither credential
+/// form (username-only tokens or username/password pairs) leaks into
+/// operator-facing logs or error messages. Only the scheme, host, and port
+/// are preserved.
+#[must_use]
+pub fn redact_ollama_url(value: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(value) else {
+        return redact_unparsed_url(value);
+    };
+    // Clear the entire userinfo so username-only and username-password
+    // credentials are both removed before the URL is reported.
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return redact_unparsed_url(value);
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let result = parsed.to_string().trim_end_matches('/').to_owned();
+    // If the parsed URL still contains @, the original value may have
+    // credentials in an unexpected position (e.g. a non-http scheme where
+    // Url::parse treats userinfo as part of the path). Fall back to the
+    // conservative unparsed redactor so credentials never leak.
+    if result.contains('@') {
+        redact_unparsed_url(value)
+    } else {
+        result
+    }
+}
+
+fn redact_unparsed_url(value: &str) -> String {
+    let end = value.find(['?', '#']).unwrap_or(value.len());
+    let value = &value[..end];
+    let authority_start = match value.find("://") {
+        Some(index) => index + 3,
+        None => {
+            // No scheme separator; conservatively redact anything before
+            // the first @ (up to the first /) so malformed URLs without a
+            // scheme cannot leak userinfo-like credentials.
+            let slash = value.find('/').unwrap_or(value.len());
+            return match value[..slash].rfind('@') {
+                Some(at) => format!("[REDACTED]@{}", &value[at + 1..]),
+                None => value.to_owned(),
+            };
+        }
+    };
+    let authority_end = value[authority_start..]
+        .find('/')
+        .map(|index| authority_start + index)
+        .unwrap_or(value.len());
+    let authority = &value[authority_start..authority_end];
+    let Some(userinfo_end) = authority.rfind('@') else {
+        return value.to_owned();
+    };
+    let userinfo_end = authority_start + userinfo_end;
+    format!(
+        "{}[REDACTED]@{}",
+        &value[..authority_start],
+        &value[userinfo_end + 1..]
+    )
+}
+
 /// HTTP client that talks to one Ollama origin, one generate at a time.
 pub struct OllamaClient {
     client: reqwest::Client,
     base_url: String,
+    redacted_base_url: String,
     generate_lock: Mutex<()>,
 }
 
@@ -43,6 +128,7 @@ impl OllamaClient {
 
     /// Client with an explicit request timeout (used in tests).
     pub fn with_timeout(base_url: impl Into<String>, timeout: Duration) -> Result<Self, Error> {
+        let base_url = validate_ollama_url(&base_url.into())?;
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .no_proxy()
@@ -50,9 +136,16 @@ impl OllamaClient {
             .map_err(|error| Error::Ollama(error.to_string()))?;
         Ok(Self {
             client,
-            base_url: base_url.into(),
+            redacted_base_url: redact_ollama_url(&base_url),
+            base_url,
             generate_lock: Mutex::new(()),
         })
+    }
+
+    /// Redacted origin used for operator-facing run logs.
+    #[must_use]
+    pub fn redacted_origin(&self) -> &str {
+        &self.redacted_base_url
     }
 
     /// Complete `prompt` with `model`. Unloads the model after the call (`keep_alive: 0`).
@@ -270,6 +363,121 @@ mod tests {
             max.load(Ordering::SeqCst),
             1,
             "two generates must not overlap"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_ollama_url() {
+        let error = match OllamaClient::new("not a URL") {
+            Ok(_) => panic!("invalid URL must fail"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(text.contains("not a URL"), "{text}");
+        assert!(text.contains("http://"), "{text}");
+    }
+
+    #[test]
+    fn rejects_non_origin_ollama_urls() {
+        for value in [
+            "http://example.test/path",
+            "http://example.test?token=secret",
+            "http://example.test#fragment",
+            "http://user:secret@example.test",
+            "http://api-token@example.test",
+        ] {
+            assert!(
+                validate_ollama_url(value).is_err(),
+                "expected origin rejection for {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_userinfo_without_leaking_credentials() {
+        let error =
+            validate_ollama_url("http://user:secret@example.test").expect_err("must reject");
+        let text = error.to_string();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("user"), "{text}");
+        // The redacted URL must not contain the credentials.
+        assert!(text.contains("example.test"), "{text}");
+    }
+
+    #[test]
+    fn normalizes_trailing_slash() {
+        assert_eq!(
+            validate_ollama_url("http://example.test:11434/").expect("valid origin"),
+            "http://example.test:11434"
+        );
+    }
+
+    #[test]
+    fn redacts_ollama_userinfo_username_and_password() {
+        let redacted = redact_ollama_url("http://user:secret@example.test:11434");
+        assert!(!redacted.contains("user"), "{redacted}");
+        assert!(!redacted.contains("secret"), "{redacted}");
+        assert!(!redacted.contains('@'), "{redacted}");
+        assert_eq!(redacted, "http://example.test:11434");
+    }
+
+    #[test]
+    fn redacts_ollama_userinfo_username_only() {
+        let redacted = redact_ollama_url("http://api-token@example.test:11434");
+        assert!(!redacted.contains("api-token"), "{redacted}");
+        assert!(!redacted.contains('@'), "{redacted}");
+        assert_eq!(redacted, "http://example.test:11434");
+    }
+
+    #[test]
+    fn redacts_ollama_userinfo_preserves_scheme_host_port() {
+        let redacted = redact_ollama_url("https://token:pass@host.local:8080");
+        assert_eq!(redacted, "https://host.local:8080");
+    }
+
+    #[test]
+    fn redacts_ollama_userinfo_no_credentials() {
+        assert_eq!(
+            redact_ollama_url("http://example.test:11434"),
+            "http://example.test:11434"
+        );
+    }
+
+    #[test]
+    fn redacts_malformed_credentials() {
+        let error = match OllamaClient::new("http://user:secret@[invalid") {
+            Ok(_) => panic!("invalid URL must fail"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+    }
+
+    #[test]
+    fn redacts_unparsed_url_without_scheme() {
+        // A malformed URL without :// must still redact userinfo-like content
+        // so credentials never leak into error messages.
+        let redacted = redact_ollama_url("user:secret@host");
+        assert!(!redacted.contains("secret"), "{redacted}");
+        assert!(redacted.contains("[REDACTED]"), "{redacted}");
+    }
+
+    #[tokio::test]
+    async fn error_path_does_not_leak_credentials() {
+        // Since validate_ollama_url rejects userinfo, credentials can never
+        // reach the stored base_url. This test verifies the error path
+        // defensively: a failed request's error message must not contain
+        // any credential-like content even if the URL were to leak.
+        let client = OllamaClient::with_timeout("http://127.0.0.1:1", Duration::from_millis(100))
+            .expect("valid origin");
+        let error = client.generate("m", "p").await.expect_err("must fail");
+        let text = error.to_string();
+        // The error may contain the URL (reqwest formats it), but it must
+        // never contain credential separators since validation strips them.
+        assert!(
+            !text.contains("@"),
+            "error must not contain userinfo: {text}"
         );
     }
 }

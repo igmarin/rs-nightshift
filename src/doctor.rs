@@ -1,6 +1,7 @@
 //! Environment readiness checks (`nightshift doctor`).
 
 use crate::error::Error;
+use crate::ollama::validate_ollama_url;
 use async_trait::async_trait;
 
 /// One named check in a doctor report.
@@ -223,15 +224,13 @@ pub struct HttpModelCatalog {
 impl HttpModelCatalog {
     /// Build a catalog for `base_url` (no trailing path).
     pub fn new(base_url: impl Into<String>) -> Result<Self, Error> {
+        let base_url = validate_ollama_url(&base_url.into())?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .no_proxy()
             .build()
             .map_err(|error| Error::Ollama(error.to_string()))?;
-        Ok(Self {
-            client,
-            base_url: base_url.into(),
-        })
+        Ok(Self { client, base_url })
     }
 }
 
@@ -313,6 +312,9 @@ mod tests {
                     path: path.clone(),
                     message: message.clone(),
                 }),
+                Err(Error::InvalidOllamaUrl { url }) => {
+                    Err(Error::InvalidOllamaUrl { url: url.clone() })
+                }
             }
         }
     }

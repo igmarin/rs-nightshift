@@ -19,12 +19,21 @@ pub const WRITER_TEMPERATURE: f32 = 0.5;
 pub trait Generator: Send + Sync {
     /// Complete `prompt` with `model` at `temperature`.
     async fn generate(&self, model: &str, prompt: &str, temperature: f32) -> Result<String, Error>;
+
+    /// Redacted Ollama origin for run-log context, when available.
+    fn redacted_origin(&self) -> Option<String> {
+        None
+    }
 }
 
 #[async_trait]
 impl Generator for OllamaClient {
     async fn generate(&self, model: &str, prompt: &str, temperature: f32) -> Result<String, Error> {
         self.generate_with(model, prompt, temperature).await
+    }
+
+    fn redacted_origin(&self) -> Option<String> {
+        Some(OllamaClient::redacted_origin(self).to_owned())
     }
 }
 

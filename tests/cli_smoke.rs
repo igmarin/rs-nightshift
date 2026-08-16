@@ -34,6 +34,14 @@ fn help_lists_commands() {
     for command in ["doctor", "status", "run"] {
         assert!(text.contains(command), "missing {command} in: {text}");
     }
+    assert!(
+        text.contains("--ollama-url"),
+        "missing Ollama URL flag: {text}"
+    );
+    assert!(
+        text.contains("NIGHTSHIFT_OLLAMA_URL"),
+        "missing Ollama URL environment variable: {text}"
+    );
 }
 
 #[test]
@@ -53,6 +61,44 @@ fn status_on_empty_out_dir_reports_no_run() {
     assert!(text.contains("QA has not run yet"), "{text}");
 }
 
+#[test]
+fn ollama_url_env_and_flag_precedence_are_consistent() {
+    let env_output = nightshift_with_env(&["doctor"], &[("NIGHTSHIFT_OLLAMA_URL", "env invalid")]);
+    let env_report = stdout(&env_output);
+    assert_eq!(
+        env_output.status.code(),
+        Some(2),
+        "exit: {:?}",
+        env_output.status
+    );
+    assert!(env_report.contains("[FAIL] ollama-url"), "{env_report}");
+    assert!(env_report.contains("env invalid"), "{env_report}");
+
+    let flag_output = nightshift_with_env(
+        &["doctor", "--ollama-url", "flag invalid"],
+        &[("NIGHTSHIFT_OLLAMA_URL", "env invalid")],
+    );
+    let flag_report = stdout(&flag_output);
+    assert_eq!(
+        flag_output.status.code(),
+        Some(2),
+        "exit: {:?}",
+        flag_output.status
+    );
+    assert!(flag_report.contains("[FAIL] ollama-url"), "{flag_report}");
+    assert!(flag_report.contains("flag invalid"), "{flag_report}");
+    assert!(!flag_report.contains("env invalid"), "{flag_report}");
+}
+
 fn path_arg(path: &Path) -> &str {
     path.to_str().expect("utf-8 temp path")
+}
+
+fn nightshift_with_env(args: &[&str], vars: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nightshift"));
+    command.args(args).env_clear();
+    for (name, value) in vars {
+        command.env(name, value);
+    }
+    command.output().expect("spawn nightshift")
 }

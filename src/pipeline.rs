@@ -65,6 +65,9 @@ where
     }
     let slug = request.name.as_deref().unwrap_or(request.goal.as_str());
     let run = store.create_run(date, slug)?;
+    if let Some(origin) = generator.redacted_origin() {
+        run.append_log(&format!("ollama origin={origin}"))?;
+    }
     run.append_log("stage=pm")?;
     if let Err(error) = crate::pm::write_user_story(generator, &run, &request.goal).await {
         let msg = error.to_string();
@@ -240,7 +243,10 @@ pub fn repo_exists(repo: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::generate::ScriptedGenerator;
+    use crate::ollama::OllamaClient;
     use crate::pm::{USER_STORY_FILE, USER_STORY_HEADINGS};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn complete_story() -> String {
         let mut body = String::from("# Story\n");
@@ -281,6 +287,63 @@ mod tests {
         let state = std::fs::read_to_string(run.path.join("pipeline_state.json")).expect("state");
         assert!(state.contains("\"pm\"") || state.contains("pm"), "{state}");
         assert_eq!(gen.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_logs_redacted_ollama_origin_at_start() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    format!(
+                        r#"{{"response":{},"done":true}}"#,
+                        serde_json::to_string(&complete_story()).expect("story JSON")
+                    )
+                    .to_string(),
+                    "application/json",
+                ),
+            )
+            .mount(&server)
+            .await;
+        // Use the wiremock origin directly (no userinfo — validate_ollama_url
+        // rejects credentials). The redaction of credentials is tested
+        // separately in the ollama::tests module.
+        let origin = server.uri();
+        let client = OllamaClient::new(origin.as_str()).expect("client");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("repo")).expect("repo");
+        let store = ArtifactStore::new(tmp.path().join("artifacts"));
+        let run = run(
+            &client,
+            &store,
+            "2026-08-14",
+            &RunRequest {
+                goal: "add status command".into(),
+                repo: tmp.path().join("repo"),
+                name: Some("status".into()),
+                allow_dirty: false,
+                article: true,
+                until: Some(Until::Pm),
+            },
+            &crate::context::PathProbe,
+            &crate::testrun::ProcessTestRunner::default(),
+        )
+        .await
+        .expect("run");
+        let log = std::fs::read_to_string(run.path.join("run.log")).expect("log");
+        let lines: Vec<_> = log.lines().collect();
+        assert_eq!(
+            lines[0],
+            format!("ollama origin={}", client.redacted_origin())
+        );
+        assert_eq!(lines[1], "stage=pm");
+        assert_eq!(
+            log.matches("ollama origin=").count(),
+            1,
+            "origin must be logged once: {log}"
+        );
+        assert!(!log.contains("secret"), "{log}");
     }
 
     #[tokio::test]
