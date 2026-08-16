@@ -1,0 +1,31 @@
+# rs-nightshift configuration example
+#
+# Copy to nightshift.toml in the directory where you run `nightshift`.
+# Every key is optional — built-in defaults work without this file.
+#
+# Precedence: CLI flag > environment variable > nightshift.toml > built-in default
+
+# Ollama HTTP origin.
+# CLI:   --ollama-url
+# Env:   NIGHTSHIFT_OLLAMA_URL
+# Default: http://127.0.0.1:11434
+# (This key is not read from nightshift.toml — set it via CLI flag or env var.)
+
+# Path to this file, if not in the CWD.
+# Env: NIGHTSHIFT_CONFIG
+# Default: nightshift.toml
+
+# Role-to-model overrides.
+# Each key is a role name, each value is an Ollama model tag.
+# Roles: Router, Pm, TechLead, Dev, Qa, Writer, Aux
+# Defaults:
+#   Router    = llama3.2:3b
+#   Pm        = llama3.1:8b
+#   TechLead  = mistral-nemo:12b
+#   Dev       = qwen2.5-coder:7b
+#   Qa        = deepseek-r1:7b
+#   Writer    = gemma2:9b
+#   Aux       = phi3.5:latest
+[role_models]
+# Dev = "qwen2.5-coder:14b"
+# Qa = "deepseek-r1:14b"
