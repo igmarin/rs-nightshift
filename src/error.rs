@@ -51,6 +51,15 @@ pub enum Error {
     /// Git inspect or apply failed (never commit/push/reset/clean).
     #[error("git: {0}")]
     Git(String),
+
+    /// `nightshift.toml` could not be read or parsed.
+    #[error("config error in {path}: {message}")]
+    Config {
+        /// Path to the config file that failed.
+        path: String,
+        /// Human-readable read or parse failure.
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -109,5 +118,17 @@ mod tests {
     fn git_error_displays_message() {
         let error = Error::Git("apply --check failed".into());
         assert_eq!(error.to_string(), "git: apply --check failed");
+    }
+
+    #[test]
+    fn config_error_displays_path_and_message() {
+        let error = Error::Config {
+            path: "nightshift.toml".into(),
+            message: "expected `=`".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "config error in nightshift.toml: expected `=`"
+        );
     }
 }

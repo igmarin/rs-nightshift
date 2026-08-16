@@ -81,7 +81,7 @@ pub async fn write_user_story<G: Generator>(
     goal: &str,
 ) -> Result<(), Error> {
     let draft = generator
-        .generate(model_for(Role::Pm), &pm_prompt(goal), ROLE_TEMPERATURE)
+        .generate(&model_for(Role::Pm), &pm_prompt(goal), ROLE_TEMPERATURE)
         .await?;
     let markdown = match validate_user_story(&draft) {
         Ok(()) => draft,
@@ -89,7 +89,7 @@ pub async fn write_user_story<G: Generator>(
             let missing = missing_user_story_headings(&draft);
             let repaired = generator
                 .generate(
-                    model_for(Role::Router),
+                    &model_for(Role::Router),
                     &repair_prompt(&draft, &missing),
                     ROLE_TEMPERATURE,
                 )
