@@ -256,6 +256,29 @@ mod tests {
         body
     }
 
+    struct StubProbe;
+
+    impl crate::context::ContextProbe for StubProbe {
+        fn codegraph_available(&self) -> bool {
+            true
+        }
+        fn graphify_available(&self) -> bool {
+            false
+        }
+        fn has_codegraph_index(&self, _repo: &Path) -> bool {
+            true
+        }
+        fn has_graphify_graph(&self, _repo: &Path) -> bool {
+            false
+        }
+        fn run_codegraph(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
+            Ok("src/cli.rs src/pipeline.rs hello.txt".into())
+        }
+        fn run_graphify(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
+            Err(Error::Context("graphify unused".into()))
+        }
+    }
+
     #[tokio::test]
     async fn run_until_pm_writes_story_and_latest() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -478,29 +501,6 @@ mod tests {
         assert!(!tmp.path().join("artifacts").exists());
     }
 
-    struct TlProbe;
-
-    impl crate::context::ContextProbe for TlProbe {
-        fn codegraph_available(&self) -> bool {
-            true
-        }
-        fn graphify_available(&self) -> bool {
-            false
-        }
-        fn has_codegraph_index(&self, _repo: &Path) -> bool {
-            true
-        }
-        fn has_graphify_graph(&self, _repo: &Path) -> bool {
-            false
-        }
-        fn run_codegraph(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
-            Ok("src/cli.rs src/pipeline.rs".into())
-        }
-        fn run_graphify(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
-            Err(Error::Context("graphify unused".into()))
-        }
-    }
-
     #[tokio::test]
     async fn run_until_tech_lead_writes_spec() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -538,7 +538,7 @@ apply the patch
                 article: true,
                 until: Some(Until::TechLead),
             },
-            &TlProbe,
+            &StubProbe,
             &crate::testrun::ProcessTestRunner::default(),
         )
         .await
@@ -580,29 +580,6 @@ apply the patch
             .success());
     }
 
-    struct HelloProbe;
-
-    impl crate::context::ContextProbe for HelloProbe {
-        fn codegraph_available(&self) -> bool {
-            true
-        }
-        fn graphify_available(&self) -> bool {
-            false
-        }
-        fn has_codegraph_index(&self, _repo: &Path) -> bool {
-            true
-        }
-        fn has_graphify_graph(&self, _repo: &Path) -> bool {
-            false
-        }
-        fn run_codegraph(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
-            Ok("hello.txt".into())
-        }
-        fn run_graphify(&self, _repo: &Path, _args: &[&str]) -> Result<String, Error> {
-            Err(Error::Context("unused".into()))
-        }
-    }
-
     #[tokio::test]
     async fn dirty_tree_without_allow_dirty_is_rejected() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -624,7 +601,7 @@ apply the patch
                 article: true,
                 until: Some(Until::Dev),
             },
-            &HelloProbe,
+            &StubProbe,
             &crate::testrun::ProcessTestRunner::default(),
         )
         .await
@@ -682,7 +659,7 @@ diff --git a/hello.txt b/hello.txt
                 article: true,
                 until: Some(Until::Dev),
             },
-            &HelloProbe,
+            &StubProbe,
             &crate::testrun::ProcessTestRunner::default(),
         )
         .await
@@ -763,7 +740,7 @@ diff --git a/hello.txt b/hello.txt
                 article: true,
                 until: Some(Until::Qa),
             },
-            &HelloProbe,
+            &StubProbe,
             &runner,
         )
         .await
@@ -804,7 +781,7 @@ diff --git a/hello.txt b/hello.txt
                 article: true,
                 until: None,
             },
-            &HelloProbe,
+            &StubProbe,
             &runner,
         )
         .await
@@ -844,7 +821,7 @@ diff --git a/hello.txt b/hello.txt
                 article: true,
                 until: None,
             },
-            &HelloProbe,
+            &StubProbe,
             &runner,
         )
         .await
@@ -906,7 +883,7 @@ commit
                 article: true,
                 until: Some(Until::Qa),
             },
-            &HelloProbe,
+            &StubProbe,
             &runner,
         )
         .await
