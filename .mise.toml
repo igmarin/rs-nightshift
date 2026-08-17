@@ -1,5 +1,7 @@
 [tools]
-rust = "1.88.0"
+fd = "latest"
+gum = "latest"
+rust = "1.92"
 
 [settings]
 experimental = true

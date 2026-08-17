@@ -2,7 +2,7 @@
 
 use crate::artifacts::RunDir;
 use crate::error::Error;
-use crate::generate::{Generator, ROLE_TEMPERATURE};
+use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::techlead::TECH_SPEC_FILE;
 use std::path::{Path, PathBuf};
@@ -147,7 +147,7 @@ fn dev_prompt(goal: &str, spec: &str, slices: &str, hints: &str) -> String {
 }
 
 /// Generate a patch, validate paths, write `03_diff.patch`, apply to the repo.
-pub async fn write_and_apply_patch<G: Generator>(
+pub async fn write_and_apply_patch<G: LLMClient>(
     generator: &G,
     run: &RunDir,
     repo: &Path,
@@ -157,25 +157,25 @@ pub async fn write_and_apply_patch<G: Generator>(
     hints: &str,
 ) -> Result<(), Error> {
     let slices = file_slices(repo, files, 16_384);
-    let draft = generator
-        .generate(
-            &model_for(Role::Dev),
-            &dev_prompt(goal, spec, &slices, hints),
-            ROLE_TEMPERATURE,
-        )
-        .await?;
+    let draft = complete_text(
+        generator,
+        &model_for(Role::Dev),
+        &dev_prompt(goal, spec, &slices, hints),
+        ROLE_TEMPERATURE,
+    )
+    .await?;
     let patch = match validate_and_check(repo, &draft) {
         Ok(()) => draft,
         Err(error) => {
-            let repaired = generator
-                .generate(
-                    &model_for(Role::Router),
-                    &format!(
-                        "Rewrite as a valid unified diff. Problem: {error}.\nOriginal:\n{draft}\n"
-                    ),
-                    ROLE_TEMPERATURE,
-                )
-                .await?;
+            let repaired = complete_text(
+                generator,
+                &model_for(Role::Router),
+                &format!(
+                    "Rewrite as a valid unified diff. Problem: {error}.\nOriginal:\n{draft}\n"
+                ),
+                ROLE_TEMPERATURE,
+            )
+            .await?;
             validate_and_check(repo, &repaired)?;
             repaired
         }

@@ -2,7 +2,7 @@
 
 use crate::artifacts::RunDir;
 use crate::error::Error;
-use crate::generate::{Generator, ROLE_TEMPERATURE};
+use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 
 /// Required ATX headings in `01_user_story.md`.
@@ -75,25 +75,29 @@ fn repair_prompt(draft: &str, missing: &[&str]) -> String {
 }
 
 /// Generate, validate, optionally repair once, and write `01_user_story.md`.
-pub async fn write_user_story<G: Generator>(
+pub async fn write_user_story<G: LLMClient>(
     generator: &G,
     run: &RunDir,
     goal: &str,
 ) -> Result<(), Error> {
-    let draft = generator
-        .generate(&model_for(Role::Pm), &pm_prompt(goal), ROLE_TEMPERATURE)
-        .await?;
+    let draft = complete_text(
+        generator,
+        &model_for(Role::Pm),
+        &pm_prompt(goal),
+        ROLE_TEMPERATURE,
+    )
+    .await?;
     let markdown = match validate_user_story(&draft) {
         Ok(()) => draft,
         Err(_) => {
             let missing = missing_user_story_headings(&draft);
-            let repaired = generator
-                .generate(
-                    &model_for(Role::Router),
-                    &repair_prompt(&draft, &missing),
-                    ROLE_TEMPERATURE,
-                )
-                .await?;
+            let repaired = complete_text(
+                generator,
+                &model_for(Role::Router),
+                &repair_prompt(&draft, &missing),
+                ROLE_TEMPERATURE,
+            )
+            .await?;
             validate_user_story(&repaired)?;
             repaired
         }

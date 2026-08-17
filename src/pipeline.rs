@@ -5,7 +5,7 @@ use crate::cli::Until;
 use crate::context::{gather, ContextProbe};
 use crate::dev::{read_tech_spec, working_tree_dirty, write_and_apply_patch};
 use crate::error::Error;
-use crate::generate::Generator;
+use crate::generate::{LLMClient, Origin};
 use crate::qa::{fix_hints, report_from_outcome, truncate_log, write_qa_report, MAX_ITERATIONS};
 use crate::techlead::{impacted_files, read_user_story, write_tech_spec};
 use crate::testrun::{detect_test_command, TestRunner};
@@ -39,7 +39,7 @@ pub async fn run<G, C, T>(
     tests: &T,
 ) -> Result<RunDir, Error>
 where
-    G: Generator,
+    G: LLMClient + Origin,
     C: ContextProbe,
     T: TestRunner,
 {
@@ -315,18 +315,24 @@ mod tests {
     #[tokio::test]
     async fn run_logs_redacted_ollama_origin_at_start() {
         let server = MockServer::start().await;
+        // OpenAI-compatible chat completion endpoint (used by llm-kernel).
         Mock::given(method("POST"))
-            .and(path("/api/generate"))
+            .and(path("/v1/chat/completions"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_raw(
                     format!(
-                        r#"{{"response":{},"done":true}}"#,
+                        r#"{{"id":"chatcmpl-x","created":1,"model":"ollama","choices":[{{"index":0,"message":{{"role":"assistant","content":{}}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}}}"#,
                         serde_json::to_string(&complete_story()).expect("story JSON")
-                    )
-                    .to_string(),
+                    ),
                     "application/json",
                 ),
             )
+            .mount(&server)
+            .await;
+        // Best-effort unload endpoint (keep_alive: 0).
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
         // Use the wiremock origin directly (no userinfo — validate_ollama_url
