@@ -2,7 +2,7 @@
 
 use crate::artifacts::{QaReport, QaStatus, RunDir};
 use crate::error::Error;
-use crate::generate::{Generator, ROLE_TEMPERATURE};
+use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::testrun::{format_command, TestOutcome};
 
@@ -66,7 +66,7 @@ pub fn report_from_outcome(
 }
 
 /// Ask the QA model for fix hints. Test argv is not taken from the model (INV-9).
-pub async fn fix_hints<G: Generator>(
+pub async fn fix_hints<G: LLMClient>(
     generator: &G,
     outcome: &TestOutcome,
 ) -> Result<String, Error> {
@@ -79,9 +79,7 @@ pub async fn fix_hints<G: Generator>(
         outcome.exit_code,
         format_command(&outcome.command),
     );
-    generator
-        .generate(&model_for(Role::Qa), &prompt, ROLE_TEMPERATURE)
-        .await
+    complete_text(generator, &model_for(Role::Qa), &prompt, ROLE_TEMPERATURE).await
 }
 
 #[cfg(test)]

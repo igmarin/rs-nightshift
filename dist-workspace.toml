@@ -19,7 +19,7 @@ hosting = "github"
 install-updater = false
 # Match `rust-version` in Cargo.toml and `rust` in .mise.toml so release
 # binaries are built with the same toolchain as CI.
-rust-toolchain-version = "1.88.0"
+rust-toolchain-version = "1.92.0"
 # CI-equivalent gate (fmt, clippy, test, coverage) that must pass before any
 # release artifact is built. See .github/workflows/release-checks.yml.
 plan-jobs = ["./release-checks"]

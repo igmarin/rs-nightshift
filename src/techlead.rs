@@ -3,7 +3,7 @@
 use crate::artifacts::RunDir;
 use crate::context::{extract_paths, path_allowed, ContextBundle};
 use crate::error::Error;
-use crate::generate::{Generator, ROLE_TEMPERATURE};
+use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::pm::has_atx_heading;
 use std::path::PathBuf;
@@ -140,30 +140,30 @@ fn truncate(text: &str, max: usize) -> &str {
 }
 
 /// Generate, validate against context files, optionally repair once, write spec.
-pub async fn write_tech_spec<G: Generator>(
+pub async fn write_tech_spec<G: LLMClient>(
     generator: &G,
     run: &RunDir,
     goal: &str,
     story: &str,
     context: &ContextBundle,
 ) -> Result<(), Error> {
-    let draft = generator
-        .generate(
-            &model_for(Role::TechLead),
-            &tech_lead_prompt(goal, story, context),
-            ROLE_TEMPERATURE,
-        )
-        .await?;
+    let draft = complete_text(
+        generator,
+        &model_for(Role::TechLead),
+        &tech_lead_prompt(goal, story, context),
+        ROLE_TEMPERATURE,
+    )
+    .await?;
     let markdown = match validate_tech_spec(&draft, &context.files) {
         Ok(()) => draft,
         Err(error) => {
-            let repaired = generator
-                .generate(
-                    &model_for(Role::Router),
-                    &repair_prompt(&draft, &error.to_string(), &context.files),
-                    ROLE_TEMPERATURE,
-                )
-                .await?;
+            let repaired = complete_text(
+                generator,
+                &model_for(Role::Router),
+                &repair_prompt(&draft, &error.to_string(), &context.files),
+                ROLE_TEMPERATURE,
+            )
+            .await?;
             validate_tech_spec(&repaired, &context.files)?;
             repaired
         }

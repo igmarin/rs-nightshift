@@ -2,7 +2,7 @@
 
 use crate::artifacts::RunDir;
 use crate::error::Error;
-use crate::generate::{Generator, WRITER_TEMPERATURE};
+use crate::generate::{complete_text, LLMClient, WRITER_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::pm::USER_STORY_FILE;
 use crate::qa::QA_REPORT_FILE;
@@ -23,7 +23,7 @@ fn writer_prompt(goal: &str, story: &str, spec: &str, qa: &str) -> String {
 }
 
 /// Generate and write `05_article_draft.md`.
-pub async fn write_article<G: Generator>(
+pub async fn write_article<G: LLMClient>(
     generator: &G,
     run: &RunDir,
     goal: &str,
@@ -31,13 +31,13 @@ pub async fn write_article<G: Generator>(
     let story = std::fs::read_to_string(run.path.join(USER_STORY_FILE))?;
     let spec = std::fs::read_to_string(run.path.join(TECH_SPEC_FILE))?;
     let qa = std::fs::read_to_string(run.path.join(QA_REPORT_FILE))?;
-    let draft = generator
-        .generate(
-            &model_for(Role::Writer),
-            &writer_prompt(goal, &story, &spec, &qa),
-            WRITER_TEMPERATURE,
-        )
-        .await?;
+    let draft = complete_text(
+        generator,
+        &model_for(Role::Writer),
+        &writer_prompt(goal, &story, &spec, &qa),
+        WRITER_TEMPERATURE,
+    )
+    .await?;
     if draft.trim().is_empty() {
         return Err(Error::InvalidArtifact {
             artifact: ARTICLE_FILE,

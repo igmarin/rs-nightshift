@@ -1,13 +1,28 @@
-//! Sequential Ollama HTTP client.
+//! Sequential Ollama client backed by `llm-kernel`'s `OpenAIClient`.
+//!
+//! Completions go through Ollama's OpenAI-compatible `/v1/chat/completions`
+//! endpoint (via `llm_kernel::llm::OpenAIClient`). After each call, an
+//! unload request is sent to Ollama's native `/api/generate` endpoint with
+//! `keep_alive: 0` so the model is released from VRAM between stages —
+//! preserving the memory behavior of the original hand-rolled client.
 
 use crate::error::Error;
-use crate::generate::ROLE_TEMPERATURE;
-use serde::Deserialize;
+use crate::generate::Origin;
+use async_trait::async_trait;
+use llm_kernel::error::KernelError;
+use llm_kernel::llm::{LLMClient, LLMRequest, LLMResponse, OpenAIClient};
+use serde::Serialize;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// Default generate timeout.
+/// Default generate timeout (matches the original hand-rolled client).
 pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Timeout for the best-effort `keep_alive: 0` unload request.
+///
+/// Kept short so a hanging Ollama server cannot block the serialization lock
+/// (and thus all subsequent stages) for an extended period.
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Validate an Ollama HTTP(S) origin and return its normalized form.
 pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
@@ -93,35 +108,39 @@ fn redact_unparsed_url(value: &str) -> String {
     )
 }
 
-/// HTTP client that talks to one Ollama origin, one generate at a time.
+/// HTTP client that talks to one Ollama origin via `llm-kernel`'s
+/// `OpenAIClient`, unloading the model after each completion.
+///
+/// Completions are serialized by an internal mutex (matching the original
+/// hand-rolled client's behavior) so two `complete` calls on a shared
+/// `OllamaClient` never overlap.
 pub struct OllamaClient {
-    client: reqwest::Client,
+    /// `llm-kernel` OpenAI-compatible client pointed at `{origin}/v1`.
+    /// The model is set per-request via `LLMRequest::model`, so the client's
+    /// own model name is a placeholder.
+    inner: OpenAIClient,
+    /// `reqwest::Client` used for the post-completion unload call.
+    unload_client: reqwest::Client,
+    /// Normalized origin (no trailing slash), e.g. `http://127.0.0.1:11434`.
     base_url: String,
+    /// Redacted origin for run-log context.
     redacted_base_url: String,
+    /// Serializes completions (preserves the original client's behavior).
     generate_lock: Mutex<()>,
+    /// Per-completion timeout (used for `tokio::time::timeout` wrapping).
+    timeout: Duration,
 }
 
-#[derive(serde::Serialize)]
-struct GenerateRequest<'a> {
+#[derive(Serialize)]
+struct UnloadRequest<'a> {
     model: &'a str,
     prompt: &'a str,
     stream: bool,
     keep_alive: i32,
-    options: GenerateOptions,
-}
-
-#[derive(serde::Serialize)]
-struct GenerateOptions {
-    temperature: f32,
-}
-
-#[derive(Deserialize)]
-struct GenerateResponse {
-    response: String,
 }
 
 impl OllamaClient {
-    /// Client for `base_url` with a 10 minute generate timeout.
+    /// Client for `base_url` with the default 10 minute generate timeout.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Error> {
         Self::with_timeout(base_url, DEFAULT_GENERATE_TIMEOUT)
     }
@@ -129,16 +148,32 @@ impl OllamaClient {
     /// Client with an explicit request timeout (used in tests).
     pub fn with_timeout(base_url: impl Into<String>, timeout: Duration) -> Result<Self, Error> {
         let base_url = validate_ollama_url(&base_url.into())?;
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
+        let redacted_base_url = redact_ollama_url(&base_url);
+        // Ollama's OpenAI-compatible endpoint lives at `{origin}/v1`.
+        let chat_base_url = format!("{}/v1", base_url);
+        // Ollama needs no API key; pass a non-empty placeholder so the
+        // OpenAIClient's `Authorization: Bearer <key>` header is well-formed
+        // (Ollama ignores it). No reqwest timeout — we wrap completions with
+        // `tokio::time::timeout` in `complete` so timeouts map to
+        // `KernelError::Timeout` (the kernel's OpenAIClient would otherwise
+        // surface reqwest timeouts as `LlmApi`, losing the structured info).
+        let http_client = reqwest::Client::builder()
             .no_proxy()
             .build()
             .map_err(|error| Error::Ollama(error.to_string()))?;
+        let inner = OpenAIClient::from_key_with_base_url(
+            "ollama",
+            "ollama",
+            chat_base_url,
+            http_client.clone(),
+        );
         Ok(Self {
-            client,
-            redacted_base_url: redact_ollama_url(&base_url),
+            inner,
+            unload_client: http_client,
             base_url,
+            redacted_base_url,
             generate_lock: Mutex::new(()),
+            timeout,
         })
     }
 
@@ -148,61 +183,94 @@ impl OllamaClient {
         &self.redacted_base_url
     }
 
-    /// Complete `prompt` with `model`. Unloads the model after the call (`keep_alive: 0`).
-    pub async fn generate(&self, model: &str, prompt: &str) -> Result<String, Error> {
-        self.generate_with(model, prompt, ROLE_TEMPERATURE).await
-    }
-
-    /// Complete `prompt` with an explicit sampling temperature.
-    pub async fn generate_with(
-        &self,
-        model: &str,
-        prompt: &str,
-        temperature: f32,
-    ) -> Result<String, Error> {
-        let _guard = self.generate_lock.lock().await;
+    /// Send Ollama a `keep_alive: 0` unload request for `model`.
+    ///
+    /// Errors are best-effort: a failed unload does not fail the pipeline,
+    /// since the completion already succeeded. The request is bounded by
+    /// [`UNLOAD_TIMEOUT`] so a hanging Ollama server cannot block the
+    /// serialization lock (and thus all subsequent stages) indefinitely.
+    async fn unload(&self, model: &str) -> Result<(), Error> {
         let url = format!("{}/api/generate", self.base_url.trim_end_matches('/'));
-        let response = self
-            .client
+        let send = self
+            .unload_client
             .post(url)
-            .json(&GenerateRequest {
+            .json(&UnloadRequest {
                 model,
-                prompt,
+                prompt: "",
                 stream: false,
                 keep_alive: 0,
-                options: GenerateOptions { temperature },
             })
-            .send()
+            .send();
+        let response = tokio::time::timeout(UNLOAD_TIMEOUT, send)
             .await
-            .map_err(map_reqwest)?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(Error::ModelNotFound {
-                model: model.to_string(),
-            });
-        }
+            .map_err(|_| {
+                Error::Ollama(format!(
+                    "unload timed out after {}s",
+                    UNLOAD_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| Error::Ollama(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(Error::Ollama(format!("status {}", response.status())));
+            return Err(Error::Ollama(format!(
+                "unload status {}",
+                response.status()
+            )));
         }
-        let body: GenerateResponse = response.json().await.map_err(map_reqwest)?;
-        Ok(body.response)
+        Ok(())
     }
 }
 
-fn map_reqwest(error: reqwest::Error) -> Error {
-    if error.is_timeout() {
-        Error::Timeout
-    } else {
-        Error::Ollama(error.to_string())
+impl Origin for OllamaClient {
+    fn redacted_origin(&self) -> Option<String> {
+        Some(self.redacted_base_url.clone())
+    }
+}
+
+#[async_trait]
+impl LLMClient for OllamaClient {
+    async fn complete(&self, request: LLMRequest) -> Result<LLMResponse, KernelError> {
+        let _guard = self.generate_lock.lock().await;
+        // The per-request model overrides the client's placeholder model.
+        let model_for_unload = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.inner.model_name().to_string());
+        // Wrap with our own tokio timeout so we can reliably detect timeouts
+        // (the kernel's OpenAIClient maps reqwest timeouts to LlmApi, losing
+        // the structured timeout info).
+        let response = tokio::time::timeout(self.timeout, self.inner.complete(request))
+            .await
+            .map_err(|_| KernelError::Timeout(self.timeout.as_secs()))??;
+        // Best-effort unload: a failure here does not fail the completion.
+        let _ = self.unload(&model_for_unload).await;
+        Ok(response)
+    }
+
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    async fn stream_complete(
+        &self,
+        request: LLMRequest,
+    ) -> Result<llm_kernel::llm::LLMStream, KernelError> {
+        // Delegate directly. Streaming does NOT take `generate_lock`, so a
+        // stream can overlap a `complete` call on a shared `OllamaClient`.
+        // Streaming also does not unload (the model is still producing
+        // tokens). Callers that need serialization or unload after a stream
+        // should call `complete` instead.
+        self.inner.stream_complete(request).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generate::map_kernel_error;
     use serde_json::Value;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     struct CountingDelay {
@@ -216,135 +284,187 @@ mod tests {
             self.max.fetch_max(current, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(80));
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
-            ResponseTemplate::new(200)
-                .set_body_raw(r#"{"response":"ok","done":true}"#, "application/json")
+            ResponseTemplate::new(200).set_body_raw(
+                r#"{"id":"chatcmpl-x","created":1,"model":"ollama","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                "application/json",
+            )
         }
     }
 
-    async fn capture_generate_body(server: &MockServer) -> Value {
-        let requests = server.received_requests().await.expect("requests");
-        assert_eq!(requests.len(), 1);
-        serde_json::from_slice(&requests[0].body).expect("json body")
+    /// Mount an OpenAI-compatible `/v1/chat/completions` 200 handler.
+    async fn mount_chat(server: &MockServer, body: &str) {
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.to_string(), "application/json"),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// Standard OpenAI chat completion response with the given content.
+    fn chat_response(content: &str) -> String {
+        format!(
+            r#"{{"id":"chatcmpl-x","created":1,"model":"ollama","choices":[{{"index":0,"message":{{"role":"assistant","content":{}}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}}}"#,
+            serde_json::to_string(content).expect("content JSON")
+        )
     }
 
     #[tokio::test]
-    async fn generate_sends_keep_alive_zero_and_no_stream() {
+    async fn complete_returns_content_and_unloads_with_keep_alive_zero() {
         let server = MockServer::start().await;
+        mount_chat(&server, &chat_response("hello")).await;
+        // Capture the unload request body.
         Mock::given(method("POST"))
             .and(path("/api/generate"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(r#"{"response":"hello","done":true}"#, "application/json"),
-            )
+            .and(body_partial_json(serde_json::json!({"keep_alive": 0})))
+            .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
 
         let client = OllamaClient::new(server.uri()).expect("client");
-        let text = client
-            .generate("qwen2.5-coder:7b", "say hi")
-            .await
-            .expect("generate");
-        assert_eq!(text, "hello");
+        let request = LLMRequest {
+            model: Some("qwen2.5-coder:7b".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("say hi")],
+            temperature: 0.2,
+            ..LLMRequest::default()
+        };
+        let response = client.complete(request).await.expect("complete");
+        assert_eq!(response.content, "hello");
 
-        let body = capture_generate_body(&server).await;
+        // Verify the unload request carried keep_alive: 0.
+        let generate_requests: Vec<_> = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .filter(|r| r.url.path() == "/api/generate")
+            .collect();
+        assert_eq!(generate_requests.len(), 1, "expected one unload request");
+        let body: Value =
+            serde_json::from_slice(&generate_requests[0].body).expect("unload body JSON");
+        assert_eq!(body["keep_alive"], 0);
         assert_eq!(body["model"], "qwen2.5-coder:7b");
-        assert_eq!(body["prompt"], "say hi");
-        assert_eq!(body["stream"], false);
-        assert_eq!(body["keep_alive"], 0);
-        assert_eq!(body["options"]["temperature"], 0.2);
     }
 
     #[tokio::test]
-    async fn generate_with_sends_requested_temperature() {
+    async fn complete_passes_temperature_through() {
         let server = MockServer::start().await;
+        mount_chat(&server, &chat_response("ok")).await;
         Mock::given(method("POST"))
             .and(path("/api/generate"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(r#"{"response":"ok","done":true}"#, "application/json"),
-            )
+            .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
 
         let client = OllamaClient::new(server.uri()).expect("client");
-        client
-            .generate_with("gemma2:9b", "draft", 0.5)
+        let request = LLMRequest {
+            model: Some("gemma2:9b".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("draft")],
+            temperature: 0.5,
+            ..LLMRequest::default()
+        };
+        client.complete(request).await.expect("complete");
+
+        let chat_requests: Vec<_> = server
+            .received_requests()
             .await
-            .expect("generate");
-        let body = capture_generate_body(&server).await;
-        assert_eq!(body["options"]["temperature"], 0.5);
-        assert_eq!(body["keep_alive"], 0);
+            .expect("requests")
+            .into_iter()
+            .filter(|r| r.url.path() == "/v1/chat/completions")
+            .collect();
+        assert_eq!(chat_requests.len(), 1);
+        let body: Value = serde_json::from_slice(&chat_requests[0].body).expect("chat body JSON");
+        assert_eq!(body["temperature"], 0.5);
     }
 
     #[tokio::test]
-    async fn generate_maps_404_to_model_not_found() {
+    async fn complete_maps_404_to_model_not_found() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/generate"))
-            .respond_with(
-                ResponseTemplate::new(404)
-                    .set_body_raw(r#"{"error":"model 'nope' not found"}"#, "application/json"),
-            )
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(404).set_body_raw(
+                r#"{"error":{"message":"model 'nope' not found"}}"#,
+                "application/json",
+            ))
             .mount(&server)
             .await;
 
         let client = OllamaClient::new(server.uri()).expect("client");
-        let err = client
-            .generate("nope", "x")
-            .await
-            .expect_err("missing model");
-        match err {
+        let request = LLMRequest {
+            model: Some("nope".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("x")],
+            temperature: 0.2,
+            ..LLMRequest::default()
+        };
+        let err = client.complete(request).await.expect_err("missing model");
+        let mapped = map_kernel_error(err, "nope");
+        match mapped {
             Error::ModelNotFound { model } => assert_eq!(model, "nope"),
             other => panic!("expected ModelNotFound, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn generate_maps_non_404_http_error() {
+    async fn complete_maps_non_404_http_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/generate"))
+            .and(path("/v1/chat/completions"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
 
         let client = OllamaClient::new(server.uri()).expect("client");
-        let err = client.generate("m", "p").await.expect_err("status");
-        match err {
+        let request = LLMRequest {
+            model: Some("m".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("p")],
+            temperature: 0.2,
+            ..LLMRequest::default()
+        };
+        let err = client.complete(request).await.expect_err("status");
+        let mapped = map_kernel_error(err, "m");
+        match mapped {
             Error::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
             other => panic!("expected Ollama status error, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn generate_maps_timeout() {
+    async fn complete_maps_timeout() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/generate"))
+            .and(path("/v1/chat/completions"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_delay(Duration::from_millis(200))
-                    .set_body_raw(r#"{"response":"late","done":true}"#, "application/json"),
+                    .set_body_raw(chat_response("late").as_bytes(), "application/json"),
             )
             .mount(&server)
             .await;
 
         let client =
             OllamaClient::with_timeout(server.uri(), Duration::from_millis(40)).expect("client");
-        let err = client.generate("m", "p").await.expect_err("timeout");
-        assert!(
-            matches!(err, Error::Timeout),
-            "expected Timeout, got {err:?}"
-        );
+        let request = LLMRequest {
+            model: Some("m".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("p")],
+            temperature: 0.2,
+            ..LLMRequest::default()
+        };
+        let err = client.complete(request).await.expect_err("timeout");
+        let mapped = map_kernel_error(err, "m");
+        match mapped {
+            Error::Timeout => {}
+            other => panic!("expected Timeout, got {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn generate_is_serialized() {
+    async fn complete_is_serialized() {
         let server = MockServer::start().await;
         let in_flight = Arc::new(AtomicU32::new(0));
         let max = Arc::new(AtomicU32::new(0));
         Mock::given(method("POST"))
-            .and(path("/api/generate"))
+            .and(path("/v1/chat/completions"))
             .respond_with(CountingDelay {
                 in_flight: Arc::clone(&in_flight),
                 max: Arc::clone(&max),
@@ -352,17 +472,29 @@ mod tests {
             .expect(2)
             .mount(&server)
             .await;
+        // Unload requests can be 404s — they're best-effort.
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
 
         let client = OllamaClient::new(server.uri()).expect("client");
-        let first = client.generate("m", "one");
-        let second = client.generate("m", "two");
+        let req = || LLMRequest {
+            model: Some("m".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("p")],
+            temperature: 0.2,
+            ..LLMRequest::default()
+        };
+        let first = client.complete(req());
+        let second = client.complete(req());
         let (a, b) = tokio::join!(first, second);
         a.expect("first");
         b.expect("second");
         assert_eq!(
             max.load(Ordering::SeqCst),
             1,
-            "two generates must not overlap"
+            "two completes must not overlap"
         );
     }
 
@@ -471,8 +603,14 @@ mod tests {
         // any credential-like content even if the URL were to leak.
         let client = OllamaClient::with_timeout("http://127.0.0.1:1", Duration::from_millis(100))
             .expect("valid origin");
-        let error = client.generate("m", "p").await.expect_err("must fail");
-        let text = error.to_string();
+        let request = LLMRequest {
+            model: Some("m".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("p")],
+            temperature: 0.2,
+            ..LLMRequest::default()
+        };
+        let error = client.complete(request).await.expect_err("must fail");
+        let text = map_kernel_error(error, "m").to_string();
         // The error may contain the URL (reqwest formats it), but it must
         // never contain credential separators since validation strips them.
         assert!(
