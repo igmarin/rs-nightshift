@@ -33,21 +33,24 @@ pub trait Origin: LLMClient {
 
 /// Convert an `llm-kernel` error into the rs-nightshift `Error` enum.
 ///
-/// `KernelError::Timeout` maps to [`Error::Timeout`] (preserving the
-/// "Ollama request timed out" message used by the doctor and run log);
-/// `KernelError::Http { status: 404, .. }` maps to [`Error::ModelNotFound`];
+/// `model` is the requested model tag, used for [`Error::ModelNotFound`] so
+/// the error reports the model the caller asked for rather than the HTTP
+/// response body (which may contain a full API error JSON object).
+///
+/// `KernelError::Timeout` maps to [`Error::Timeout`];
+/// `KernelError::Http { status: 404, .. }` maps to [`Error::ModelNotFound`]
+/// using `model`;
 /// `KernelError::LlmApi` whose message contains "timed out" also maps to
 /// [`Error::Timeout`] (the kernel's `OpenAIClient` surfaces reqwest timeouts
 /// as `LlmApi` rather than `Timeout`); everything else maps to
 /// [`Error::Ollama`] with the kernel's message.
-pub fn map_kernel_error(error: KernelError) -> Error {
+pub fn map_kernel_error(error: KernelError, model: &str) -> Error {
     match error {
         KernelError::Timeout(_) => Error::Timeout,
         KernelError::LlmApi(ref msg) if msg.contains("timed out") => Error::Timeout,
-        KernelError::Http {
-            status: 404,
-            message,
-        } => Error::ModelNotFound { model: message },
+        KernelError::Http { status: 404, .. } => Error::ModelNotFound {
+            model: model.to_string(),
+        },
         other => Error::Ollama(other.to_string()),
     }
 }
@@ -57,7 +60,7 @@ pub fn map_kernel_error(error: KernelError) -> Error {
 /// This is the shared call-site helper used by every stage: it builds an
 /// [`LLMRequest`] from a user prompt + temperature, calls
 /// [`LLMClient::complete`], and unwraps the response content. Kernel errors
-/// are mapped via [`map_kernel_error`].
+/// are mapped via [`map_kernel_error`] with the requested model tag.
 pub async fn complete_text(
     client: &dyn LLMClient,
     model: &str,
@@ -70,7 +73,10 @@ pub async fn complete_text(
         temperature,
         ..LLMRequest::default()
     };
-    let response: LLMResponse = client.complete(request).await.map_err(map_kernel_error)?;
+    let response: LLMResponse = client
+        .complete(request)
+        .await
+        .map_err(|e| map_kernel_error(e, model))?;
     Ok(response.content)
 }
 
@@ -164,6 +170,10 @@ impl LLMClient for ScriptedGenerator {
             })
             .map_err(|e| match e {
                 Error::Timeout => KernelError::Timeout(0),
+                Error::ModelNotFound { model } => KernelError::Http {
+                    status: 404,
+                    message: model,
+                },
                 other => KernelError::LlmApi(other.to_string()),
             })
     }
@@ -213,16 +223,19 @@ mod tests {
 
     #[test]
     fn map_kernel_error_timeout_maps_to_timeout() {
-        let err = map_kernel_error(KernelError::Timeout(120));
+        let err = map_kernel_error(KernelError::Timeout(120), "m");
         assert!(matches!(err, Error::Timeout));
     }
 
     #[test]
     fn map_kernel_error_http_404_maps_to_model_not_found() {
-        let err = map_kernel_error(KernelError::Http {
-            status: 404,
-            message: "qwen2.5-coder:7b".into(),
-        });
+        let err = map_kernel_error(
+            KernelError::Http {
+                status: 404,
+                message: "some API error body".into(),
+            },
+            "qwen2.5-coder:7b",
+        );
         match err {
             Error::ModelNotFound { model } => assert_eq!(model, "qwen2.5-coder:7b"),
             other => panic!("expected ModelNotFound, got {other:?}"),
@@ -231,7 +244,7 @@ mod tests {
 
     #[test]
     fn map_kernel_error_other_maps_to_ollama() {
-        let err = map_kernel_error(KernelError::LlmApi("boom".into()));
+        let err = map_kernel_error(KernelError::LlmApi("boom".into()), "m");
         match err {
             Error::Ollama(msg) => assert!(msg.contains("boom"), "{msg}"),
             other => panic!("expected Ollama, got {other:?}"),

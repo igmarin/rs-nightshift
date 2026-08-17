@@ -18,6 +18,12 @@ use tokio::sync::Mutex;
 /// Default generate timeout (matches the original hand-rolled client).
 pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Timeout for the best-effort `keep_alive: 0` unload request.
+///
+/// Kept short so a hanging Ollama server cannot block the serialization lock
+/// (and thus all subsequent stages) for an extended period.
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Validate an Ollama HTTP(S) origin and return its normalized form.
 pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
@@ -180,11 +186,12 @@ impl OllamaClient {
     /// Send Ollama a `keep_alive: 0` unload request for `model`.
     ///
     /// Errors are best-effort: a failed unload does not fail the pipeline,
-    /// since the completion already succeeded. The error is surfaced as an
-    /// `Error::Ollama` only when the caller chooses to inspect it (tests).
+    /// since the completion already succeeded. The request is bounded by
+    /// [`UNLOAD_TIMEOUT`] so a hanging Ollama server cannot block the
+    /// serialization lock (and thus all subsequent stages) indefinitely.
     async fn unload(&self, model: &str) -> Result<(), Error> {
         let url = format!("{}/api/generate", self.base_url.trim_end_matches('/'));
-        let response = self
+        let send = self
             .unload_client
             .post(url)
             .json(&UnloadRequest {
@@ -193,8 +200,15 @@ impl OllamaClient {
                 stream: false,
                 keep_alive: 0,
             })
-            .send()
+            .send();
+        let response = tokio::time::timeout(UNLOAD_TIMEOUT, send)
             .await
+            .map_err(|_| {
+                Error::Ollama(format!(
+                    "unload timed out after {}s",
+                    UNLOAD_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| Error::Ollama(e.to_string()))?;
         if !response.status().is_success() {
             return Err(Error::Ollama(format!(
@@ -240,9 +254,11 @@ impl LLMClient for OllamaClient {
         &self,
         request: LLMRequest,
     ) -> Result<llm_kernel::llm::LLMStream, KernelError> {
-        // Delegate directly; streaming does not unload (the model is still
-        // producing tokens). Callers that want unload after a stream should
-        // call `complete` instead.
+        // Delegate directly. Streaming does NOT take `generate_lock`, so a
+        // stream can overlap a `complete` call on a shared `OllamaClient`.
+        // Streaming also does not unload (the model is still producing
+        // tokens). Callers that need serialization or unload after a stream
+        // should call `complete` instead.
         self.inner.stream_complete(request).await
     }
 }
@@ -382,9 +398,9 @@ mod tests {
             ..LLMRequest::default()
         };
         let err = client.complete(request).await.expect_err("missing model");
-        let mapped = map_kernel_error(err);
+        let mapped = map_kernel_error(err, "nope");
         match mapped {
-            Error::ModelNotFound { model } => assert!(model.contains("nope"), "{model}"),
+            Error::ModelNotFound { model } => assert_eq!(model, "nope"),
             other => panic!("expected ModelNotFound, got {other:?}"),
         }
     }
@@ -406,7 +422,7 @@ mod tests {
             ..LLMRequest::default()
         };
         let err = client.complete(request).await.expect_err("status");
-        let mapped = map_kernel_error(err);
+        let mapped = map_kernel_error(err, "m");
         match mapped {
             Error::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
             other => panic!("expected Ollama status error, got {other:?}"),
@@ -435,7 +451,7 @@ mod tests {
             ..LLMRequest::default()
         };
         let err = client.complete(request).await.expect_err("timeout");
-        let mapped = map_kernel_error(err);
+        let mapped = map_kernel_error(err, "m");
         match mapped {
             Error::Timeout => {}
             other => panic!("expected Timeout, got {other:?}"),
@@ -594,7 +610,7 @@ mod tests {
             ..LLMRequest::default()
         };
         let error = client.complete(request).await.expect_err("must fail");
-        let text = map_kernel_error(error).to_string();
+        let text = map_kernel_error(error, "m").to_string();
         // The error may contain the URL (reqwest formats it), but it must
         // never contain credential separators since validation strips them.
         assert!(
