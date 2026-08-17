@@ -89,13 +89,31 @@ Optional but recommended: run `graphify .` in the repo root to produce
 
 ### 2. Start the run
 
-Use tmux so you can disconnect:
+Use tmux so you can disconnect. **Start tmux first, then run inside it** — if
+you start the run in a plain SSH session and close the terminal, the process
+dies.
 
 ```text
 tmux new -s nightshift
 # inside tmux:
 nightshift run --goal "add a /health endpoint that returns 200 OK" --repo ~/projects/my-app
 # detach: Ctrl-b d
+```
+
+Before closing your terminal, verify the session is holding:
+
+```text
+tmux ls
+# should show: nightshift: 1 windows
+```
+
+If you see `no server running`, the process is in the foreground and will die
+when you close — go back and start tmux first.
+
+Reattach later from any SSH session:
+
+```text
+tmux attach -t nightshift
 ```
 
 Or use systemd with the bundled
@@ -106,7 +124,7 @@ Progress is always appended to `artifacts/latest/run.log` — no TTY needed.
 
 ### 3. Check progress (optional)
 
-From another SSH session:
+From another SSH session, without attaching to tmux:
 
 ```text
 tail -f ~/projects/my-app/artifacts/latest/run.log
@@ -124,6 +142,14 @@ stage=dev done
 ```
 
 ### 4. Morning: review the results
+
+SSH back in and reattach (or just check the log):
+
+```text
+tmux attach -t nightshift
+# or without attaching:
+nightshift status --out ~/projects/my-app/artifacts
+```
 
 ```text
 nightshift status
