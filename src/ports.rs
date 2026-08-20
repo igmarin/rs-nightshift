@@ -5,11 +5,13 @@
 //! role executor stay unit-testable without a network, git, or a filesystem.
 //! See `docs/role-graph.md` §Hexagonal architecture and ADR-007.
 //!
-//! Additional ports (`ToolRunner`, `ArtifactStore`, `StateStore`,
-//! `ContextProvider`, `Clock`) are introduced with their first consumer rather
-//! than speculatively, so each trait's shape is driven by real usage.
+//! `ToolRunner` and `ContextProvider` are introduced with their first consumer
+//! (the capabilities ticket) rather than speculatively, so each trait's shape
+//! is driven by real usage.
 
+use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot};
 use crate::error::Error;
+use std::path::{Path, PathBuf};
 
 /// One LLM completion request for a single role call.
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +96,132 @@ impl ModelClient for ScriptedModelClient {
     }
 }
 
+/// A wall clock, abstracted so runs are deterministic in tests.
+pub trait Clock: Send + Sync {
+    /// Current instant as ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).
+    fn now_iso(&self) -> String;
+
+    /// Today's calendar date as `YYYY-MM-DD` (the run-dir slug).
+    fn today(&self) -> String;
+}
+
+/// Test double for [`Clock`]: returns fixed values.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct FixedClock {
+    /// The fixed ISO-8601 timestamp to return.
+    pub now_iso: String,
+    /// The fixed calendar date to return.
+    pub today: String,
+}
+
+#[cfg(test)]
+impl Clock for FixedClock {
+    fn now_iso(&self) -> String {
+        self.now_iso.clone()
+    }
+
+    fn today(&self) -> String {
+        self.today.clone()
+    }
+}
+
+/// Reads and writes role artifacts for a run.
+///
+/// The filesystem adapter implements this; the executor and orchestrator depend
+/// only on this trait, never on `std::fs` directly.
+pub trait ArtifactStore: Send + Sync {
+    /// Create the run directory and return its path.
+    fn create_run(&self, date: &str, slug: &str) -> Result<PathBuf, Error>;
+
+    /// Read an artifact file by name, relative to the run directory.
+    fn read_artifact(&self, run: &Path, name: &str) -> Result<String, Error>;
+
+    /// Write an artifact file by name, relative to the run directory.
+    fn write_artifact(&self, run: &Path, name: &str, content: &str) -> Result<(), Error>;
+}
+
+/// Test double for [`ArtifactStore`]: an in-memory name → content map.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct MemoryArtifactStore {
+    files: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+}
+
+#[cfg(test)]
+impl ArtifactStore for MemoryArtifactStore {
+    fn create_run(&self, _date: &str, slug: &str) -> Result<PathBuf, Error> {
+        Ok(PathBuf::from(format!("/tmp/run/{slug}")))
+    }
+
+    fn read_artifact(&self, _run: &Path, name: &str) -> Result<String, Error> {
+        self.files
+            .lock()
+            .expect("store mutex")
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Error::Artifact(format!("no artifact {name}")))
+    }
+
+    fn write_artifact(&self, _run: &Path, name: &str, content: &str) -> Result<(), Error> {
+        self.files
+            .lock()
+            .expect("store mutex")
+            .insert(name.to_string(), content.to_string());
+        Ok(())
+    }
+}
+
+/// Persists the action log and status snapshot for a run.
+pub trait StateStore: Send + Sync {
+    /// Append one action-log event.
+    fn append_action(&self, run: &Path, event: &ActionEvent) -> Result<(), Error>;
+
+    /// Write the status snapshot.
+    fn write_snapshot(&self, run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error>;
+
+    /// Read the status snapshot, if one has been written.
+    fn read_snapshot(&self, run: &Path) -> Result<StatusSnapshot, Error>;
+}
+
+/// Test double for [`StateStore`]: keeps events and the latest snapshot in memory.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct MemoryStateStore {
+    events: std::sync::Mutex<Vec<ActionEvent>>,
+    snapshot: std::sync::Mutex<Option<StatusSnapshot>>,
+}
+
+#[cfg(test)]
+impl MemoryStateStore {
+    /// Recorded action-log events, in order.
+    #[must_use]
+    pub fn events(&self) -> Vec<ActionEvent> {
+        self.events.lock().expect("store mutex").clone()
+    }
+}
+
+#[cfg(test)]
+impl StateStore for MemoryStateStore {
+    fn append_action(&self, _run: &Path, event: &ActionEvent) -> Result<(), Error> {
+        self.events.lock().expect("store mutex").push(event.clone());
+        Ok(())
+    }
+
+    fn write_snapshot(&self, _run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error> {
+        *self.snapshot.lock().expect("store mutex") = Some(snapshot.clone());
+        Ok(())
+    }
+
+    fn read_snapshot(&self, _run: &Path) -> Result<StatusSnapshot, Error> {
+        self.snapshot
+            .lock()
+            .expect("store mutex")
+            .clone()
+            .ok_or_else(|| Error::Artifact("no snapshot written".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +264,46 @@ mod tests {
         let client = ScriptedModelClient::new();
         let err = client.generate(&request()).await.expect_err("exhausted");
         assert!(err.to_string().contains("no scripted replies"), "{err}");
+    }
+
+    #[test]
+    fn fixed_clock_returns_fixed_values() {
+        let clock = FixedClock {
+            now_iso: "2026-08-19T12:00:00Z".into(),
+            today: "2026-08-19".into(),
+        };
+        assert_eq!(clock.now_iso(), "2026-08-19T12:00:00Z");
+        assert_eq!(clock.today(), "2026-08-19");
+    }
+
+    #[test]
+    fn memory_artifact_store_round_trips() {
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        store
+            .write_artifact(run, "01_brief.md", "goal")
+            .expect("write");
+        assert_eq!(
+            store.read_artifact(run, "01_brief.md").expect("read"),
+            "goal"
+        );
+    }
+
+    #[test]
+    fn memory_state_store_round_trips_snapshot() {
+        use crate::domain::rolegraph::state::RunStatus;
+        use crate::domain::rolegraph::verdict::BlockReason;
+        let store = MemoryStateStore::default();
+        let run = Path::new("/tmp/run/x");
+        let snap = StatusSnapshot {
+            current_role: Some("qa".into()),
+            steps: 3,
+            last_verdict: None,
+            status: RunStatus::Running,
+            block_reason: BlockReason::None,
+            loop_counters: std::collections::BTreeMap::new(),
+        };
+        store.write_snapshot(run, &snap).expect("write");
+        assert_eq!(store.read_snapshot(run).expect("read"), snap);
     }
 }
