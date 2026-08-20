@@ -17,6 +17,48 @@ role graph**.
 - **Capabilities stay in code**: the harness does `git apply`, test runs, and
   context gathering on the role's behalf; models only write text + a verdict.
 
+## Hexagonal architecture
+
+The harness follows **ports & adapters** (hexagonal) so domain logic is pure
+and all I/O sits behind traits, mirroring `brigid`'s `brigid-core` (pure domain
++ traits) / `brigid-pipeline` (orchestration + adapters) split.
+
+Target crate layout (fragmentation is mechanical once these boundaries hold):
+
+- **`nightshift-core`** — domain + ports, **no I/O**: the role graph (`config`,
+  `verdict`, `routing`), state/report models, and the port traits. Trivially
+  unit-testable; no network or filesystem.
+- **`nightshift-engine`** — application + adapters: the graph orchestrator and
+  role executor (application), plus adapters implementing the ports —
+  llm-kernel clients (Ollama/Deepseek/Kimi), filesystem artifact store, JSONL
+  action log, `git apply` / test-runner / context tools.
+- **`nightshift-cli`** — thin shell: `clap` parsing, `plan`/`run`/`status`/
+  `doctor`, process exit. No business logic.
+
+For beta these land as modules (`src/domain`, `src/ports`, `src/application`,
+`src/adapters`, `src/cli`) inside the current crate and are split into crates
+when the boundaries stabilise.
+
+Ports (traits the domain defines; adapters implement):
+
+| Port | What it abstracts |
+| :--- | :--- |
+| `ModelClient` | one LLM call (`complete(model, prompt) -> text`) + error mapping |
+| `ToolRunner` | a declared capability (`run-tests`, `apply-patch`, `gather-context`) |
+| `ArtifactStore` | create run dir, read/write artifacts, `latest` pointer |
+| `StateStore` | append action-log events + write/read the status snapshot |
+| `ContextProvider` | repo context (codegraph/graphify) for context injection |
+| `Clock` | today's date (run-dir slug), deterministic in tests |
+
+Invariants:
+
+- Domain and application code never touch `std::net`, `reqwest`, `tokio::fs`,
+  or `std::process` directly — only through a port.
+- Adapters are the only modules that import `llm-kernel`, `reqwest`, or shell
+  out to `git`/`codegraph`/`graphify`.
+- Every port has a test double (`ScriptedModelClient`, `FakeToolRunner`,
+  `FakeArtifactStore`, `InMemoryStateStore`, `NoneContext`, `FixedClock`).
+
 ## Goals (beta)
 
 - Arbitrary role types (Product Owner, Developer, QA, Researcher, Writer,

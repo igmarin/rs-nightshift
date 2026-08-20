@@ -121,3 +121,27 @@ output, routing). The harness routes on a small deterministic verdict vocabulary
 - Beta scope: linear chain + loop-backs; providers Ollama, Deepseek,
   Kimi/Moonshot; env-var auth.
 - crates.io stays out (ADR-001 reaffirmed); Cline is deferred post-beta.
+
+## ADR-007: Hexagonal architecture for the role-graph harness
+
+**Date:** 2026-08-19
+
+**Context:** The role-graph harness will grow adapters (LLM providers, git,
+test runners, context tools, filesystem/state). Mixing domain logic with I/O
+would make the crate hard to test and hard to fragment. The `brigid` repo is
+the reference: pure `brigid-core` (domain + traits) with orchestration and
+adapters in `brigid-pipeline`.
+
+**Decision:** Build the harness hexagonally — a pure domain + ports layer
+(`ModelClient`, `ToolRunner`, `ArtifactStore`, `StateStore`, `ContextProvider`,
+`Clock`), an application layer (orchestrator/executor), and adapters that
+implement the ports. Domain and application code never do I/O directly.
+
+**Consequences:**
+- Domain and ports are unit-testable without network/FS (fast, deterministic).
+- Adapters are the only modules that import `llm-kernel`, `reqwest`, or shell
+  out to external tools.
+- Fragmentation into `nightshift-core` / `nightshift-engine` /
+  `nightshift-cli` crates (mirroring brigid) is mechanical once boundaries
+  stabilise.
+- Every port ships with a test double.
