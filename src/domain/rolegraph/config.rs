@@ -1,7 +1,7 @@
 //! Role-graph configuration: the `nightshift.toml` schema and validation.
 
 use crate::domain::rolegraph::routing::{Routing, Target};
-use crate::error::Error;
+use crate::error::{ConfigError, Error};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -174,13 +174,17 @@ impl NightshiftConfig {
 
 /// Load, parse, and validate the role graph from a TOML file.
 pub fn load_role_graph_config_from(path: &Path) -> Result<NightshiftConfig, Error> {
-    let content = std::fs::read_to_string(path).map_err(|error| Error::Config {
-        path: path.display().to_string(),
-        message: error.to_string(),
+    let content = std::fs::read_to_string(path).map_err(|error| {
+        Error::from(ConfigError {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })
     })?;
-    let config: NightshiftConfig = toml::from_str(&content).map_err(|error| Error::Config {
-        path: path.display().to_string(),
-        message: error.to_string(),
+    let config: NightshiftConfig = toml::from_str(&content).map_err(|error| {
+        Error::from(ConfigError {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })
     })?;
     config.validate()?;
     Ok(config)

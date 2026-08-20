@@ -12,6 +12,8 @@
 use crate::domain::rolegraph::config::ProviderSpec;
 use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot};
 use crate::error::Error;
+#[cfg(test)]
+use crate::error::{ArtifactError, ProviderError};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -94,7 +96,11 @@ impl ModelClient for ScriptedModelClient {
             .lock()
             .expect("script mutex")
             .pop_front()
-            .unwrap_or_else(|| Err(Error::Artifact("no scripted replies remaining".into())))
+            .unwrap_or_else(|| {
+                Err(Error::from(ArtifactError::artifact(
+                    "no scripted replies remaining",
+                )))
+            })
     }
 }
 
@@ -162,7 +168,7 @@ impl ArtifactStore for MemoryArtifactStore {
             .expect("store mutex")
             .get(name)
             .cloned()
-            .ok_or_else(|| Error::Artifact(format!("no artifact {name}")))
+            .ok_or_else(|| Error::from(ArtifactError::artifact(format!("no artifact {name}"))))
     }
 
     fn write_artifact(&self, _run: &Path, name: &str, content: &str) -> Result<(), Error> {
@@ -227,7 +233,7 @@ impl StateStore for MemoryStateStore {
             .lock()
             .expect("store mutex")
             .clone()
-            .ok_or_else(|| Error::Artifact("no snapshot written".into()))
+            .ok_or_else(|| Error::from(ArtifactError::artifact("no snapshot written")))
     }
 }
 
@@ -353,12 +359,12 @@ mod tests {
     #[tokio::test]
     async fn scripted_client_returns_queued_error() {
         let client = ScriptedModelClient::new();
-        client.push_err(Error::Timeout);
+        client.push_err(Error::from(ProviderError::Timeout));
         let err = client
             .generate(&request())
             .await
             .expect_err("scripted error");
-        assert!(matches!(err, Error::Timeout));
+        assert!(matches!(err, Error::Provider(ProviderError::Timeout)));
     }
 
     #[tokio::test]

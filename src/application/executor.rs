@@ -2,7 +2,7 @@
 
 use crate::domain::rolegraph::config::RoleSpec;
 use crate::domain::rolegraph::verdict::{RoleOutput, Verdict};
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::ports::{ArtifactStore, ContextProvider, GenerateRequest, ModelClient, ToolRunner};
 use std::path::Path;
 
@@ -193,9 +193,8 @@ fn user_prompt(context: &RoleContext, artifacts: &[(String, String)], tool_outpu
 /// surrounding prose.
 fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
     let json = extract_json_object(text)?;
-    serde_json::from_str::<RoleOutput>(&json).map_err(|error| Error::InvalidArtifact {
-        artifact: "role output",
-        reason: format!("not a valid role envelope: {error}"),
+    serde_json::from_str::<RoleOutput>(&json).map_err(|error| {
+        ArtifactError::invalid("role output", format!("not a valid role envelope: {error}")).into()
     })
 }
 
@@ -223,10 +222,7 @@ fn extract_json_object(text: &str) -> Result<String, Error> {
 }
 
 fn invalid_envelope(reason: &str) -> Error {
-    Error::InvalidArtifact {
-        artifact: "role output",
-        reason: reason.to_string(),
-    }
+    ArtifactError::invalid("role output", reason.to_string()).into()
 }
 
 #[cfg(test)]

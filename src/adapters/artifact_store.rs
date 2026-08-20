@@ -1,6 +1,6 @@
 //! Filesystem [`ArtifactStore`] adapter: run directories under a root.
 
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::ports::ArtifactStore;
 use std::path::{Path, PathBuf};
 
@@ -26,21 +26,33 @@ impl FsArtifactStore {
 impl ArtifactStore for FsArtifactStore {
     fn create_run(&self, date: &str, slug: &str) -> Result<PathBuf, Error> {
         let dir = self.root.join(format!("{date}_{slug}"));
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| Error::Artifact(format!("create {}: {error}", dir.display())))?;
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "create {}: {error}",
+                dir.display()
+            )))
+        })?;
         Ok(dir)
     }
 
     fn read_artifact(&self, run: &Path, name: &str) -> Result<String, Error> {
         let path = run.join(name);
-        std::fs::read_to_string(&path)
-            .map_err(|error| Error::Artifact(format!("read {}: {error}", path.display())))
+        std::fs::read_to_string(&path).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "read {}: {error}",
+                path.display()
+            )))
+        })
     }
 
     fn write_artifact(&self, run: &Path, name: &str, content: &str) -> Result<(), Error> {
         let path = run.join(name);
-        std::fs::write(&path, content)
-            .map_err(|error| Error::Artifact(format!("write {}: {error}", path.display())))
+        std::fs::write(&path, content).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "write {}: {error}",
+                path.display()
+            )))
+        })
     }
 }
 

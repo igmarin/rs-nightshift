@@ -1,7 +1,9 @@
 //! Ollama model catalog trait and HTTP client.
 
 use crate::adapters::ollama::validate_ollama_url;
-use crate::error::Error;
+#[cfg(test)]
+use crate::error::{ArtifactError, ConfigError, GitError};
+use crate::error::{Error, ProviderError};
 use async_trait::async_trait;
 
 /// Lists models known to an Ollama server.
@@ -25,7 +27,7 @@ impl HttpModelCatalog {
             .timeout(std::time::Duration::from_secs(10))
             .no_proxy()
             .build()
-            .map_err(|error| Error::Ollama(error.to_string()))?;
+            .map_err(|error| Error::from(ProviderError::Ollama(error.to_string())))?;
         Ok(Self { client, base_url })
     }
 }
@@ -49,14 +51,17 @@ impl ModelCatalog for HttpModelCatalog {
             .get(url)
             .send()
             .await
-            .map_err(|error| Error::Ollama(error.to_string()))?;
+            .map_err(|error| Error::from(ProviderError::Ollama(error.to_string())))?;
         if !response.status().is_success() {
-            return Err(Error::Ollama(format!("status {}", response.status())));
+            return Err(Error::from(ProviderError::Ollama(format!(
+                "status {}",
+                response.status()
+            ))));
         }
         let body: TagsResponse = response
             .json()
             .await
-            .map_err(|error| Error::Ollama(error.to_string()))?;
+            .map_err(|error| Error::from(ProviderError::Ollama(error.to_string())))?;
         Ok(body.models.into_iter().map(|model| model.name).collect())
     }
 }
@@ -74,26 +79,40 @@ pub(crate) mod tests {
         async fn list_models(&self) -> Result<Vec<String>, Error> {
             match &self.result {
                 Ok(models) => Ok(models.clone()),
-                Err(Error::Ollama(msg)) => Err(Error::Ollama(msg.clone())),
-                Err(Error::ModelNotFound { model }) => Err(Error::ModelNotFound {
-                    model: model.clone(),
-                }),
-                Err(Error::Timeout) => Err(Error::Timeout),
-                Err(Error::Artifact(msg)) => Err(Error::Artifact(msg.clone())),
-                Err(Error::InvalidArtifact { artifact, reason }) => Err(Error::InvalidArtifact {
-                    artifact,
-                    reason: reason.clone(),
-                }),
+                Err(Error::Provider(ProviderError::Ollama(msg))) => {
+                    Err(Error::from(ProviderError::Ollama(msg.clone())))
+                }
+                Err(Error::Provider(ProviderError::ModelNotFound { model })) => {
+                    Err(Error::from(ProviderError::ModelNotFound {
+                        model: model.clone(),
+                    }))
+                }
+                Err(Error::Provider(ProviderError::Timeout)) => {
+                    Err(Error::from(ProviderError::Timeout))
+                }
+                Err(Error::Artifact(ArtifactError::Artifact(msg))) => {
+                    Err(Error::from(ArtifactError::artifact(msg.clone())))
+                }
+                Err(Error::Artifact(ArtifactError::InvalidArtifact { artifact, reason })) => {
+                    Err(Error::from(ArtifactError::InvalidArtifact {
+                        artifact,
+                        reason: reason.clone(),
+                    }))
+                }
                 Err(Error::Context(msg)) => Err(Error::Context(msg.clone())),
-                Err(Error::Git(msg)) => Err(Error::Git(msg.clone())),
+                Err(Error::Git(GitError(msg))) => Err(Error::from(GitError::new(msg.clone()))),
                 Err(Error::Io(e)) => Err(Error::Io(std::io::Error::new(e.kind(), e.to_string()))),
-                Err(Error::Config { path, message }) => Err(Error::Config {
-                    path: path.clone(),
-                    message: message.clone(),
-                }),
+                Err(Error::Config(ConfigError { path, message })) => {
+                    Err(Error::from(ConfigError {
+                        path: path.clone(),
+                        message: message.clone(),
+                    }))
+                }
                 Err(Error::RoleGraph(msg)) => Err(Error::RoleGraph(msg.clone())),
-                Err(Error::InvalidOllamaUrl { url }) => {
-                    Err(Error::InvalidOllamaUrl { url: url.clone() })
+                Err(Error::Provider(ProviderError::InvalidOllamaUrl { url })) => {
+                    Err(Error::from(ProviderError::InvalidOllamaUrl {
+                        url: url.clone(),
+                    }))
                 }
             }
         }
@@ -129,7 +148,7 @@ pub(crate) mod tests {
 
         let catalog = HttpModelCatalog::new(server.uri()).expect("catalog");
         let err = catalog.list_models().await.expect_err("json");
-        assert!(matches!(err, Error::Ollama(_)));
+        assert!(matches!(err, Error::Provider(ProviderError::Ollama(_))));
     }
 
     #[tokio::test]
@@ -144,7 +163,7 @@ pub(crate) mod tests {
         let catalog = HttpModelCatalog::new(server.uri()).expect("catalog");
         let err = catalog.list_models().await.expect_err("status");
         match err {
-            Error::Ollama(msg) => assert!(msg.contains("503"), "{msg}"),
+            Error::Provider(ProviderError::Ollama(msg)) => assert!(msg.contains("503"), "{msg}"),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -153,6 +172,6 @@ pub(crate) mod tests {
     async fn http_catalog_maps_connection_error() {
         let catalog = HttpModelCatalog::new("http://127.0.0.1:9").expect("catalog");
         let err = catalog.list_models().await.expect_err("connect");
-        assert!(matches!(err, Error::Ollama(_)));
+        assert!(matches!(err, Error::Provider(ProviderError::Ollama(_))));
     }
 }

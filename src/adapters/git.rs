@@ -3,7 +3,7 @@
 //! These functions inspect and mutate a repo working tree, but never add,
 //! commit, push, reset, or clean.
 
-use crate::error::Error;
+use crate::error::{ArtifactError, Error, GitError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -38,10 +38,11 @@ pub fn validate_patch_paths(paths: &[PathBuf]) -> Result<(), Error> {
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            return Err(Error::InvalidArtifact {
-                artifact: PATCH_FILE,
-                reason: format!("patch path escapes the repo: {raw}"),
-            });
+            return Err(ArtifactError::invalid(
+                PATCH_FILE,
+                format!("patch path escapes the repo: {raw}"),
+            )
+            .into());
         }
     }
     Ok(())
@@ -64,7 +65,7 @@ pub fn head_commit(repo: &Path) -> Result<String, Error> {
 /// `crate::dev::write_and_apply_patch`. It never modifies the working tree.
 pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
     validate_patch_paths(&patch_paths(patch))?;
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| Error::Git(e.to_string()))?;
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
     std::fs::write(tmp.path(), patch)?;
     git(
         repo,
@@ -73,7 +74,7 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
             "--check",
             tmp.path()
                 .to_str()
-                .ok_or_else(|| Error::Git("patch path".into()))?,
+                .ok_or_else(|| GitError::new("patch path".to_string()))?,
         ],
     )?;
     Ok(())
@@ -82,7 +83,7 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
 /// `git apply --check` then `git apply`. Never add/commit/push/reset/clean.
 pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
     apply_check(repo, patch)?;
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| Error::Git(e.to_string()))?;
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
     std::fs::write(tmp.path(), patch)?;
     git(
         repo,
@@ -90,7 +91,7 @@ pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
             "apply",
             tmp.path()
                 .to_str()
-                .ok_or_else(|| Error::Git("patch path".into()))?,
+                .ok_or_else(|| GitError::new("patch path".to_string()))?,
         ],
     )?;
     Ok(())
@@ -102,14 +103,12 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
         .args(args)
         .current_dir(repo)
         .output()
-        .map_err(|e| Error::Git(format!("failed to spawn git: {e}")))?;
+        .map_err(|e| GitError::new(format!("failed to spawn git: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Git(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
+        return Err(
+            GitError::new(format!("git {} failed: {}", args.join(" "), stderr.trim())).into(),
+        );
     }
-    String::from_utf8(output.stdout).map_err(|e| Error::Git(e.to_string()))
+    String::from_utf8(output.stdout).map_err(|e| GitError::new(e.to_string()).into())
 }
