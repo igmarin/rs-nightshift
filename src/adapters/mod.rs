@@ -36,6 +36,8 @@
 //! provider/model-specific passthrough). Invalid option *types* are config
 //! errors so typos surface at build time rather than silently.
 
+pub mod artifact_store;
+pub mod clock;
 pub mod state;
 
 use crate::domain::rolegraph::config::ProviderSpec;
