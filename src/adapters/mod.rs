@@ -1,4 +1,4 @@
-//! Adapters (hexagonal) implementing the [`crate::ports::ModelClient`] port.
+//! Adapters (hexagonal) implementing the ports (ADR-007).
 //!
 //! This is the only layer allowed to import `llm-kernel` and `reqwest`
 //! (ADR-007; `docs/role-graph.md` §Hexagonal). It provides an
@@ -35,6 +35,8 @@
 //! option keys are ignored (the config schema declares options a
 //! provider/model-specific passthrough). Invalid option *types* are config
 //! errors so typos surface at build time rather than silently.
+
+pub mod state;
 
 use crate::domain::rolegraph::config::ProviderSpec;
 use crate::error::Error;
