@@ -5,11 +5,11 @@
 //! vocabulary is deliberately small and fixed so control flow stays
 //! deterministic: no LLM decides the next step.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Why a run halted or failed. Surfaced in the morning report so the operator
 /// can tell "task was under-specified" from "a tool broke" at a glance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockReason {
     /// No block reason — used when the run succeeded or a verdict carries none.
@@ -35,7 +35,7 @@ pub struct Question {
 }
 
 /// The verdict a role emits, plus any structured payload the harness routes on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// Work accepted; proceed to the `continue` target.
