@@ -1,107 +1,12 @@
 //! Dev stage: validated unified diff, `git apply --check`, then apply. Never commit.
 
+use crate::adapters::git;
 use crate::artifacts::RunDir;
 use crate::error::Error;
 use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::techlead::TECH_SPEC_FILE;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-/// Artifact written by Dev.
-pub const PATCH_FILE: &str = "03_diff.patch";
-
-/// Paths named by a unified diff (`+++ b/foo`).
-#[must_use]
-pub fn patch_paths(patch: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for line in patch.lines() {
-        let Some(rest) = line.strip_prefix("+++ ") else {
-            continue;
-        };
-        let rest = rest.trim();
-        if rest == "/dev/null" {
-            continue;
-        }
-        let path = rest.strip_prefix("b/").unwrap_or(rest);
-        paths.push(PathBuf::from(path));
-    }
-    paths
-}
-
-/// Reject `..`, absolute paths, and empty paths (INV-4).
-pub fn validate_patch_paths(paths: &[PathBuf]) -> Result<(), Error> {
-    for path in paths {
-        let raw = path.to_string_lossy();
-        if raw.is_empty()
-            || path.is_absolute()
-            || path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(Error::InvalidArtifact {
-                artifact: PATCH_FILE,
-                reason: format!("patch path escapes the repo: {raw}"),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// `git status --porcelain` is non-empty.
-pub fn working_tree_dirty(repo: &Path) -> Result<bool, Error> {
-    let out = git(repo, &["status", "--porcelain"])?;
-    Ok(!out.trim().is_empty())
-}
-
-/// Current `HEAD` commit hash. Used to prove we never commit.
-pub fn head_commit(repo: &Path) -> Result<String, Error> {
-    git(repo, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
-}
-
-/// `git apply --check` then `git apply`. Never add/commit/push/reset/clean.
-pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
-    validate_patch_paths(&patch_paths(patch))?;
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| Error::Git(e.to_string()))?;
-    std::fs::write(tmp.path(), patch)?;
-    git(
-        repo,
-        &[
-            "apply",
-            "--check",
-            tmp.path()
-                .to_str()
-                .ok_or_else(|| Error::Git("patch path".into()))?,
-        ],
-    )?;
-    git(
-        repo,
-        &[
-            "apply",
-            tmp.path()
-                .to_str()
-                .ok_or_else(|| Error::Git("patch path".into()))?,
-        ],
-    )?;
-    Ok(())
-}
-
-fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .map_err(|e| Error::Git(format!("failed to spawn git: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Git(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
-    }
-    String::from_utf8(output.stdout).map_err(|e| Error::Git(e.to_string()))
-}
 
 fn file_slices(repo: &Path, files: &[PathBuf], max_bytes: usize) -> String {
     let mut out = String::new();
@@ -180,16 +85,16 @@ pub async fn write_and_apply_patch<G: LLMClient>(
             repaired
         }
     };
-    std::fs::write(run.path.join(PATCH_FILE), &patch)?;
-    apply_checked(repo, &patch)?;
+    std::fs::write(run.path.join(git::PATCH_FILE), &patch)?;
+    git::apply_checked(repo, &patch)?;
     Ok(())
 }
 
 fn validate_and_check(repo: &Path, patch: &str) -> Result<(), Error> {
-    validate_patch_paths(&patch_paths(patch))?;
+    git::validate_patch_paths(&git::patch_paths(patch))?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| Error::Git(e.to_string()))?;
     std::fs::write(tmp.path(), patch)?;
-    git(
+    git::git(
         repo,
         &[
             "apply",
@@ -214,6 +119,7 @@ mod tests {
     use crate::artifacts::ArtifactStore;
     use crate::generate::ScriptedGenerator;
     use crate::techlead::impacted_files;
+    use std::process::Command;
 
     fn init_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -262,24 +168,24 @@ diff --git a/hello.txt b/hello.txt
 
     #[test]
     fn escaping_patch_is_rejected() {
-        let err = validate_patch_paths(&[PathBuf::from("../secret")]).expect_err("escape");
+        let err = git::validate_patch_paths(&[PathBuf::from("../secret")]).expect_err("escape");
         match err {
             Error::InvalidArtifact { reason, .. } => {
                 assert!(reason.contains("escapes"), "{reason}");
             }
             other => panic!("expected InvalidArtifact, got {other:?}"),
         }
-        let err = validate_patch_paths(&[PathBuf::from("/etc/passwd")]).expect_err("abs");
+        let err = git::validate_patch_paths(&[PathBuf::from("/etc/passwd")]).expect_err("abs");
         assert!(matches!(err, Error::InvalidArtifact { .. }));
     }
 
     #[test]
     fn apply_dirties_tree_and_does_not_commit() {
         let repo = init_repo();
-        let before = head_commit(repo.path()).expect("head");
-        apply_checked(repo.path(), &hello_patch()).expect("apply");
-        assert!(working_tree_dirty(repo.path()).expect("dirty"));
-        let after = head_commit(repo.path()).expect("head");
+        let before = git::head_commit(repo.path()).expect("head");
+        git::apply_checked(repo.path(), &hello_patch()).expect("apply");
+        assert!(git::working_tree_dirty(repo.path()).expect("dirty"));
+        let after = git::head_commit(repo.path()).expect("head");
         assert_eq!(before, after, "pipeline must not commit");
         let body = std::fs::read_to_string(repo.path().join("hello.txt")).expect("read");
         assert_eq!(body, "hello world\n");
@@ -296,9 +202,9 @@ diff --git a/missing.txt b/missing.txt
 -nope
 +still
 ";
-        let err = apply_checked(repo.path(), bad).expect_err("check");
+        let err = git::apply_checked(repo.path(), bad).expect_err("check");
         assert!(matches!(err, Error::Git(_)), "{err:?}");
-        assert!(!working_tree_dirty(repo.path()).expect("clean"));
+        assert!(!git::working_tree_dirty(repo.path()).expect("clean"));
     }
 
     #[tokio::test]
@@ -321,9 +227,9 @@ diff --git a/missing.txt b/missing.txt
         )
         .await
         .expect("dev");
-        assert!(run.path.join(PATCH_FILE).is_file());
+        assert!(run.path.join(git::PATCH_FILE).is_file());
         assert_eq!(gen.calls()[0].model, model_for(Role::Dev));
-        assert!(working_tree_dirty(repo.path()).expect("dirty"));
+        assert!(git::working_tree_dirty(repo.path()).expect("dirty"));
     }
 
     #[test]
