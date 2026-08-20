@@ -30,6 +30,8 @@ const REQUIRED_GATES: &[(&str, &str)] = &[
         "coverage",
         "cargo llvm-cov --workspace --fail-under-lines 85",
     ),
+    ("audit", "cargo audit"),
+    ("deny", "cargo deny check"),
 ];
 
 #[test]

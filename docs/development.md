@@ -1,5 +1,30 @@
 # Development
 
+## Required tools
+
+The project uses [mise](https://mise.en.dev) for dev tools. With `.mise.toml`
+in the repo, run:
+
+```text
+mise install
+```
+
+This installs Rust, `cargo-binstall`, `cargo-audit`, `cargo-deny`, and
+`cargo-llvm-cov` (along with `fd` and `gum`). If you do not use mise, install
+the tools manually:
+
+```text
+cargo install cargo-audit --version 0.22.2 --locked
+cargo install cargo-deny --version 0.20.2 --locked
+cargo install cargo-llvm-cov --version 0.6.13 --locked
+```
+
+or, if you have `cargo-binstall`:
+
+```text
+cargo binstall cargo-audit@0.22.2 cargo-deny@0.20.2 cargo-llvm-cov@0.6.13 -y
+```
+
 ## Local gates
 
 ```text
@@ -7,11 +32,34 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo test --doc
+cargo audit
+cargo deny check
 cargo llvm-cov --workspace --fail-under-lines 85
 ```
 
-All five must pass before a PR is marked ready for review. CI runs the same set
-plus `cargo-deny`, `cargo-audit`, and `actionlint`.
+All gates must pass before a PR is marked ready for review. CI runs the same set
+plus the release build smoke test and `actionlint`.
+
+## Pre-push gate
+
+For a quick pre-push check, run the gate subset:
+
+```text
+./scripts/pre-push-gate.sh
+```
+
+or, equivalently:
+
+```text
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo test --doc
+cargo audit
+cargo deny check
+```
+
+The full local gate (including coverage) is in the [Local gates](#local-gates) section above.
 
 ## PR workflow
 
@@ -52,10 +100,10 @@ targeting `main`:
 - Clippy (`cargo clippy --all-targets --all-features -- -D warnings`)
 - Tests (`cargo test`)
 - Doc tests (`cargo test --doc`)
-- Line coverage (`cargo llvm-cov --workspace --fail-under-lines 85`)
-- Release build smoke test
 - `cargo-deny` (license and advisory checks)
 - `cargo-audit` (security vulnerability scan)
+- Line coverage (`cargo llvm-cov --workspace --fail-under-lines 85`)
+- Release build smoke test
 - `actionlint` (workflow YAML linting)
 - Toolchain consistency (rust-toolchain.toml vs ci.yml vs release-checks.yml)
 
