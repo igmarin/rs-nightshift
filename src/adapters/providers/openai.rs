@@ -28,6 +28,10 @@ pub(crate) fn to_llm_request(
 /// Accepts `http://` / `https://` URLs with a host (a path such as `/v1` is
 /// allowed) and rejects userinfo so credentials can never be embedded in the
 /// URL. Rejected values are reported redacted.
+///
+/// `http://` is allowed for local OpenAI-compatible proxies (vLLM, Ollama);
+/// for remote keyed providers (Deepseek/Kimi/custom) prefer `https://` so the
+/// API key is never sent in cleartext.
 fn validate_chat_base_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
     let redacted = crate::ollama::redact_ollama_url(value);
