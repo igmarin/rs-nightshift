@@ -30,7 +30,9 @@ pub enum BlockReason {
 pub struct Question {
     /// The question text, in plain language.
     pub text: String,
-    /// Whether this question blocks progress until answered.
+    /// Whether this question blocks progress until answered. Defaults to
+    /// `false` so a model that omits the flag does not fail parsing.
+    #[serde(default)]
     pub blocking: bool,
 }
 

@@ -90,6 +90,11 @@ impl ModelOptions {
             Some(toml::Value::Integer(value)) => Some(*value as f32),
             Some(_) => return Err(bad_option("temperature", "a number")),
         };
+        if let Some(value) = temperature {
+            if !(0.0..=2.0).contains(&value) {
+                return Err(bad_option("temperature", "a number between 0.0 and 2.0"));
+            }
+        }
         let max_tokens = match options.get("max_tokens") {
             None => None,
             Some(value) => {

@@ -51,21 +51,26 @@ impl StateStore for FsStateStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(Error::Artifact(format!("read {}: {error}", path.display()))),
         };
-        content
+        // Skip blank lines and lines that fail to parse (e.g. a truncated final
+        // line after a crash) so a complete run still yields a readable report.
+        Ok(content
             .lines()
-            .map(|line| {
-                serde_json::from_str(line)
-                    .map_err(|error| Error::Artifact(format!("parse {}: {error}", path.display())))
-            })
-            .collect()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<ActionEvent>(line).ok())
+            .collect())
     }
 
     fn write_snapshot(&self, run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error> {
         let json = serde_json::to_string_pretty(snapshot)
             .map_err(|error| Error::Artifact(error.to_string()))?;
         let path = run.join(SNAPSHOT_FILE);
-        std::fs::write(&path, json)
-            .map_err(|error| Error::Artifact(format!("write {}: {error}", path.display())))
+        // Write to a temp file then rename, so an interruption never leaves a
+        // truncated `state.json`.
+        let tmp = run.join(format!("{SNAPSHOT_FILE}.tmp"));
+        std::fs::write(&tmp, json)
+            .map_err(|error| Error::Artifact(format!("write {}: {error}", tmp.display())))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|error| Error::Artifact(format!("rename {}: {error}", path.display())))
     }
 
     fn read_snapshot(&self, run: &Path) -> Result<StatusSnapshot, Error> {

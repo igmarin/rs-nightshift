@@ -185,7 +185,7 @@ pub trait StateStore: Send + Sync {
     /// Write the status snapshot.
     fn write_snapshot(&self, run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error>;
 
-    /// Read the status snapshot, if one has been written.
+    /// Read the status snapshot. Returns an error when no snapshot exists.
     fn read_snapshot(&self, run: &Path) -> Result<StatusSnapshot, Error>;
 }
 

@@ -168,7 +168,8 @@ fn api_key_env_for(provider: &str, spec: Option<&ProviderSpec>) -> Option<String
 }
 
 fn model_matches(installed: &str, required: &str) -> bool {
-    installed == required || installed.starts_with(&format!("{required}-"))
+    // Exact tag match only: a `phi4-mini` install must not satisfy `phi4`.
+    installed == required
 }
 
 #[cfg(test)]
@@ -338,9 +339,10 @@ model = "deepseek-v4-pro"
     }
 
     #[test]
-    fn model_matches_exact_and_quantized_suffix() {
+    fn model_matches_is_exact() {
         assert!(model_matches("llama3.1:8b", "llama3.1:8b"));
-        assert!(model_matches("llama3.1:8b-q4_0", "llama3.1:8b"));
+        assert!(!model_matches("llama3.1:8b-q4_0", "llama3.1:8b"));
+        assert!(!model_matches("phi4-mini", "phi4"));
         assert!(!model_matches("llama3.2:3b", "llama3.1:8b"));
     }
 }

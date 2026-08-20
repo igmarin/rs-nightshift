@@ -192,15 +192,20 @@ at the most recent):
 ## Commands
 
 ```text
-nightshift doctor [--ollama-url URL]
+nightshift doctor [--ollama-url URL] [--config PATH]
 nightshift status [--out DIR]
 nightshift run --goal TEXT --repo PATH [options]
-nightshift harness --goal TEXT [--config PATH] [--out DIR] [--name SLUG]
+nightshift harness --goal TEXT --repo PATH [--config PATH] [--out DIR] [--name SLUG]
+nightshift plan --goal TEXT --repo PATH [--config PATH] [--out DIR] [--name SLUG]
 ```
 
 `harness` is the new config-driven role-graph engine (beta): it reads a
-role-graph `nightshift.toml` and walks the roles, routing on each role's
-verdict. See [`docs/role-graph.md`](docs/role-graph.md) and
+role-graph `nightshift.toml`, walks the roles, routing on each role's verdict,
+and writes a morning report. `plan` is the pre-flight companion: it runs the
+entry role and, when it raises clarifying questions, asks you for answers
+interactively until the brief is clear. `--repo` is required on both (it is
+where capabilities like `apply-patch` operate). See
+[`docs/role-graph.md`](docs/role-graph.md) and
 [`nightshift.toml.example`](nightshift.toml.example).
 
 ### `run` options

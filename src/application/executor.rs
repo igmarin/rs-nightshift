@@ -1,7 +1,7 @@
 //! Role executor: run one role in the graph.
 
 use crate::domain::rolegraph::config::RoleSpec;
-use crate::domain::rolegraph::verdict::RoleOutput;
+use crate::domain::rolegraph::verdict::{RoleOutput, Verdict};
 use crate::error::Error;
 use crate::ports::{ArtifactStore, ContextProvider, GenerateRequest, ModelClient, ToolRunner};
 use std::path::Path;
@@ -115,21 +115,27 @@ where
         .await?;
     let output = parse_role_output(&text)?;
 
-    // Post-tools: apply the patch after the role produces its deliverable.
-    for tool in &params.role.tools {
-        if tool == "apply-patch" {
-            tools
-                .run("apply-patch", params.repo, &output.content)
-                .await?;
+    // Write the artifact first (even when empty) so a later tool failure still
+    // leaves the deliverable on disk for inspection, and propagate write errors.
+    let artifact = match params.role.output.as_deref() {
+        Some(name) => {
+            store.write_artifact(params.run, name, &output.content)?;
+            Some(name.to_string())
+        }
+        None => None,
+    };
+
+    // Post-tools: apply the patch only for verdicts that carry a deliverable.
+    if matches!(output.verdict, Verdict::Continue | Verdict::Done) {
+        for tool in &params.role.tools {
+            if tool == "apply-patch" {
+                tools
+                    .run("apply-patch", params.repo, &output.content)
+                    .await?;
+            }
         }
     }
 
-    let artifact = params.role.output.as_deref().map(|name| {
-        // An empty deliverable is still written so the morning report shows the
-        // artifact exists (and what the role produced).
-        let _ = store.write_artifact(params.run, name, &output.content);
-        name.to_string()
-    });
     Ok(ExecuteOutcome { output, artifact })
 }
 

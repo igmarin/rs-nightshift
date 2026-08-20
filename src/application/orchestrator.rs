@@ -273,7 +273,10 @@ fn route(
             }
         },
         Verdict::Questions => {
-            if config.run.on_unclear == OnUnclear::Proceed {
+            let has_blocking = output.questions.iter().any(|question| question.blocking);
+            // Non-blocking questions are recorded as assumptions and the run
+            // proceeds; blocking questions halt (or proceed, per `on_unclear`).
+            if !has_blocking || config.run.on_unclear == OnUnclear::Proceed {
                 return match role.on.continue_target() {
                     Target::Done => RoutingDecision::Terminal(RunStatus::Done, BlockReason::None),
                     Target::Halt => {
@@ -563,6 +566,26 @@ provider = "ollama"
 model = "phi4"
 "#,
         );
+        let result = run(&cfg, &factory).await;
+        assert_eq!(result.status, RunStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn non_blocking_questions_proceed() {
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"questions","questions":[{"text":"minor","blocking":false}]}"#);
+        let cfg = config(
+            r#"
+[run]
+start = "po"
+[[roles]]
+id = "po"
+provider = "ollama"
+model = "phi4"
+"#,
+        );
+        // Non-blocking questions are recorded and the run proceeds (the
+        // continue target defaults to `done`).
         let result = run(&cfg, &factory).await;
         assert_eq!(result.status, RunStatus::Done);
     }

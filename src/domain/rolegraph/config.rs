@@ -157,6 +157,17 @@ impl NightshiftConfig {
                 }
             }
         }
+        const KNOWN_TOOLS: [&str; 3] = ["gather-context", "run-tests", "apply-patch"];
+        for role in &self.roles {
+            for tool in &role.tools {
+                if !KNOWN_TOOLS.contains(&tool.as_str()) {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} declares unknown tool {:?}",
+                        role.id, tool
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 }

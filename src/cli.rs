@@ -37,7 +37,11 @@ pub enum Until {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
     /// Check that the server can run a nightshift job.
-    Doctor,
+    Doctor {
+        /// Role-graph config file (default: `nightshift.toml`).
+        #[arg(long, default_value = "nightshift.toml")]
+        config: PathBuf,
+    },
     /// Print the latest QA verdict from the artifact store.
     Status {
         /// Artifact root (default: `./artifacts`).
@@ -83,8 +87,8 @@ pub enum Command {
         /// Directory slug (default: slugified goal).
         #[arg(long)]
         name: Option<String>,
-        /// Target repo for capabilities (default: current directory).
-        #[arg(long, default_value = ".")]
+        /// Target repo for capabilities (e.g. apply-patch).
+        #[arg(long)]
         repo: PathBuf,
     },
     /// Pre-flight: run the entry role and resolve its questions interactively.
@@ -101,8 +105,8 @@ pub enum Command {
         /// Directory slug (default: slugified goal).
         #[arg(long)]
         name: Option<String>,
-        /// Target repo (default: current directory).
-        #[arg(long, default_value = ".")]
+        /// Target repo for capabilities.
+        #[arg(long)]
         repo: PathBuf,
     },
 }
@@ -115,7 +119,10 @@ mod tests {
     #[test]
     fn parses_doctor() {
         let cli = Cli::try_parse_from(["nightshift", "doctor"]).expect("parse");
-        assert_eq!(cli.command, Command::Doctor);
+        match cli.command {
+            Command::Doctor { config } => assert_eq!(config, PathBuf::from("nightshift.toml")),
+            other => panic!("expected Doctor, got {other:?}"),
+        }
     }
 
     #[test]
@@ -310,14 +317,23 @@ mod tests {
             "harness",
             "--goal",
             "add /health",
-            "--config",
-            "nightshift.toml",
+            "--repo",
+            ".",
         ])
         .expect("parse");
         match cli.command {
-            Command::Harness { goal, config, .. } => {
+            Command::Harness {
+                goal,
+                config,
+                out,
+                name,
+                repo,
+            } => {
                 assert_eq!(goal, "add /health");
                 assert_eq!(config, PathBuf::from("nightshift.toml"));
+                assert_eq!(out, PathBuf::from("artifacts"));
+                assert_eq!(name, None);
+                assert_eq!(repo, PathBuf::from("."));
             }
             other => panic!("expected Harness, got {other:?}"),
         }
@@ -326,9 +342,22 @@ mod tests {
     #[test]
     fn parses_plan() {
         let cli =
-            Cli::try_parse_from(["nightshift", "plan", "--goal", "add /health"]).expect("parse");
+            Cli::try_parse_from(["nightshift", "plan", "--goal", "add /health", "--repo", "."])
+                .expect("parse");
         match cli.command {
-            Command::Plan { goal, .. } => assert_eq!(goal, "add /health"),
+            Command::Plan {
+                goal,
+                config,
+                out,
+                name,
+                repo,
+            } => {
+                assert_eq!(goal, "add /health");
+                assert_eq!(config, PathBuf::from("nightshift.toml"));
+                assert_eq!(out, PathBuf::from("artifacts"));
+                assert_eq!(name, None);
+                assert_eq!(repo, PathBuf::from("."));
+            }
             other => panic!("expected Plan, got {other:?}"),
         }
     }

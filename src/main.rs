@@ -26,7 +26,6 @@ use rs_nightshift::ports::{
 };
 use rs_nightshift::testrun::ProcessTestRunner;
 use std::io::{self, Write};
-use std::path::Path;
 use std::process;
 
 #[tokio::main]
@@ -41,7 +40,7 @@ async fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let ollama_url = cli.ollama_url;
     match cli.command {
-        Command::Doctor => {
+        Command::Doctor { config } => {
             let validated_url = match validate_ollama_url(&ollama_url) {
                 Ok(url) => url,
                 Err(error) => {
@@ -57,7 +56,7 @@ async fn real_main() -> anyhow::Result<()> {
                     process::exit(report.exit_code());
                 }
             };
-            let config = match load_role_graph_config_from(Path::new("nightshift.toml")) {
+            let role_graph = match load_role_graph_config_from(&config) {
                 Ok(config) => config,
                 Err(error) => {
                     let report = DoctorReport {
@@ -73,7 +72,7 @@ async fn real_main() -> anyhow::Result<()> {
                 }
             };
             let catalog = HttpModelCatalog::new(validated_url.as_str())?;
-            let mut report = run_doctor(&config, &catalog, &PathHost).await?;
+            let mut report = run_doctor(&role_graph, &catalog, &PathHost).await?;
             report.checks.insert(
                 0,
                 Check {
@@ -132,7 +131,7 @@ async fn real_main() -> anyhow::Result<()> {
             let clock = SystemClock;
             let tools = CapabilityRunner::new();
             let context_provider = GraphContextProvider;
-            let slug = name.unwrap_or_else(|| slugify(&goal));
+            let slug = run_slug(&clock, name.as_deref(), &goal, "run");
             let run_dir = store.create_run(&clock.today(), &slug)?;
             let result = run_graph(
                 &factory,
@@ -178,7 +177,7 @@ async fn real_main() -> anyhow::Result<()> {
             let clock = SystemClock;
             let tools = CapabilityRunner::new();
             let context_provider = GraphContextProvider;
-            let slug = name.unwrap_or_else(|| slugify(&goal));
+            let slug = run_slug(&clock, name.as_deref(), &goal, "plan");
             let run_dir = store.create_run(&clock.today(), &slug)?;
 
             let client = factory.build(
@@ -187,7 +186,9 @@ async fn real_main() -> anyhow::Result<()> {
                 &entry.options,
             )?;
             let mut clarifications: Vec<String> = Vec::new();
+            let mut rounds = 0;
             let outcome = loop {
+                rounds += 1;
                 let ctx = RoleContext {
                     goal: goal.clone(),
                     findings: Vec::new(),
@@ -203,23 +204,30 @@ async fn real_main() -> anyhow::Result<()> {
                 };
                 let outcome =
                     execute(client.as_ref(), &store, &tools, &context_provider, &params).await?;
-                if outcome.output.verdict == Verdict::Questions
+                let more = outcome.output.verdict == Verdict::Questions
                     && !outcome.output.questions.is_empty()
-                {
-                    writeln!(io::stdout(), "The entry role has clarifying questions:")?;
-                    let mut answers = Vec::new();
-                    for question in &outcome.output.questions {
-                        writeln!(io::stdout(), "  Q: {}", question.text)?;
-                        print!("  A: ");
-                        io::stdout().flush()?;
-                        let mut line = String::new();
-                        io::stdin().read_line(&mut line)?;
-                        answers.push(format!("Q: {}\nA: {}", question.text, line.trim()));
-                    }
-                    clarifications.extend(answers);
-                    continue;
+                    && rounds < 5;
+                if !more {
+                    break outcome;
                 }
-                break outcome;
+                writeln!(io::stdout(), "The entry role has clarifying questions:")?;
+                let mut answers = Vec::new();
+                let mut eof = false;
+                for question in &outcome.output.questions {
+                    writeln!(io::stdout(), "  Q: {}", question.text)?;
+                    print!("  A: ");
+                    io::stdout().flush()?;
+                    let mut line = String::new();
+                    if io::stdin().read_line(&mut line)? == 0 {
+                        eof = true;
+                        break;
+                    }
+                    answers.push(format!("Q: {}\nA: {}", question.text, line.trim()));
+                }
+                clarifications.extend(answers);
+                if eof {
+                    break outcome;
+                }
             };
             writeln!(io::stdout(), "{}", outcome.output.summary)?;
             if let Some(artifact) = &outcome.artifact {
@@ -229,4 +237,15 @@ async fn real_main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Build a unique run-directory slug: `{name-or-goal}-{kind}-{timestamp}`.
+///
+/// The timestamp keeps repeat invocations on the same day isolated; the `kind`
+/// distinguishes `run` from `plan` so a plan never shares a directory with a
+/// later harness run.
+fn run_slug(clock: &SystemClock, name: Option<&str>, goal: &str, kind: &str) -> String {
+    let base = name.map(str::to_string).unwrap_or_else(|| slugify(goal));
+    let stamp = clock.now_iso().replace(':', "-");
+    format!("{base}-{kind}-{stamp}")
 }
