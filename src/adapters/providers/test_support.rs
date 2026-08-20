@@ -3,6 +3,7 @@
 use crate::domain::rolegraph::config::ProviderSpec;
 use crate::ports::GenerateRequest;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -50,19 +51,36 @@ pub(crate) fn spec_with(base_url: &str, api_key_env: &str) -> ProviderSpec {
     }
 }
 
-/// Sets an env var for the lifetime of the test and removes it afterwards.
-pub(crate) struct EnvGuard(&'static str);
+/// Serializes env-var mutation so parallel tests cannot race on a shared var.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Sets an env var for the lifetime of the test and restores it afterwards.
+///
+/// The prior value (including absence) is captured and restored on drop, so a
+/// real operator key (e.g. `MOONSHOT_API_KEY`) is never clobbered by a test.
+pub(crate) struct EnvGuard {
+    /// The variable name.
+    name: &'static str,
+    /// The value present before `set`, or `None` if the variable was unset.
+    prior: Option<std::ffi::OsString>,
+}
 
 impl EnvGuard {
-    /// Set `name` to `value`; removes `name` on drop.
+    /// Set `name` to `value`; restores the previous value (or absence) on drop.
     pub(crate) fn set(name: &'static str, value: &str) -> Self {
+        let _lock = ENV_LOCK.lock().expect("env mutex");
+        let prior = std::env::var_os(name);
         std::env::set_var(name, value);
-        Self(name)
+        Self { name, prior }
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        std::env::remove_var(self.0);
+        let _lock = ENV_LOCK.lock().expect("env mutex");
+        match &self.prior {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
     }
 }
