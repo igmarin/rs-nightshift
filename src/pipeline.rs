@@ -1,9 +1,10 @@
 //! Overnight pipeline orchestration.
 
+use crate::adapters::git::working_tree_dirty;
 use crate::artifacts::{ArtifactStore, QaStatus, RunDir};
 use crate::cli::Until;
 use crate::context::{gather, ContextProbe};
-use crate::dev::{read_tech_spec, working_tree_dirty, write_and_apply_patch};
+use crate::dev::{read_tech_spec, write_and_apply_patch};
 use crate::error::Error;
 use crate::generate::{LLMClient, Origin};
 use crate::qa::{fix_hints, report_from_outcome, truncate_log, write_qa_report, MAX_ITERATIONS};
@@ -624,7 +625,7 @@ apply the patch
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).expect("repo");
         git_init(&repo);
-        let before = crate::dev::head_commit(&repo).expect("head");
+        let before = crate::adapters::git::head_commit(&repo).expect("head");
         let store = ArtifactStore::new(tmp.path().join("artifacts"));
         let gen = ScriptedGenerator::new();
         gen.push_text(complete_story());
@@ -670,9 +671,12 @@ diff --git a/hello.txt b/hello.txt
         )
         .await
         .expect("run");
-        assert!(run.path.join(crate::dev::PATCH_FILE).is_file());
-        assert!(crate::dev::working_tree_dirty(&repo).expect("dirty"));
-        assert_eq!(crate::dev::head_commit(&repo).expect("head"), before);
+        assert!(run.path.join(crate::adapters::git::PATCH_FILE).is_file());
+        assert!(crate::adapters::git::working_tree_dirty(&repo).expect("dirty"));
+        assert_eq!(
+            crate::adapters::git::head_commit(&repo).expect("head"),
+            before
+        );
     }
 
     fn qa_story_spec_and_patches(gen: &ScriptedGenerator, patches: &[&str]) {
@@ -794,7 +798,7 @@ diff --git a/hello.txt b/hello.txt
         .expect("run");
         assert!(run.path.join(crate::pm::USER_STORY_FILE).is_file());
         assert!(run.path.join(crate::techlead::TECH_SPEC_FILE).is_file());
-        assert!(run.path.join(crate::dev::PATCH_FILE).is_file());
+        assert!(run.path.join(crate::adapters::git::PATCH_FILE).is_file());
         assert!(run.path.join(crate::qa::QA_REPORT_FILE).is_file());
         assert!(run.path.join(crate::writer::ARTICLE_FILE).is_file());
         assert!(run.path.join("run.log").is_file());
