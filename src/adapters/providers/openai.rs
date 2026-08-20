@@ -34,7 +34,7 @@ pub(crate) fn to_llm_request(
 /// API key is never sent in cleartext.
 fn validate_chat_base_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
-    let redacted = crate::ollama::redact_ollama_url(value);
+    let redacted = crate::adapters::ollama::redact_ollama_url(value);
     let parsed = reqwest::Url::parse(value).map_err(|_| Error::Config {
         path: "provider base_url".into(),
         message: format!(
@@ -88,7 +88,7 @@ impl OpenAICompatibleAdapter {
         Self::with_timeout(
             base_url,
             api_key,
-            crate::ollama::DEFAULT_GENERATE_TIMEOUT,
+            crate::adapters::ollama::DEFAULT_GENERATE_TIMEOUT,
             None,
             None,
         )
@@ -107,7 +107,7 @@ impl OpenAICompatibleAdapter {
         max_tokens: Option<u32>,
     ) -> Result<Self, Error> {
         let base_url = validate_chat_base_url(&base_url.into())?;
-        let redacted_base_url = crate::ollama::redact_ollama_url(&base_url);
+        let redacted_base_url = crate::adapters::ollama::redact_ollama_url(&base_url);
         // The per-request model always overrides the placeholder below, so the
         // client-level model name is never sent to the provider.
         let http_client = reqwest::Client::builder()

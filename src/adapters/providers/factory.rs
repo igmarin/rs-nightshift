@@ -1,8 +1,8 @@
 //! Provider factory: wire provider names + spec + options into a client.
 
+use crate::adapters::ollama::{OllamaClient, DEFAULT_GENERATE_TIMEOUT};
 use crate::domain::rolegraph::config::ProviderSpec;
 use crate::error::Error;
-use crate::ollama::{OllamaClient, DEFAULT_GENERATE_TIMEOUT};
 use crate::ports::{ModelClient, ModelClientFactory};
 use std::collections::BTreeMap;
 

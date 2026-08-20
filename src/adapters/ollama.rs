@@ -1,5 +1,6 @@
-//! Sequential Ollama client backed by `llm-kernel`'s `OpenAIClient`.
+//! Ollama client adapter.
 //!
+//! Sequential Ollama client backed by `llm-kernel`'s `OpenAIClient`.
 //! Completions go through Ollama's OpenAI-compatible `/v1/chat/completions`
 //! endpoint (via `llm_kernel::llm::OpenAIClient`). After each call, an
 //! unload request is sent to Ollama's native `/api/generate` endpoint with

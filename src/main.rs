@@ -5,6 +5,7 @@ use rs_nightshift::adapters::artifact_store::FsArtifactStore;
 use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
 use rs_nightshift::adapters::context::PathProbe;
+use rs_nightshift::adapters::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
 use rs_nightshift::adapters::state::FsStateStore;
 use rs_nightshift::adapters::test::ProcessTestRunner;
 use rs_nightshift::adapters::ProviderFactory;
@@ -20,7 +21,6 @@ use rs_nightshift::domain::rolegraph::config::load_role_graph_config_from;
 use rs_nightshift::domain::rolegraph::state::RunStatus;
 use rs_nightshift::domain::rolegraph::verdict::Verdict;
 use rs_nightshift::error::Error;
-use rs_nightshift::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
 use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest};
 use rs_nightshift::ports::{
     ArtifactStore as ArtifactStorePort, Clock, ModelClientFactory, StateStore,

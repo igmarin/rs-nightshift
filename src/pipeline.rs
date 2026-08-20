@@ -243,8 +243,8 @@ pub fn repo_exists(repo: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::ollama::OllamaClient;
     use crate::generate::ScriptedGenerator;
-    use crate::ollama::OllamaClient;
     use crate::pm::{USER_STORY_FILE, USER_STORY_HEADINGS};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

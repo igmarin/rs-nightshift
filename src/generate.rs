@@ -1,6 +1,6 @@
 //! Injectable text generation built on `llm-kernel`'s `LLMClient` trait.
 //!
-//! Production uses [`crate::ollama::OllamaClient`] (an `LLMClient` impl that
+//! Production uses [`crate::adapters::ollama::OllamaClient`] (an `LLMClient` impl that
 //! talks to a local Ollama origin and unloads the model after each call).
 //! Tests use [`ScriptedGenerator`], another `LLMClient` impl that returns
 //! queued replies.
@@ -24,7 +24,7 @@ pub const WRITER_TEMPERATURE: f32 = 0.5;
 
 /// Origin label for operator-facing run logs, when the client can report one.
 ///
-/// Implemented by [`crate::ollama::OllamaClient`] (redacted Ollama URL) and
+/// Implemented by [`crate::adapters::ollama::OllamaClient`] (redacted Ollama URL) and
 /// trivially by any test double that wants to surface an origin line.
 pub trait Origin: LLMClient {
     /// Redacted origin for run-log context, or `None` to omit the line.

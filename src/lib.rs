@@ -14,7 +14,6 @@ pub mod domain;
 pub mod error;
 pub mod generate;
 pub mod models;
-pub mod ollama;
 pub mod pipeline;
 pub mod pm;
 pub mod ports;

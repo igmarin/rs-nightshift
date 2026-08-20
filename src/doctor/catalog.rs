@@ -1,7 +1,7 @@
 //! Ollama model catalog trait and HTTP client.
 
+use crate::adapters::ollama::validate_ollama_url;
 use crate::error::Error;
-use crate::ollama::validate_ollama_url;
 use async_trait::async_trait;
 
 /// Lists models known to an Ollama server.

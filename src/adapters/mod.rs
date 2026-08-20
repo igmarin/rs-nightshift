@@ -11,6 +11,7 @@ pub mod clock;
 pub mod context;
 pub mod git;
 pub mod kernel_error;
+pub mod ollama;
 pub mod providers;
 pub mod state;
 pub mod test;
