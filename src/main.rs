@@ -26,6 +26,7 @@ use rs_nightshift::ports::{
 };
 use rs_nightshift::testrun::ProcessTestRunner;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process;
 
 #[tokio::main]
@@ -56,8 +57,23 @@ async fn real_main() -> anyhow::Result<()> {
                     process::exit(report.exit_code());
                 }
             };
+            let config = match load_role_graph_config_from(Path::new("nightshift.toml")) {
+                Ok(config) => config,
+                Err(error) => {
+                    let report = DoctorReport {
+                        checks: vec![Check {
+                            name: "config".into(),
+                            passed: false,
+                            required: true,
+                            detail: error.to_string(),
+                        }],
+                    };
+                    write_report(&report, io::stdout())?;
+                    process::exit(report.exit_code());
+                }
+            };
             let catalog = HttpModelCatalog::new(validated_url.as_str())?;
-            let mut report = run_doctor(&catalog, &PathHost).await?;
+            let mut report = run_doctor(&config, &catalog, &PathHost).await?;
             report.checks.insert(
                 0,
                 Check {

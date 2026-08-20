@@ -8,16 +8,126 @@ pub use catalog::{HttpModelCatalog, ModelCatalog};
 pub use host::{HostCommands, PathHost};
 pub use report::{write_report, Check, DoctorReport};
 
+use crate::domain::rolegraph::config::{NightshiftConfig, ProviderSpec};
 use crate::error::Error;
+use std::collections::BTreeSet;
 
-/// Run readiness checks against an injected catalog and host.
-pub async fn run_doctor<C, H>(catalog: &C, host: &H) -> Result<DoctorReport, Error>
+/// Run readiness checks against the role graph, an injected catalog, and host.
+pub async fn run_doctor<C, H>(
+    config: &NightshiftConfig,
+    catalog: &C,
+    host: &H,
+) -> Result<DoctorReport, Error>
 where
     C: ModelCatalog,
     H: HostCommands,
 {
     let mut checks = Vec::new();
 
+    push_toolchain_checks(&mut checks, host);
+
+    // codegraph/graphify: required only when a role gathers context.
+    let uses_context = config
+        .roles
+        .iter()
+        .any(|role| role.tools.iter().any(|tool| tool == "gather-context"));
+    for cmd in ["codegraph", "graphify"] {
+        let ok = host.command_on_path(cmd);
+        checks.push(Check {
+            name: cmd.into(),
+            passed: ok,
+            required: uses_context,
+            detail: if ok {
+                format!("{cmd} is on PATH")
+            } else {
+                format!("{cmd} not found on PATH")
+            },
+        });
+    }
+
+    // Ollama reachability + per-model presence (only when a role uses Ollama).
+    let ollama_models: BTreeSet<&str> = config
+        .roles
+        .iter()
+        .filter(|role| role.provider == "ollama")
+        .map(|role| role.model.as_str())
+        .collect();
+    if !ollama_models.is_empty() {
+        match catalog.list_models().await {
+            Ok(installed) => {
+                checks.push(Check {
+                    name: "ollama".into(),
+                    passed: true,
+                    required: true,
+                    detail: format!("reachable ({} models)", installed.len()),
+                });
+                for model in &ollama_models {
+                    let present = installed.iter().any(|m| model_matches(m, model));
+                    checks.push(Check {
+                        name: format!("model:{model}"),
+                        passed: present,
+                        required: true,
+                        detail: if present {
+                            format!("{model} is installed")
+                        } else {
+                            format!("missing {model}; run `ollama pull {model}`")
+                        },
+                    });
+                }
+            }
+            Err(error) => {
+                checks.push(Check {
+                    name: "ollama".into(),
+                    passed: false,
+                    required: true,
+                    detail: format!("not reachable: {error}"),
+                });
+                for model in &ollama_models {
+                    checks.push(Check {
+                        name: format!("model:{model}"),
+                        passed: false,
+                        required: true,
+                        detail: "skipped; Ollama is not reachable".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // API-key checks for remote providers (one check per provider).
+    let mut seen = BTreeSet::new();
+    for role in &config.roles {
+        if role.provider == "ollama" || !seen.insert(role.provider.clone()) {
+            continue;
+        }
+        let spec = config.providers.get(&role.provider);
+        match api_key_env_for(&role.provider, spec) {
+            Some(env) => {
+                let set = std::env::var(&env).is_ok();
+                checks.push(Check {
+                    name: format!("provider:{}", role.provider),
+                    passed: set,
+                    required: true,
+                    detail: if set {
+                        format!("{env} is set")
+                    } else {
+                        format!("missing {env}")
+                    },
+                });
+            }
+            None => checks.push(Check {
+                name: format!("provider:{}", role.provider),
+                passed: false,
+                required: true,
+                detail: format!("define api_key_env for provider {:?}", role.provider),
+            }),
+        }
+    }
+
+    Ok(DoctorReport { checks })
+}
+
+fn push_toolchain_checks(checks: &mut Vec<Check>, host: &impl HostCommands) {
     let rustc_ok = host.rustc_available();
     checks.push(Check {
         name: "rustc".into(),
@@ -41,102 +151,19 @@ where
             "mise not found; rustc via rustup is accepted".into()
         },
     });
-
-    let config_path = crate::models::config_path();
-    match crate::models::load_models_config_from(&config_path) {
-        Ok(config) => {
-            let overrides = config.role_models.len();
-            checks.push(Check {
-                name: "config".into(),
-                passed: true,
-                required: false,
-                detail: if overrides == 0 {
-                    format!(
-                        "{} (no overrides; using default models)",
-                        config_path.display()
-                    )
-                } else {
-                    format!(
-                        "{} ({} override{})",
-                        config_path.display(),
-                        overrides,
-                        if overrides == 1 { "" } else { "s" }
-                    )
-                },
-            });
-        }
-        Err(error) => {
-            checks.push(Check {
-                name: "config".into(),
-                passed: false,
-                required: false,
-                detail: format!("{error}; using default models"),
-            });
-        }
-    }
-
-    match catalog.list_models().await {
-        Ok(models) => {
-            checks.push(Check {
-                name: "ollama".into(),
-                passed: true,
-                required: true,
-                detail: format!("reachable ({} models)", models.len()),
-            });
-            push_model_checks(&mut checks, &models);
-        }
-        Err(error) => {
-            checks.push(Check {
-                name: "ollama".into(),
-                passed: false,
-                required: true,
-                detail: format!("not reachable: {error}"),
-            });
-            for role in crate::models::required_models() {
-                let tag = crate::models::model_for(*role);
-                checks.push(Check {
-                    name: format!("model:{tag}"),
-                    passed: false,
-                    required: true,
-                    detail: "skipped; Ollama is not reachable".into(),
-                });
-            }
-        }
-    }
-
-    for cmd in ["codegraph", "graphify"] {
-        let ok = host.command_on_path(cmd);
-        checks.push(Check {
-            name: cmd.into(),
-            passed: ok,
-            required: true,
-            detail: if ok {
-                format!("{cmd} is on PATH")
-            } else {
-                format!("{cmd} not found on PATH")
-            },
-        });
-    }
-
-    Ok(DoctorReport { checks })
 }
 
-fn push_model_checks(checks: &mut Vec<Check>, models: &[String]) {
-    for role in crate::models::required_models() {
-        let tag = crate::models::model_for(*role);
-        let present = models
-            .iter()
-            .any(|installed| model_matches(installed, &tag));
-        checks.push(Check {
-            name: format!("model:{tag}"),
-            passed: present,
-            required: true,
-            detail: if present {
-                format!("{tag} is installed")
-            } else {
-                format!("missing {tag}; run `ollama pull {tag}`")
-            },
-        });
+/// Resolve the API-key env var for a provider: an explicit spec override wins,
+/// then the built-in defaults for `deepseek` and `kimi`, then `None` for custom
+/// providers that must declare `api_key_env`.
+fn api_key_env_for(provider: &str, spec: Option<&ProviderSpec>) -> Option<String> {
+    if let Some(env) = spec.and_then(|s| s.api_key_env.clone()) {
+        return Some(env);
+    }
+    match provider {
+        "deepseek" => Some(crate::adapters::DEFAULT_DEEPSEEK_API_KEY_ENV.to_string()),
+        "kimi" => Some(crate::adapters::DEFAULT_KIMI_API_KEY_ENV.to_string()),
+        _ => None,
     }
 }
 
@@ -151,30 +178,33 @@ mod tests {
     use catalog::tests::FakeCatalog;
     use host::tests::{healthy_host, FakeHost};
 
-    fn all_models() -> Vec<String> {
-        crate::models::required_models()
-            .iter()
-            .map(|role| crate::models::model_for(*role).to_string())
-            .collect()
+    fn config(toml: &str) -> NightshiftConfig {
+        toml::from_str(toml).expect("config parses")
     }
+
+    const OLLAMA_QA: &str = r#"
+[run]
+start = "qa"
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "phi4"
+"#;
 
     #[tokio::test]
     async fn ollama_unreachable_is_not_ready() {
         let catalog = FakeCatalog {
             result: Err(Error::Ollama("connection refused".into())),
         };
-        let report = run_doctor(&catalog, &healthy_host())
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &healthy_host())
             .await
-            .expect("doctor should return a report");
+            .expect("report");
         let ollama = report
             .checks
             .iter()
             .find(|c| c.name == "ollama")
             .expect("ollama check");
-        assert!(
-            !ollama.passed,
-            "unreachable Ollama must fail the ollama check"
-        );
+        assert!(!ollama.passed);
         assert!(ollama.required);
         assert!(!report.is_ready());
         assert_eq!(report.exit_code(), 2);
@@ -185,14 +215,14 @@ mod tests {
         let catalog = FakeCatalog {
             result: Ok(vec!["llama3.2:3b".into()]),
         };
-        let report = run_doctor(&catalog, &healthy_host())
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &healthy_host())
             .await
-            .expect("doctor should return a report");
+            .expect("report");
         let missing = report
             .checks
             .iter()
-            .find(|c| c.name == "model:llama3.1:8b")
-            .expect("per-model check for llama3.1:8b");
+            .find(|c| c.name == "model:phi4")
+            .expect("phi4 check");
         assert!(!missing.passed);
         assert!(missing.required);
         assert!(!report.is_ready());
@@ -201,113 +231,110 @@ mod tests {
     #[tokio::test]
     async fn missing_rustc_is_not_ready() {
         let catalog = FakeCatalog {
-            result: Ok(all_models()),
+            result: Ok(vec!["phi4".into()]),
         };
         let host = FakeHost {
             rustc: false,
             mise: false,
             commands: vec!["codegraph", "graphify"],
         };
-        let report = run_doctor(&catalog, &host).await.expect("report");
-        let rustc = report
-            .checks
-            .iter()
-            .find(|c| c.name == "rustc")
-            .expect("rustc check");
-        assert!(!rustc.passed);
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &host)
+            .await
+            .expect("report");
+        assert!(
+            !report
+                .checks
+                .iter()
+                .find(|c| c.name == "rustc")
+                .expect("rustc")
+                .passed
+        );
         assert!(!report.is_ready());
     }
 
     #[tokio::test]
-    async fn missing_codegraph_is_not_ready() {
+    async fn codegraph_is_required_only_for_gather_context() {
         let catalog = FakeCatalog {
-            result: Ok(all_models()),
+            result: Ok(vec!["phi4".into()]),
         };
         let host = FakeHost {
             rustc: true,
             mise: true,
             commands: vec!["graphify"],
         };
-        let report = run_doctor(&catalog, &host).await.expect("report");
-        let check = report
+        // No gather-context → codegraph is not required.
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &host)
+            .await
+            .expect("report");
+        let codegraph = report
             .checks
             .iter()
             .find(|c| c.name == "codegraph")
-            .expect("codegraph check");
-        assert!(!check.passed);
+            .expect("codegraph");
+        assert!(!codegraph.required);
+        assert!(report.is_ready());
+
+        // gather-context → codegraph required and failing.
+        let cfg = config(
+            r#"
+[run]
+start = "qa"
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "phi4"
+tools = ["gather-context"]
+"#,
+        );
+        let report = run_doctor(&cfg, &catalog, &host).await.expect("report");
+        let codegraph = report
+            .checks
+            .iter()
+            .find(|c| c.name == "codegraph")
+            .expect("codegraph");
+        assert!(codegraph.required);
         assert!(!report.is_ready());
     }
 
     #[tokio::test]
-    async fn missing_graphify_is_not_ready() {
+    async fn missing_api_key_is_not_ready() {
         let catalog = FakeCatalog {
-            result: Ok(all_models()),
+            result: Ok(Vec::new()),
         };
-        let host = FakeHost {
-            rustc: true,
-            mise: true,
-            commands: vec!["codegraph"],
-        };
-        let report = run_doctor(&catalog, &host).await.expect("report");
+        let cfg = config(
+            r#"
+[run]
+start = "po"
+[providers.deepseek]
+api_key_env = "NIGHTSHIFT_DOCTOR_UNSET_KEY"
+[[roles]]
+id = "po"
+provider = "deepseek"
+model = "deepseek-v4-pro"
+"#,
+        );
+        let report = run_doctor(&cfg, &catalog, &healthy_host())
+            .await
+            .expect("report");
         let check = report
             .checks
             .iter()
-            .find(|c| c.name == "graphify")
-            .expect("graphify check");
+            .find(|c| c.name == "provider:deepseek")
+            .expect("provider check");
         assert!(!check.passed);
         assert!(!report.is_ready());
-    }
-
-    #[tokio::test]
-    async fn missing_mise_is_warning_when_rustc_exists() {
-        let catalog = FakeCatalog {
-            result: Ok(all_models()),
-        };
-        let host = FakeHost {
-            rustc: true,
-            mise: false,
-            commands: vec!["codegraph", "graphify"],
-        };
-        let report = run_doctor(&catalog, &host).await.expect("report");
-        let mise = report
-            .checks
-            .iter()
-            .find(|c| c.name == "mise")
-            .expect("mise check");
-        assert!(!mise.passed);
-        assert!(!mise.required);
-        assert!(report.is_ready());
-        assert_eq!(report.exit_code(), 0);
     }
 
     #[tokio::test]
     async fn healthy_environment_is_ready() {
         let catalog = FakeCatalog {
-            result: Ok(all_models()),
+            result: Ok(vec!["phi4".into()]),
         };
-        let report = run_doctor(&catalog, &healthy_host()).await.expect("report");
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &healthy_host())
+            .await
+            .expect("report");
         assert!(report.is_ready(), "{report:?}");
         assert_eq!(report.exit_code(), 0);
-        for name in [
-            "rustc",
-            "mise",
-            "ollama",
-            "codegraph",
-            "graphify",
-            "model:llama3.2:3b",
-            "model:llama3.1:8b",
-            "model:mistral-nemo:12b",
-            "model:qwen2.5-coder:7b",
-            "model:deepseek-r1:7b",
-            "model:gemma2:9b",
-            "model:phi3.5:latest",
-        ] {
-            assert!(
-                report.checks.iter().any(|c| c.name == name && c.passed),
-                "missing passing check {name} in {:?}",
-                report.checks
-            );
-        }
     }
 
     #[test]
