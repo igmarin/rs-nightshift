@@ -262,9 +262,22 @@ working tree.
 3. Review `git diff` in the target repo.
 4. Fix it yourself, or restore selectively with `git restore <file>`.
 
+## Code layout
+
+The crate is layered hexagonally (ADR-007): a pure domain, ports, an
+application layer, and adapters — domain and application never do I/O. Each
+folder has a README describing its responsibility and ownership:
+
+- [src/README.md](src/README.md) — crate layout and the hexagonal layers
+- [src/domain/README.md](src/domain/README.md) — pure domain: role-graph config, verdicts, routing, state
+- [src/application/README.md](src/application/README.md) — use cases: executor, orchestrator, report
+- [src/adapters/README.md](src/adapters/README.md) — the only I/O layer: providers, capabilities, stores, clock
+- [src/adapters/providers/README.md](src/adapters/providers/README.md) — the ModelClient provider adapters (Ollama / OpenAI-compatible) + factory
+
 ## Further reading
 
-- [docs/architecture.md](docs/architecture.md) — pipeline internals, module layout, prerequisites detail
+- [docs/architecture.md](docs/architecture.md) — the role-graph harness: hexagon, commands, providers, capabilities, state/report
+- [docs/role-graph.md](docs/role-graph.md) — role-graph design and the full config schema
 - [docs/configuration.md](docs/configuration.md) — full config reference with examples
 - [docs/decisions.md](docs/decisions.md) — why things are the way they are (ADRs)
 - [docs/development.md](docs/development.md) — contributing, CI gates, PR workflow
