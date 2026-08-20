@@ -5,6 +5,7 @@
 //! Process exit happens only in `main`.
 
 pub mod adapters;
+pub mod application;
 pub mod artifacts;
 pub mod cli;
 pub mod context;

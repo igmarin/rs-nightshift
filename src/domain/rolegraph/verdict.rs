@@ -55,6 +55,10 @@ pub enum Verdict {
 pub struct RoleOutput {
     /// Routing decision for this role's result.
     pub verdict: Verdict,
+    /// The role's deliverable text (the artifact body), written verbatim to
+    /// the role's output file.
+    #[serde(default)]
+    pub content: String,
     /// One-line human summary of what happened.
     #[serde(default)]
     pub summary: String,
