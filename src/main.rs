@@ -4,6 +4,7 @@ use clap::Parser;
 use rs_nightshift::adapters::artifact_store::FsArtifactStore;
 use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
+use rs_nightshift::adapters::context::PathProbe;
 use rs_nightshift::adapters::state::FsStateStore;
 use rs_nightshift::adapters::test::ProcessTestRunner;
 use rs_nightshift::adapters::ProviderFactory;
@@ -12,7 +13,6 @@ use rs_nightshift::application::orchestrator::{run_graph, RunRequest};
 use rs_nightshift::application::report::render_report;
 use rs_nightshift::artifacts::{slugify, write_status, ArtifactStore};
 use rs_nightshift::cli::{Cli, Command};
-use rs_nightshift::context::PathProbe;
 use rs_nightshift::doctor::{
     run_doctor, write_report, Check, DoctorReport, HttpModelCatalog, PathHost,
 };

@@ -6,11 +6,11 @@
 //! process I/O runs on `tokio` blocking threads so the executor never holds a
 //! blocking primitive across `.await`.
 
+use crate::adapters::context::{gather, PathProbe};
 use crate::adapters::git::apply_checked;
 use crate::adapters::test::{
     detect_test_command, ProcessTestRunner, TestRunner, DEFAULT_TEST_TIMEOUT,
 };
-use crate::context::{gather, PathProbe};
 use crate::error::Error;
 use crate::ports::{ContextProvider, ToolRunner};
 use std::path::Path;

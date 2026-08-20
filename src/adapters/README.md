@@ -9,6 +9,7 @@ traits in `ports.rs`.
 | :---------------- | :------------------------ | :----------- |
 | `mod.rs`          | `ModelClient`, `ModelClientFactory` | the LLM provider adapters (`OllamaAdapter`, `OpenAICompatibleAdapter`) and the `build_model_client` / `ProviderFactory` wiring — see [`providers/README.md`](providers/README.md) |
 | `capabilities.rs` | `ToolRunner`, `ContextProvider` | `CapabilityRunner` (`run-tests`, `apply-patch`) and `GraphContextProvider` (codegraph / graphify context) |
+| `context.rs`      | —                        | codegraph / graphify context probe (`PathProbe`, `ContextProbe`, `gather`, `ContextBundle`) plus `extract_paths` and `path_allowed` |
 | `artifact_store.rs` | `ArtifactStore`          | `FsArtifactStore` — creates `{date}_{slug}` run directories under a root (default `./artifacts`) and reads/writes artifacts inside them |
 | `state.rs`        | `StateStore`              | `FsStateStore` — append-only `actions.jsonl` action log plus a `state.json` snapshot (written via temp-file + rename so a crash never truncates it) |
 | `clock.rs`        | `Clock`                   | `SystemClock` — UTC time via the Unix `date` command (this adapter is allowed to shell out) |
