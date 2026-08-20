@@ -181,8 +181,8 @@ pub fn read_user_story(run: &RunDir) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::providers::ScriptedGenerator;
     use crate::artifacts::ArtifactStore;
-    use crate::generate::ScriptedGenerator;
 
     fn complete_spec() -> String {
         r#"

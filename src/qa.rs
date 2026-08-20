@@ -85,8 +85,8 @@ pub async fn fix_hints<G: LLMClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::providers::ScriptedGenerator;
     use crate::artifacts::ArtifactStore;
-    use crate::generate::ScriptedGenerator;
 
     #[test]
     fn truncate_log_caps_at_32kib() {

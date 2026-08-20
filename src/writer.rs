@@ -51,8 +51,8 @@ pub async fn write_article<G: LLMClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::providers::ScriptedGenerator;
     use crate::artifacts::ArtifactStore;
-    use crate::generate::ScriptedGenerator;
 
     #[tokio::test]
     async fn writes_article_at_writer_temperature() {
