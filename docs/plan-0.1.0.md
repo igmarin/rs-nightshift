@@ -46,7 +46,7 @@ After #76 finishes, work on **#82** (split `Error`) and **#83** (consolidate `Sc
 ## Workflow conventions (non-negotiable)
 
 - **coding-flow**: one worktree per slice; ticket → branch → PR; stack with `git worktree` (no `herdr`).
-- **Full pre-push gate** (run every time): `cargo test`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`.
+- **Full pre-push gate** (run every time): `cargo test`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`. `cargo audit` and `cargo deny check` become required after `#85` provisions them.
 - **refactor-process**: baseline green → one atomic move → run tests → commit; rollback immediately on red; never mix behavior changes.
 - Repo invariants (see PR boilerplate / `docs/development.md`): no `unwrap`/`expect`/`panic!` outside `#[cfg(test)]`, `#![deny(missing_docs)]`, model output never used as argv, never commit/push/reset/clean.
 

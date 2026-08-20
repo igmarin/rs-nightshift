@@ -58,8 +58,11 @@ pub fn head_commit(repo: &Path) -> Result<String, Error> {
     git(repo, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
 }
 
-/// `git apply --check` then `git apply`. Never add/commit/push/reset/clean.
-pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
+/// Validate patch paths and run `git apply --check` in `repo`.
+///
+/// This is the safe preflight used by `apply_checked` and
+/// `crate::dev::write_and_apply_patch`. It never modifies the working tree.
+pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
     validate_patch_paths(&patch_paths(patch))?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| Error::Git(e.to_string()))?;
     std::fs::write(tmp.path(), patch)?;
@@ -73,6 +76,14 @@ pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
                 .ok_or_else(|| Error::Git("patch path".into()))?,
         ],
     )?;
+    Ok(())
+}
+
+/// `git apply --check` then `git apply`. Never add/commit/push/reset/clean.
+pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
+    apply_check(repo, patch)?;
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| Error::Git(e.to_string()))?;
+    std::fs::write(tmp.path(), patch)?;
     git(
         repo,
         &[
@@ -86,7 +97,7 @@ pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
 }
 
 /// Run a git command in `repo` and return its stdout as UTF-8.
-pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
+fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)

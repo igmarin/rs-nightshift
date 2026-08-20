@@ -8,6 +8,7 @@ use crate::models::{model_for, Role};
 use crate::techlead::TECH_SPEC_FILE;
 use std::path::{Path, PathBuf};
 
+/// Read the first `max_bytes` of each `files` in `repo` as a markdown block list.
 fn file_slices(repo: &Path, files: &[PathBuf], max_bytes: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
@@ -34,6 +35,7 @@ fn file_slices(repo: &Path, files: &[PathBuf], max_bytes: usize) -> String {
     out
 }
 
+/// Build the Dev stage prompt from the goal, spec, file slices, and QA hints.
 fn dev_prompt(goal: &str, spec: &str, slices: &str, hints: &str) -> String {
     let hints_block = if hints.is_empty() {
         String::new()
@@ -69,7 +71,7 @@ pub async fn write_and_apply_patch<G: LLMClient>(
         ROLE_TEMPERATURE,
     )
     .await?;
-    let patch = match validate_and_check(repo, &draft) {
+    let patch = match git::apply_check(repo, &draft) {
         Ok(()) => draft,
         Err(error) => {
             let repaired = complete_text(
@@ -81,29 +83,12 @@ pub async fn write_and_apply_patch<G: LLMClient>(
                 ROLE_TEMPERATURE,
             )
             .await?;
-            validate_and_check(repo, &repaired)?;
+            git::apply_check(repo, &repaired)?;
             repaired
         }
     };
     std::fs::write(run.path.join(git::PATCH_FILE), &patch)?;
     git::apply_checked(repo, &patch)?;
-    Ok(())
-}
-
-fn validate_and_check(repo: &Path, patch: &str) -> Result<(), Error> {
-    git::validate_patch_paths(&git::patch_paths(patch))?;
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| Error::Git(e.to_string()))?;
-    std::fs::write(tmp.path(), patch)?;
-    git::git(
-        repo,
-        &[
-            "apply",
-            "--check",
-            tmp.path()
-                .to_str()
-                .ok_or_else(|| Error::Git("patch path".into()))?,
-        ],
-    )?;
     Ok(())
 }
 
@@ -121,6 +106,7 @@ mod tests {
     use crate::techlead::impacted_files;
     use std::process::Command;
 
+    /// Create a temporary git repo with an initial `hello.txt` commit.
     fn init_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
@@ -154,6 +140,7 @@ mod tests {
         tmp
     }
 
+    /// A valid unified diff that updates `hello.txt`.
     fn hello_patch() -> String {
         "\
 diff --git a/hello.txt b/hello.txt

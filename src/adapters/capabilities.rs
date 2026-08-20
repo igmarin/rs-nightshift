@@ -38,6 +38,7 @@ impl CapabilityRunner {
         Self { test_timeout }
     }
 
+    /// Detect, run, and format the test command for `repo`.
     async fn run_tests(&self, repo: &Path) -> Result<String, Error> {
         let argv = detect_test_command(repo)?;
         let repo = repo.to_path_buf();
@@ -51,6 +52,7 @@ impl CapabilityRunner {
         ))
     }
 
+    /// Apply `input` as a unified diff to `repo` after validation.
     async fn apply_patch(&self, repo: &Path, input: &str) -> Result<String, Error> {
         let repo = repo.to_path_buf();
         let patch = input.to_string();
@@ -62,6 +64,7 @@ impl CapabilityRunner {
 }
 
 impl Default for CapabilityRunner {
+    /// Default runner with the standard test timeout.
     fn default() -> Self {
         Self::new()
     }
@@ -69,6 +72,7 @@ impl Default for CapabilityRunner {
 
 #[async_trait::async_trait]
 impl ToolRunner for CapabilityRunner {
+    /// Dispatch `run-tests` or `apply-patch` for `repo`.
     async fn run(&self, tool: &str, repo: &Path, input: &str) -> Result<String, Error> {
         match tool {
             "run-tests" => self.run_tests(repo).await,
@@ -84,6 +88,7 @@ pub struct GraphContextProvider;
 
 #[async_trait::async_trait]
 impl ContextProvider for GraphContextProvider {
+    /// Gather codegraph/graphify context for `repo` and `goal`.
     async fn gather(&self, repo: &Path, goal: &str) -> Result<String, Error> {
         let repo = repo.to_path_buf();
         let goal = goal.to_string();
@@ -100,6 +105,7 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    /// Create a temporary git repo with an initial `hello.txt` commit.
     fn init_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
@@ -133,6 +139,7 @@ mod tests {
         tmp
     }
 
+    /// A valid unified diff that updates `hello.txt`.
     const HELLO_PATCH: &str = "\
 diff --git a/hello.txt b/hello.txt
 --- a/hello.txt
