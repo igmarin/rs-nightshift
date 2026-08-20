@@ -179,6 +179,9 @@ pub trait StateStore: Send + Sync {
     /// Append one action-log event.
     fn append_action(&self, run: &Path, event: &ActionEvent) -> Result<(), Error>;
 
+    /// Read all action-log events, oldest first.
+    fn read_actions(&self, run: &Path) -> Result<Vec<ActionEvent>, Error>;
+
     /// Write the status snapshot.
     fn write_snapshot(&self, run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error>;
 
@@ -208,6 +211,10 @@ impl StateStore for MemoryStateStore {
     fn append_action(&self, _run: &Path, event: &ActionEvent) -> Result<(), Error> {
         self.events.lock().expect("store mutex").push(event.clone());
         Ok(())
+    }
+
+    fn read_actions(&self, _run: &Path) -> Result<Vec<ActionEvent>, Error> {
+        Ok(self.events())
     }
 
     fn write_snapshot(&self, _run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error> {

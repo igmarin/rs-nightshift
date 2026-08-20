@@ -44,6 +44,22 @@ impl StateStore for FsStateStore {
             .map_err(|error| Error::Artifact(format!("write {}: {error}", path.display())))
     }
 
+    fn read_actions(&self, run: &Path) -> Result<Vec<ActionEvent>, Error> {
+        let path = run.join(ACTIONS_FILE);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::Artifact(format!("read {}: {error}", path.display()))),
+        };
+        content
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line)
+                    .map_err(|error| Error::Artifact(format!("parse {}: {error}", path.display())))
+            })
+            .collect()
+    }
+
     fn write_snapshot(&self, run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error> {
         let json = serde_json::to_string_pretty(snapshot)
             .map_err(|error| Error::Artifact(error.to_string()))?;
@@ -96,6 +112,29 @@ mod tests {
         for line in lines {
             serde_json::from_str::<ActionEvent>(line).expect("valid json line");
         }
+    }
+
+    #[test]
+    fn read_actions_returns_appended_events_in_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsStateStore::new();
+        store
+            .append_action(tmp.path(), &event("t1", EventKind::RoleStart, "po"))
+            .expect("append");
+        store
+            .append_action(tmp.path(), &event("t2", EventKind::RoleEnd, "po"))
+            .expect("append");
+        let events = store.read_actions(tmp.path()).expect("read");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].role, "po");
+        assert_eq!(events[1].role, "po");
+    }
+
+    #[test]
+    fn read_actions_missing_file_is_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsStateStore::new();
+        assert!(store.read_actions(tmp.path()).expect("read").is_empty());
     }
 
     #[test]

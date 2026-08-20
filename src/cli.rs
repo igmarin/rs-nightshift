@@ -69,6 +69,21 @@ pub enum Command {
         #[arg(long, value_enum)]
         until: Option<Until>,
     },
+    /// Run a role-graph job from a config file (the new harness).
+    Harness {
+        /// Business goal for the run.
+        #[arg(long)]
+        goal: String,
+        /// Role-graph config file (default: `nightshift.toml`).
+        #[arg(long, default_value = "nightshift.toml")]
+        config: PathBuf,
+        /// Artifact root (default: `./artifacts`).
+        #[arg(long, default_value = crate::artifacts::DEFAULT_OUT_DIR)]
+        out: PathBuf,
+        /// Directory slug (default: slugified goal).
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -265,5 +280,25 @@ mod tests {
             text.contains("required") || text.contains("--goal") || text.contains("--repo"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn parses_harness() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "harness",
+            "--goal",
+            "add /health",
+            "--config",
+            "nightshift.toml",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Harness { goal, config, .. } => {
+                assert_eq!(goal, "add /health");
+                assert_eq!(config, PathBuf::from("nightshift.toml"));
+            }
+            other => panic!("expected Harness, got {other:?}"),
+        }
     }
 }
