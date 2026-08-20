@@ -1,7 +1,7 @@
 //! Role-graph configuration: the `nightshift.toml` schema and validation.
 
+use crate::domain::rolegraph::routing::{Routing, Target};
 use crate::error::Error;
-use crate::rolegraph::routing::{Routing, Target};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
