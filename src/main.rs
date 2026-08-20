@@ -5,6 +5,7 @@ use rs_nightshift::adapters::artifact_store::FsArtifactStore;
 use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
 use rs_nightshift::adapters::state::FsStateStore;
+use rs_nightshift::adapters::test::ProcessTestRunner;
 use rs_nightshift::adapters::ProviderFactory;
 use rs_nightshift::application::executor::{execute, ExecuteParams, RoleContext};
 use rs_nightshift::application::orchestrator::{run_graph, RunRequest};
@@ -24,7 +25,6 @@ use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest}
 use rs_nightshift::ports::{
     ArtifactStore as ArtifactStorePort, Clock, ModelClientFactory, StateStore,
 };
-use rs_nightshift::testrun::ProcessTestRunner;
 use std::io::{self, Write};
 use std::process;
 

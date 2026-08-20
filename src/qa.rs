@@ -1,10 +1,10 @@
 //! QA stage: run tests, write `04_qa_report.json`, cap the Dev loop at 3.
 
+use crate::adapters::test::{format_command, TestOutcome};
 use crate::artifacts::{QaReport, QaStatus, RunDir};
 use crate::error::Error;
 use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
-use crate::testrun::{format_command, TestOutcome};
 
 /// Artifact written by QA.
 pub const QA_REPORT_FILE: &str = "04_qa_report.json";

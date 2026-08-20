@@ -1,4 +1,4 @@
-//! Detect and run the target repo's test command (never from model output).
+//! Test-adapter: detect and run the target repo's test command (never from model output).
 
 use crate::error::Error;
 use std::path::Path;

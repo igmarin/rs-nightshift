@@ -1,6 +1,7 @@
 //! Overnight pipeline orchestration.
 
 use crate::adapters::git::working_tree_dirty;
+use crate::adapters::test::{detect_test_command, TestRunner};
 use crate::artifacts::{ArtifactStore, QaStatus, RunDir};
 use crate::cli::Until;
 use crate::context::{gather, ContextProbe};
@@ -9,7 +10,6 @@ use crate::error::Error;
 use crate::generate::{LLMClient, Origin};
 use crate::qa::{fix_hints, report_from_outcome, truncate_log, write_qa_report, MAX_ITERATIONS};
 use crate::techlead::{impacted_files, read_user_story, write_tech_spec};
-use crate::testrun::{detect_test_command, TestRunner};
 use crate::writer::write_article;
 use std::path::{Path, PathBuf};
 
@@ -140,7 +140,7 @@ where
                         iteration,
                         command: test_argv
                             .as_ref()
-                            .map(|a| crate::testrun::format_command(a))
+                            .map(|a| crate::adapters::test::format_command(a))
                             .unwrap_or_default(),
                         exit_code: -1,
                         summary: "dev apply failed".into(),
@@ -302,7 +302,7 @@ mod tests {
                 until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -357,7 +357,7 @@ mod tests {
                 until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -396,7 +396,7 @@ mod tests {
                 until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("empty goal");
@@ -429,7 +429,7 @@ mod tests {
                 until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -467,7 +467,7 @@ mod tests {
                 until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("invalid story");
@@ -497,7 +497,7 @@ mod tests {
                 until: Some(Until::Pm),
             },
             &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("missing repo");
@@ -546,7 +546,7 @@ apply the patch
                 until: Some(Until::TechLead),
             },
             &StubProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -609,7 +609,7 @@ apply the patch
                 until: Some(Until::Dev),
             },
             &StubProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("dirty");
@@ -667,7 +667,7 @@ diff --git a/hello.txt b/hello.txt
                 until: Some(Until::Dev),
             },
             &StubProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -736,7 +736,7 @@ diff --git a/hello.txt b/hello.txt
         let store = ArtifactStore::new(tmp.path().join("artifacts"));
         let gen = ScriptedGenerator::new();
         qa_story_spec_and_patches(&gen, &[PATCH_V1]);
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(0, "ok", &["true".into()]);
         let run = run(
             &gen,
@@ -777,7 +777,7 @@ diff --git a/hello.txt b/hello.txt
         let gen = ScriptedGenerator::new();
         qa_story_spec_and_patches(&gen, &[PATCH_V1]);
         gen.push_text("# Article\nNothing was committed.\n");
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(0, "ok", &["true".into()]);
         let run = run(
             &gen,
@@ -817,7 +817,7 @@ diff --git a/hello.txt b/hello.txt
         let gen = ScriptedGenerator::new();
         qa_story_spec_and_patches(&gen, &[PATCH_V1]);
         gen.push_text("   \n");
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(0, "ok", &["true".into()]);
         let err = run(
             &gen,
@@ -877,7 +877,7 @@ commit
         gen.push_text(PATCH_V2);
         gen.push_text("hint two");
         gen.push_text(PATCH_V3);
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(1, "fail 1", &["false".into()]);
         runner.push_outcome(1, "fail 2", &["false".into()]);
         runner.push_outcome(1, "fail 3", &["false".into()]);

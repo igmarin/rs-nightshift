@@ -12,6 +12,7 @@ pub mod git;
 pub mod kernel_error;
 pub mod providers;
 pub mod state;
+pub mod test;
 
 pub use providers::{
     build_model_client, OllamaAdapter, OpenAICompatibleAdapter, ProviderFactory,
