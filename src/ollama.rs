@@ -266,7 +266,7 @@ impl LLMClient for OllamaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generate::map_kernel_error;
+    use crate::adapters::kernel_error::map_kernel_error;
     use serde_json::Value;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;

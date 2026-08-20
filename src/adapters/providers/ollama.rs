@@ -1,7 +1,8 @@
 //! Ollama [`ModelClient`] adapter preserving `keep_alive: 0` unload.
 
+use crate::adapters::kernel_error::map_kernel_error;
 use crate::error::Error;
-use crate::generate::{map_kernel_error, Origin};
+use crate::generate::Origin;
 use crate::ollama::OllamaClient;
 use crate::ports::{GenerateRequest, ModelClient};
 use async_trait::async_trait;

@@ -8,6 +8,7 @@
 pub mod artifact_store;
 pub mod capabilities;
 pub mod clock;
+pub mod kernel_error;
 pub mod providers;
 pub mod state;
 

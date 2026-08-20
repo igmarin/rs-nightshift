@@ -1,7 +1,7 @@
 //! OpenAI-compatible [`ModelClient`] adapter (Deepseek, Kimi, custom).
 
+use crate::adapters::kernel_error::map_kernel_error;
 use crate::error::Error;
-use crate::generate::map_kernel_error;
 use crate::ports::{GenerateRequest, ModelClient};
 use async_trait::async_trait;
 use llm_kernel::llm::{ChatMessage, LLMClient, LLMRequest, OpenAIClient};
