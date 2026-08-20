@@ -4,17 +4,21 @@
 //! The library holds check and model contracts used by the `nightshift` binary.
 //! Process exit happens only in `main`.
 
+pub mod adapters;
+pub mod application;
 pub mod artifacts;
 pub mod cli;
 pub mod context;
 pub mod dev;
 pub mod doctor;
+pub mod domain;
 pub mod error;
 pub mod generate;
 pub mod models;
 pub mod ollama;
 pub mod pipeline;
 pub mod pm;
+pub mod ports;
 pub mod qa;
 pub mod techlead;
 pub mod testrun;

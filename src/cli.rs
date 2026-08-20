@@ -37,7 +37,11 @@ pub enum Until {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
     /// Check that the server can run a nightshift job.
-    Doctor,
+    Doctor {
+        /// Role-graph config file (default: `nightshift.toml`).
+        #[arg(long, default_value = "nightshift.toml")]
+        config: PathBuf,
+    },
     /// Print the latest QA verdict from the artifact store.
     Status {
         /// Artifact root (default: `./artifacts`).
@@ -69,6 +73,42 @@ pub enum Command {
         #[arg(long, value_enum)]
         until: Option<Until>,
     },
+    /// Run a role-graph job from a config file (the new harness).
+    Harness {
+        /// Business goal for the run.
+        #[arg(long)]
+        goal: String,
+        /// Role-graph config file (default: `nightshift.toml`).
+        #[arg(long, default_value = "nightshift.toml")]
+        config: PathBuf,
+        /// Artifact root (default: `./artifacts`).
+        #[arg(long, default_value = crate::artifacts::DEFAULT_OUT_DIR)]
+        out: PathBuf,
+        /// Directory slug (default: slugified goal).
+        #[arg(long)]
+        name: Option<String>,
+        /// Target repo for capabilities (e.g. apply-patch).
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Pre-flight: run the entry role and resolve its questions interactively.
+    Plan {
+        /// Business goal for the run.
+        #[arg(long)]
+        goal: String,
+        /// Role-graph config file (default: `nightshift.toml`).
+        #[arg(long, default_value = "nightshift.toml")]
+        config: PathBuf,
+        /// Artifact root (default: `./artifacts`).
+        #[arg(long, default_value = crate::artifacts::DEFAULT_OUT_DIR)]
+        out: PathBuf,
+        /// Directory slug (default: slugified goal).
+        #[arg(long)]
+        name: Option<String>,
+        /// Target repo for capabilities.
+        #[arg(long)]
+        repo: PathBuf,
+    },
 }
 
 #[cfg(test)]
@@ -79,7 +119,10 @@ mod tests {
     #[test]
     fn parses_doctor() {
         let cli = Cli::try_parse_from(["nightshift", "doctor"]).expect("parse");
-        assert_eq!(cli.command, Command::Doctor);
+        match cli.command {
+            Command::Doctor { config } => assert_eq!(config, PathBuf::from("nightshift.toml")),
+            other => panic!("expected Doctor, got {other:?}"),
+        }
     }
 
     #[test]
@@ -265,5 +308,57 @@ mod tests {
             text.contains("required") || text.contains("--goal") || text.contains("--repo"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn parses_harness() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "harness",
+            "--goal",
+            "add /health",
+            "--repo",
+            ".",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Harness {
+                goal,
+                config,
+                out,
+                name,
+                repo,
+            } => {
+                assert_eq!(goal, "add /health");
+                assert_eq!(config, PathBuf::from("nightshift.toml"));
+                assert_eq!(out, PathBuf::from("artifacts"));
+                assert_eq!(name, None);
+                assert_eq!(repo, PathBuf::from("."));
+            }
+            other => panic!("expected Harness, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_plan() {
+        let cli =
+            Cli::try_parse_from(["nightshift", "plan", "--goal", "add /health", "--repo", "."])
+                .expect("parse");
+        match cli.command {
+            Command::Plan {
+                goal,
+                config,
+                out,
+                name,
+                repo,
+            } => {
+                assert_eq!(goal, "add /health");
+                assert_eq!(config, PathBuf::from("nightshift.toml"));
+                assert_eq!(out, PathBuf::from("artifacts"));
+                assert_eq!(name, None);
+                assert_eq!(repo, PathBuf::from("."));
+            }
+            other => panic!("expected Plan, got {other:?}"),
+        }
     }
 }
