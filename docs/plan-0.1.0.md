@@ -36,10 +36,10 @@ After #76 finishes, work on **#82** (split `Error`) and **#83** (consolidate `Sc
 
 ## Order of work
 
-1. **#76** — finish adapter relocations (testrun, context, ollama). [in progress]
-2. **#82** + **#83** — split the monolithic `Error` enum and consolidate `ScriptedGenerator` into adapters/providers. Can run in parallel after #76.
+1. **#76** — finish adapter relocations (testrun, context, ollama). [done]
+2. **#82** + **#83** — split the monolithic `Error` enum and consolidate `ScriptedGenerator` into adapters/providers. [next; can run in parallel]
 3. **#74** — retire hardcoded stage modules + `Role` enum, unblocked once #82 and #83 land.
-4. **#85** — add `cargo-audit` and `cargo-deny` to dev/CI. Parallel tooling improvement.
+4. **#85** — add `cargo-audit` and `cargo-deny` to dev/CI. [done]
 5. **#36** — beta acceptance run.
 6. **#17** — cut v0.1.0 release.
 
