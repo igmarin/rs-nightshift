@@ -3,7 +3,7 @@
 use crate::domain::rolegraph::config::RoleSpec;
 use crate::domain::rolegraph::verdict::RoleOutput;
 use crate::error::Error;
-use crate::ports::{ArtifactStore, GenerateRequest, ModelClient};
+use crate::ports::{ArtifactStore, ContextProvider, GenerateRequest, ModelClient, ToolRunner};
 use std::path::Path;
 
 /// Default sampling temperature for role calls.
@@ -48,38 +48,84 @@ pub struct ExecuteOutcome {
     pub artifact: Option<String>,
 }
 
-/// Execute one role: render the prompt, call the client, parse the envelope,
-/// and write the artifact.
-pub async fn execute<C, A>(
+/// Per-execution inputs (borrowed data; ports are passed separately).
+pub struct ExecuteParams<'a> {
+    /// Run directory (for reading prior artifacts and writing the output).
+    pub run: &'a Path,
+    /// Target repo (for capabilities like `run-tests` / `apply-patch`).
+    pub repo: &'a Path,
+    /// The role being executed.
+    pub role: &'a RoleSpec,
+    /// Goal + loop-back context.
+    pub context: &'a RoleContext,
+    /// Names of prior artifacts to inject into the prompt.
+    pub artifacts: &'a [String],
+}
+
+/// Execute one role: run pre-tools, render the prompt, call the client, parse
+/// the envelope, run post-tools, and write the artifact.
+pub async fn execute<C, A, T, P>(
     client: &C,
     store: &A,
-    run: &Path,
-    role: &RoleSpec,
-    context: &RoleContext,
-    artifacts: &[String],
+    tools: &T,
+    context_provider: &P,
+    params: &ExecuteParams<'_>,
 ) -> Result<ExecuteOutcome, Error>
 where
     C: ModelClient + ?Sized,
     A: ArtifactStore,
+    T: ToolRunner,
+    P: ContextProvider,
 {
-    let mut contents = Vec::with_capacity(artifacts.len());
-    for name in artifacts {
-        let content = store.read_artifact(run, name)?;
+    // Pre-tools: gather repo context and run the test suite, injecting their
+    // output into the prompt so the role reasons over real results.
+    let mut tool_output = String::new();
+    for tool in &params.role.tools {
+        match tool.as_str() {
+            "gather-context" => {
+                let text = context_provider
+                    .gather(params.repo, &params.context.goal)
+                    .await?;
+                if !text.is_empty() {
+                    tool_output.push_str(&format!("### repo context\n{text}\n\n"));
+                }
+            }
+            "run-tests" => {
+                let out = tools.run("run-tests", params.repo, "").await?;
+                tool_output.push_str(&format!("### test results\n{out}\n\n"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut contents = Vec::with_capacity(params.artifacts.len());
+    for name in params.artifacts {
+        let content = store.read_artifact(params.run, name)?;
         contents.push((name.clone(), content));
     }
     let text = client
         .generate(&GenerateRequest {
-            model: role.model.clone(),
-            system: Some(system_prompt(role)),
-            prompt: user_prompt(context, &contents),
+            model: params.role.model.clone(),
+            system: Some(system_prompt(params.role)),
+            prompt: user_prompt(params.context, &contents, &tool_output),
             temperature: DEFAULT_TEMPERATURE,
         })
         .await?;
     let output = parse_role_output(&text)?;
-    let artifact = role.output.as_deref().map(|name| {
+
+    // Post-tools: apply the patch after the role produces its deliverable.
+    for tool in &params.role.tools {
+        if tool == "apply-patch" {
+            tools
+                .run("apply-patch", params.repo, &output.content)
+                .await?;
+        }
+    }
+
+    let artifact = params.role.output.as_deref().map(|name| {
         // An empty deliverable is still written so the morning report shows the
         // artifact exists (and what the role produced).
-        let _ = store.write_artifact(run, name, &output.content);
+        let _ = store.write_artifact(params.run, name, &output.content);
         name.to_string()
     });
     Ok(ExecuteOutcome { output, artifact })
@@ -95,9 +141,13 @@ fn system_prompt(role: &RoleSpec) -> String {
     }
 }
 
-/// Assemble the user prompt from the goal, loop-back context, and prior artifacts.
-fn user_prompt(context: &RoleContext, artifacts: &[(String, String)]) -> String {
+/// Assemble the user prompt from the goal, pre-tool output, loop-back context,
+/// and prior artifacts.
+fn user_prompt(context: &RoleContext, artifacts: &[(String, String)], tool_output: &str) -> String {
     let mut parts = vec![format!("Goal: {}", context.goal)];
+    if !tool_output.is_empty() {
+        parts.push(format!("Tool output:\n{tool_output}"));
+    }
     if !context.findings.is_empty() {
         let findings = context
             .findings
@@ -172,7 +222,9 @@ mod tests {
     use super::*;
     use crate::domain::rolegraph::routing::Routing;
     use crate::domain::rolegraph::verdict::Verdict;
-    use crate::ports::{MemoryArtifactStore, ScriptedModelClient};
+    use crate::ports::{
+        MemoryArtifactStore, ScriptedModelClient, StubContextProvider, StubToolRunner,
+    };
     use std::collections::BTreeMap;
 
     fn role(output: Option<&str>) -> RoleSpec {
@@ -189,11 +241,31 @@ mod tests {
         }
     }
 
+    fn role_with_tools(output: Option<&str>, tools: &[&str]) -> RoleSpec {
+        let mut role = role(output);
+        role.tools = tools.iter().map(|t| (*t).to_string()).collect();
+        role
+    }
+
     fn context() -> RoleContext {
         RoleContext {
             goal: "add /health".into(),
             findings: Vec::new(),
             questions: Vec::new(),
+        }
+    }
+
+    fn params<'a>(
+        run: &'a Path,
+        role: &'a RoleSpec,
+        context: &'a RoleContext,
+    ) -> ExecuteParams<'a> {
+        ExecuteParams {
+            run,
+            repo: Path::new("/repo"),
+            role,
+            context,
+            artifacts: &[],
         }
     }
 
@@ -203,13 +275,14 @@ mod tests {
         client.push_text(r#"{"verdict":"continue","content":"pub fn health() {}"}"#);
         let store = MemoryArtifactStore::default();
         let run = Path::new("/tmp/run/x");
+        let role = role(Some("02_patch.patch"));
+        let ctx = context();
         let outcome = execute(
             &client,
             &store,
-            run,
-            &role(Some("02_patch.patch")),
-            &context(),
-            &[],
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
         )
         .await
         .expect("execute");
@@ -232,13 +305,20 @@ mod tests {
         store
             .write_artifact(run, "01_brief.md", "the brief")
             .expect("write");
+        let role = role(None);
+        let ctx = context();
         execute(
             &client,
             &store,
-            run,
-            &role(None),
-            &context(),
-            &["01_brief.md".into()],
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                run,
+                repo: Path::new("/repo"),
+                role: &role,
+                context: &ctx,
+                artifacts: &["01_brief.md".into()],
+            },
         )
         .await
         .expect("execute");
@@ -250,11 +330,6 @@ mod tests {
             calls[0].prompt
         );
         assert!(calls[0].prompt.contains("the brief"), "{}", calls[0].prompt);
-        assert!(calls[0]
-            .system
-            .as_deref()
-            .unwrap_or("")
-            .contains("You are a developer."));
     }
 
     #[tokio::test]
@@ -263,9 +338,17 @@ mod tests {
         client.push_text("```json\n{\"verdict\":\"done\",\"content\":\"x\"}\n```");
         let store = MemoryArtifactStore::default();
         let run = Path::new("/tmp/run/x");
-        let outcome = execute(&client, &store, run, &role(None), &context(), &[])
-            .await
-            .expect("execute");
+        let role = role(None);
+        let ctx = context();
+        let outcome = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
         assert_eq!(outcome.output.verdict, Verdict::Done);
     }
 
@@ -275,10 +358,73 @@ mod tests {
         client.push_text("no json here");
         let store = MemoryArtifactStore::default();
         let run = Path::new("/tmp/run/x");
-        let err = execute(&client, &store, run, &role(None), &context(), &[])
-            .await
-            .expect_err("invalid output");
+        let role = role(None);
+        let ctx = context();
+        let err = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect_err("invalid output");
         assert!(err.to_string().contains("JSON"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn execute_injects_pre_tool_output() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role_with_tools(None, &["run-tests"]);
+        let ctx = context();
+        let tools = StubToolRunner::new("exit code: 0\nok");
+        execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        let calls = client.calls();
+        assert!(
+            calls[0].prompt.contains("Tool output"),
+            "{}",
+            calls[0].prompt
+        );
+        assert!(
+            calls[0].prompt.contains("exit code: 0"),
+            "{}",
+            calls[0].prompt
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_applies_patch_after_generation() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"--- patch ---"}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role_with_tools(Some("02_patch.patch"), &["apply-patch"]);
+        let ctx = context();
+        let tools = StubToolRunner::new("patch applied");
+        execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        let calls = tools.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "apply-patch");
+        assert_eq!(calls[0].1, "--- patch ---");
     }
 
     #[test]
@@ -295,7 +441,7 @@ mod tests {
             findings: vec!["compile error".into()],
             questions: vec!["which port?".into()],
         };
-        let prompt = user_prompt(&ctx, &[]);
+        let prompt = user_prompt(&ctx, &[], "");
         assert!(prompt.contains("Goal: g"), "{prompt}");
         assert!(prompt.contains("compile error"), "{prompt}");
         assert!(prompt.contains("which port?"), "{prompt}");

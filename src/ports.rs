@@ -267,6 +267,7 @@ pub trait ContextProvider: Send + Sync {
 #[derive(Debug, Default)]
 pub struct StubToolRunner {
     output: std::sync::Mutex<String>,
+    calls: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 #[cfg(test)]
@@ -276,14 +277,25 @@ impl StubToolRunner {
     pub fn new(output: impl Into<String>) -> Self {
         Self {
             output: std::sync::Mutex::new(output.into()),
+            calls: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Recorded `(tool, input)` pairs, in order.
+    #[must_use]
+    pub fn calls(&self) -> Vec<(String, String)> {
+        self.calls.lock().expect("stub mutex").clone()
     }
 }
 
 #[cfg(test)]
 #[async_trait::async_trait]
 impl ToolRunner for StubToolRunner {
-    async fn run(&self, _tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+    async fn run(&self, tool: &str, _repo: &Path, input: &str) -> Result<String, Error> {
+        self.calls
+            .lock()
+            .expect("stub mutex")
+            .push((tool.to_string(), input.to_string()));
         Ok(self.output.lock().expect("stub mutex").clone())
     }
 }

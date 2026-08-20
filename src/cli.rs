@@ -83,6 +83,9 @@ pub enum Command {
         /// Directory slug (default: slugified goal).
         #[arg(long)]
         name: Option<String>,
+        /// Target repo for capabilities (default: current directory).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
     },
 }
 

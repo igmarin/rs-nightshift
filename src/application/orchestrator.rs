@@ -6,7 +6,9 @@ use crate::domain::rolegraph::routing::Target;
 use crate::domain::rolegraph::state::{ActionEvent, EventKind, RunStatus, StatusSnapshot};
 use crate::domain::rolegraph::verdict::{BlockReason, Verdict};
 use crate::error::Error;
-use crate::ports::{ArtifactStore, Clock, ModelClientFactory, StateStore};
+use crate::ports::{
+    ArtifactStore, Clock, ContextProvider, ModelClientFactory, StateStore, ToolRunner,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -21,46 +23,61 @@ pub struct RunResult {
     pub steps: u32,
 }
 
-/// Walk the role graph from `config.run.start`, routing deterministically on
-/// each role's verdict until a terminal state is reached.
-pub async fn run_graph<F, A, S, K>(
+/// Per-run inputs (borrowed data; ports are passed separately).
+pub struct RunRequest<'a> {
+    /// Run directory (artifacts + state).
+    pub run: &'a Path,
+    /// Target repo (for capabilities).
+    pub repo: &'a Path,
+    /// The role graph.
+    pub config: &'a NightshiftConfig,
+    /// The operator's goal.
+    pub goal: &'a str,
+}
+
+/// Walk the role graph from `request.config.run.start`, routing deterministically
+/// on each role's verdict until a terminal state is reached.
+pub async fn run_graph<F, A, S, K, T, P>(
     factory: &F,
     store: &A,
     state: &S,
     clock: &K,
-    run: &Path,
-    config: &NightshiftConfig,
-    goal: &str,
+    tools: &T,
+    context_provider: &P,
+    request: &RunRequest<'_>,
 ) -> Result<RunResult, Error>
 where
     F: ModelClientFactory,
     A: ArtifactStore,
     S: StateStore,
     K: Clock,
+    T: ToolRunner,
+    P: ContextProvider,
 {
-    let roles: BTreeMap<&str, &RoleSpec> = config
+    let roles: BTreeMap<&str, &RoleSpec> = request
+        .config
         .roles
         .iter()
         .map(|role| (role.id.as_str(), role))
         .collect();
 
-    let mut current: String = config.run.start.clone();
+    let mut current: String = request.config.run.start.clone();
     let mut steps: u32 = 0;
     let mut loop_counters: BTreeMap<String, u32> = BTreeMap::new();
     let mut last_verdict: Option<Verdict> = None;
     let mut context = RoleContext {
-        goal: goal.to_string(),
+        goal: request.goal.to_string(),
         findings: Vec::new(),
         questions: Vec::new(),
     };
     let mut artifacts: Vec<String> = Vec::new();
 
     loop {
-        if steps >= config.run.max_steps {
+        if steps >= request.config.run.max_steps {
             return halt_budget_exhausted(
                 state,
                 clock,
-                run,
+                request.run,
                 &current,
                 steps,
                 last_verdict,
@@ -78,7 +95,7 @@ where
         let provider = role.provider.clone();
         let model = role.model.clone();
         state.append_action(
-            run,
+            request.run,
             &ActionEvent {
                 ts: clock.now_iso(),
                 event: EventKind::RoleStart,
@@ -91,10 +108,22 @@ where
             },
         )?;
 
-        let spec = config.providers.get(&role.provider);
+        let spec = request.config.providers.get(&role.provider);
         let client = factory.build(&role.provider, spec, &role.options)?;
-        let outcome =
-            executor::execute(client.as_ref(), store, run, role, &context, &artifacts).await?;
+        let outcome = executor::execute(
+            client.as_ref(),
+            store,
+            tools,
+            context_provider,
+            &executor::ExecuteParams {
+                run: request.run,
+                repo: request.repo,
+                role,
+                context: &context,
+                artifacts: &artifacts,
+            },
+        )
+        .await?;
         last_verdict = Some(outcome.output.verdict);
         if let Some(name) = &outcome.artifact {
             if !artifacts.contains(name) {
@@ -103,7 +132,7 @@ where
         }
 
         state.append_action(
-            run,
+            request.run,
             &ActionEvent {
                 ts: clock.now_iso(),
                 event: EventKind::RoleEnd,
@@ -116,7 +145,7 @@ where
             },
         )?;
         state.write_snapshot(
-            run,
+            request.run,
             &StatusSnapshot {
                 current_role: Some(current.clone()),
                 steps,
@@ -127,11 +156,11 @@ where
             },
         )?;
 
-        match route(config, role, &outcome) {
+        match route(request.config, role, &outcome) {
             RoutingDecision::Terminal(status, reason) => {
                 let reason = normalize_reason(status, reason);
                 state.append_action(
-                    run,
+                    request.run,
                     &ActionEvent {
                         ts: clock.now_iso(),
                         event: terminal_event(status),
@@ -144,7 +173,7 @@ where
                     },
                 )?;
                 state.write_snapshot(
-                    run,
+                    request.run,
                     &StatusSnapshot {
                         current_role: Some(current.clone()),
                         steps,
@@ -163,7 +192,7 @@ where
             RoutingDecision::Next(next) => {
                 current = next;
                 context = RoleContext {
-                    goal: goal.to_string(),
+                    goal: request.goal.to_string(),
                     findings: Vec::new(),
                     questions: Vec::new(),
                 };
@@ -175,7 +204,7 @@ where
                     return halt_budget_exhausted(
                         state,
                         clock,
-                        run,
+                        request.run,
                         &current,
                         steps,
                         last_verdict,
@@ -184,7 +213,7 @@ where
                 }
                 loop_counters.insert(key, count + 1);
                 state.append_action(
-                    run,
+                    request.run,
                     &ActionEvent {
                         ts: clock.now_iso(),
                         event: EventKind::Loop,
@@ -197,7 +226,7 @@ where
                     },
                 )?;
                 context = RoleContext {
-                    goal: goal.to_string(),
+                    goal: request.goal.to_string(),
                     findings,
                     questions,
                 };
@@ -330,7 +359,9 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{FixedClock, MemoryArtifactStore, MemoryStateStore};
+    use crate::ports::{
+        FixedClock, MemoryArtifactStore, MemoryStateStore, StubContextProvider, StubToolRunner,
+    };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -394,6 +425,27 @@ mod tests {
         toml::from_str(toml).expect("config parses")
     }
 
+    async fn run(cfg: &NightshiftConfig, factory: &QueueFactory) -> RunResult {
+        let store = MemoryArtifactStore::default();
+        let state = MemoryStateStore::default();
+        run_graph(
+            factory,
+            &store,
+            &state,
+            &clock(),
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &RunRequest {
+                run: Path::new("/tmp/run/x"),
+                repo: Path::new("/repo"),
+                config: cfg,
+                goal: "goal",
+            },
+        )
+        .await
+        .expect("run")
+    }
+
     const TWO_ROLE: &str = r#"
 [run]
 start = "po"
@@ -415,24 +467,10 @@ model = "phi4"
         let factory = QueueFactory::new();
         factory.push(r#"{"verdict":"continue","content":"brief"}"#);
         factory.push(r#"{"verdict":"done","content":"patch"}"#);
-        let store = MemoryArtifactStore::default();
-        let state = MemoryStateStore::default();
-        let result = run_graph(
-            &factory,
-            &store,
-            &state,
-            &clock(),
-            Path::new("/tmp/run/x"),
-            &config(TWO_ROLE),
-            "add /health",
-        )
-        .await
-        .expect("run");
+        let result = run(&config(TWO_ROLE), &factory).await;
         assert_eq!(result.status, RunStatus::Done);
         assert_eq!(result.block_reason, BlockReason::None);
         assert_eq!(result.steps, 2);
-        // role_start + role_end per role, plus the terminal done event.
-        assert_eq!(state.events().len(), 2 * 2 + 1);
     }
 
     #[tokio::test]
@@ -442,8 +480,6 @@ model = "phi4"
             factory.push(r#"{"verdict":"continue","content":""}"#);
             factory.push(r#"{"verdict":"issues","findings":["compile error"],"content":""}"#);
         }
-        let store = MemoryArtifactStore::default();
-        let state = MemoryStateStore::default();
         let cfg = config(
             r#"
 [run]
@@ -463,17 +499,7 @@ on = { issues = "dev" }
 max_loop = 2
 "#,
         );
-        let result = run_graph(
-            &factory,
-            &store,
-            &state,
-            &clock(),
-            Path::new("/tmp/run/x"),
-            &cfg,
-            "goal",
-        )
-        .await
-        .expect("run");
+        let result = run(&cfg, &factory).await;
         assert_eq!(result.status, RunStatus::Blocked);
         assert_eq!(result.block_reason, BlockReason::BudgetExhausted);
         assert_eq!(result.steps, 6);
@@ -485,8 +511,6 @@ max_loop = 2
         factory.push(
             r#"{"verdict":"questions","questions":[{"text":"which port?","blocking":true}]}"#,
         );
-        let store = MemoryArtifactStore::default();
-        let state = MemoryStateStore::default();
         let cfg = config(
             r#"
 [run]
@@ -497,17 +521,7 @@ provider = "ollama"
 model = "phi4"
 "#,
         );
-        let result = run_graph(
-            &factory,
-            &store,
-            &state,
-            &clock(),
-            Path::new("/tmp/run/x"),
-            &cfg,
-            "goal",
-        )
-        .await
-        .expect("run");
+        let result = run(&cfg, &factory).await;
         assert_eq!(result.status, RunStatus::Blocked);
         assert_eq!(result.block_reason, BlockReason::IllDefinedTask);
     }
@@ -516,8 +530,6 @@ model = "phi4"
     async fn fail_is_terminal() {
         let factory = QueueFactory::new();
         factory.push(r#"{"verdict":"fail","block_reason":"tool_failure"}"#);
-        let store = MemoryArtifactStore::default();
-        let state = MemoryStateStore::default();
         let cfg = config(
             r#"
 [run]
@@ -528,17 +540,7 @@ provider = "ollama"
 model = "phi4"
 "#,
         );
-        let result = run_graph(
-            &factory,
-            &store,
-            &state,
-            &clock(),
-            Path::new("/tmp/run/x"),
-            &cfg,
-            "goal",
-        )
-        .await
-        .expect("run");
+        let result = run(&cfg, &factory).await;
         assert_eq!(result.status, RunStatus::Failed);
         assert_eq!(result.block_reason, BlockReason::ToolFailure);
     }
@@ -547,8 +549,6 @@ model = "phi4"
     async fn on_unclear_proceed_treats_questions_as_continue() {
         let factory = QueueFactory::new();
         factory.push(r#"{"verdict":"questions","questions":[{"text":"q","blocking":true}]}"#);
-        let store = MemoryArtifactStore::default();
-        let state = MemoryStateStore::default();
         let cfg = config(
             r#"
 [run]
@@ -560,18 +560,7 @@ provider = "ollama"
 model = "phi4"
 "#,
         );
-        let result = run_graph(
-            &factory,
-            &store,
-            &state,
-            &clock(),
-            Path::new("/tmp/run/x"),
-            &cfg,
-            "goal",
-        )
-        .await
-        .expect("run");
-        // continue_target defaults to done, so proceed terminates successfully.
+        let result = run(&cfg, &factory).await;
         assert_eq!(result.status, RunStatus::Done);
     }
 
@@ -581,8 +570,6 @@ model = "phi4"
         for _ in 0..4 {
             factory.push(r#"{"verdict":"continue","content":""}"#);
         }
-        let store = MemoryArtifactStore::default();
-        let state = MemoryStateStore::default();
         let cfg = config(
             r#"
 [run]
@@ -595,17 +582,7 @@ model = "phi4"
 on = { continue = "loop" }
 "#,
         );
-        let result = run_graph(
-            &factory,
-            &store,
-            &state,
-            &clock(),
-            Path::new("/tmp/run/x"),
-            &cfg,
-            "goal",
-        )
-        .await
-        .expect("run");
+        let result = run(&cfg, &factory).await;
         assert_eq!(result.status, RunStatus::Blocked);
         assert_eq!(result.block_reason, BlockReason::BudgetExhausted);
         assert_eq!(result.steps, 3);

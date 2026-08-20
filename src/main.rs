@@ -2,10 +2,11 @@
 
 use clap::Parser;
 use rs_nightshift::adapters::artifact_store::FsArtifactStore;
+use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
 use rs_nightshift::adapters::state::FsStateStore;
 use rs_nightshift::adapters::ProviderFactory;
-use rs_nightshift::application::orchestrator::run_graph;
+use rs_nightshift::application::orchestrator::{run_graph, RunRequest};
 use rs_nightshift::application::report::render_report;
 use rs_nightshift::artifacts::{slugify, write_status, ArtifactStore};
 use rs_nightshift::cli::{Cli, Command};
@@ -16,7 +17,7 @@ use rs_nightshift::doctor::{
 use rs_nightshift::domain::rolegraph::config::load_role_graph_config_from;
 use rs_nightshift::domain::rolegraph::state::RunStatus;
 use rs_nightshift::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
-use rs_nightshift::pipeline::{local_date, run, RunRequest};
+use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest};
 use rs_nightshift::ports::{ArtifactStore as ArtifactStorePort, Clock, StateStore};
 use rs_nightshift::testrun::ProcessTestRunner;
 use std::io::{self, Write};
@@ -82,7 +83,7 @@ async fn real_main() -> anyhow::Result<()> {
                 &client,
                 &ArtifactStore::new(out),
                 &local_date()?,
-                &RunRequest {
+                &PipelineRunRequest {
                     goal,
                     repo,
                     name,
@@ -101,15 +102,32 @@ async fn real_main() -> anyhow::Result<()> {
             config,
             out,
             name,
+            repo,
         } => {
             let cfg = load_role_graph_config_from(&config)?;
             let factory = ProviderFactory;
             let store = FsArtifactStore::new(&out);
             let state = FsStateStore::new();
             let clock = SystemClock;
+            let tools = CapabilityRunner::new();
+            let context_provider = GraphContextProvider;
             let slug = name.unwrap_or_else(|| slugify(&goal));
             let run_dir = store.create_run(&clock.today(), &slug)?;
-            let result = run_graph(&factory, &store, &state, &clock, &run_dir, &cfg, &goal).await?;
+            let result = run_graph(
+                &factory,
+                &store,
+                &state,
+                &clock,
+                &tools,
+                &context_provider,
+                &RunRequest {
+                    run: &run_dir,
+                    repo: &repo,
+                    config: &cfg,
+                    goal: &goal,
+                },
+            )
+            .await?;
             let snapshot = state.read_snapshot(&run_dir)?;
             let events = state.read_actions(&run_dir)?;
             writeln!(io::stdout(), "{}", render_report(&snapshot, &events))?;
