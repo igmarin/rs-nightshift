@@ -382,4 +382,13 @@ model = "phi4"
         let err = load_role_graph_config_from(&path).expect_err("malformed must fail");
         assert!(err.to_string().contains("config error"), "{err}");
     }
+
+    #[test]
+    fn shipped_example_config_parses_and_validates() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        let example = Path::new(&manifest_dir).join("nightshift.toml.example");
+        let config = load_role_graph_config_from(&example).expect("example must parse + validate");
+        assert_eq!(config.run.start, "product-owner");
+        assert_eq!(config.roles.len(), 3);
+    }
 }

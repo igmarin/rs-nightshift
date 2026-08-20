@@ -195,7 +195,13 @@ at the most recent):
 nightshift doctor [--ollama-url URL]
 nightshift status [--out DIR]
 nightshift run --goal TEXT --repo PATH [options]
+nightshift harness --goal TEXT [--config PATH] [--out DIR] [--name SLUG]
 ```
+
+`harness` is the new config-driven role-graph engine (beta): it reads a
+role-graph `nightshift.toml` and walks the roles, routing on each role's
+verdict. See [`docs/role-graph.md`](docs/role-graph.md) and
+[`nightshift.toml.example`](nightshift.toml.example).
 
 ### `run` options
 

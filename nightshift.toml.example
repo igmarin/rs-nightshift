@@ -1,31 +1,95 @@
-# rs-nightshift configuration example
+# rs-nightshift role-graph example — Product Owner → Developer → QA.
+# Copy to `nightshift.toml` and run:
+#   nightshift harness --goal "…" --config nightshift.toml
+# See docs/role-graph.md for the full schema and semantics.
+
+[run]
+start = "product-owner"
+# on_unclear = "halt"   # "halt" (default) | "proceed"
+# max_steps = 30        # global cap on total role executions
+
+# Ollama is built in (default http://127.0.0.1:11434); override to move it:
+# [providers.ollama]
+# base_url = "http://127.0.0.1:11434"
+
+[providers.deepseek]
+backend = "openai-compatible"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[providers.kimi]
+backend = "openai-compatible"
+base_url = "https://api.moonshot.cn/v1"
+api_key_env = "MOONSHOT_API_KEY"
+
+[[roles]]
+id = "product-owner"
+provider = "deepseek"
+model = "deepseek-v4-pro"        # use `deepseek-reasoner` for the high-thinking variant
+options = { temperature = 0.2 }
+prompt = """
+You are the Product Owner. Turn the operator's goal into a crisp, testable
+brief. If anything is ambiguous or underspecified, raise blocking questions
+rather than guessing; otherwise write the brief.
+"""
+output = "01_brief.md"
+on = { continue = "developer", questions = "@halt" }
+
+[[roles]]
+id = "developer"
+provider = "kimi"
+model = "kimi3"
+options = { think = true }
+prompt = """
+You are the Developer. Implement the brief as a patch. If the brief raises
+non-blocking questions, proceed with reasonable assumptions and note them.
+"""
+output = "02_patch.patch"
+tools = ["apply-patch"]
+on = { continue = "qa" }
+
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "phi4"
+options = { think = true }
+prompt = """
+You are QA. Review the change and check for bugs and edge cases. If there are
+no issues, finish; otherwise report findings back to the Developer.
+"""
+output = "03_qa_report.json"
+tools = ["run-tests"]
+on = { issues = "developer" }
+max_loop = 3
+
+# --- Domain-neutral roles prove the graph is generic (not engineering-only).
+# Swap the `[run]` start and `[[roles]]` blocks above for a
+# Researcher → Writer → Editor pipeline:
 #
-# Copy to nightshift.toml in the directory where you run `nightshift`.
-# Every key is optional — built-in defaults work without this file.
+# [run]
+# start = "researcher"
 #
-# Precedence: CLI flag > environment variable > nightshift.toml > built-in default
-
-# Ollama HTTP origin.
-# CLI:   --ollama-url
-# Env:   NIGHTSHIFT_OLLAMA_URL
-# Default: http://127.0.0.1:11434
-# (This key is not read from nightshift.toml — set it via CLI flag or env var.)
-
-# Path to this file, if not in the CWD.
-# Env: NIGHTSHIFT_CONFIG
-# Default: nightshift.toml
-
-# Role-to-model overrides.
-# Each key is a role name, each value is an Ollama model tag.
-# Roles: Router, Pm, TechLead, Dev, Qa, Writer, Aux
-# Defaults:
-#   Router    = llama3.2:3b
-#   Pm        = llama3.1:8b
-#   TechLead  = mistral-nemo:12b
-#   Dev       = qwen2.5-coder:7b
-#   Qa        = deepseek-r1:7b
-#   Writer    = gemma2:9b
-#   Aux       = phi3.5:latest
-[role_models]
-# Dev = "qwen2.5-coder:14b"
-# Qa = "deepseek-r1:14b"
+# [[roles]]
+# id = "researcher"
+# provider = "deepseek"
+# model = "deepseek-v4-pro"
+# prompt = "You are a Researcher. Gather and summarize the facts on the topic."
+# output = "01_notes.md"
+# on = { continue = "writer" }
+#
+# [[roles]]
+# id = "writer"
+# provider = "kimi"
+# model = "kimi3"
+# prompt = "You are a Writer. Turn the notes into a clear draft."
+# output = "02_draft.md"
+# on = { continue = "editor" }
+#
+# [[roles]]
+# id = "editor"
+# provider = "ollama"
+# model = "phi4"
+# prompt = "You are an Editor. Tighten the draft; report issues or finish."
+# output = "03_final.md"
+# on = { issues = "writer" }
+# max_loop = 2
