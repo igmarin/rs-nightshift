@@ -91,6 +91,7 @@ pub(crate) mod tests {
                     path: path.clone(),
                     message: message.clone(),
                 }),
+                Err(Error::RoleGraph(msg)) => Err(Error::RoleGraph(msg.clone())),
                 Err(Error::InvalidOllamaUrl { url }) => {
                     Err(Error::InvalidOllamaUrl { url: url.clone() })
                 }

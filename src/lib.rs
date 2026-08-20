@@ -16,6 +16,7 @@ pub mod ollama;
 pub mod pipeline;
 pub mod pm;
 pub mod qa;
+pub mod rolegraph;
 pub mod techlead;
 pub mod testrun;
 pub mod writer;

@@ -62,6 +62,12 @@ pub enum Error {
         /// Human-readable read or parse failure.
         message: String,
     },
+
+    /// The role-graph configuration is semantically invalid (e.g. an unknown
+    /// role id in a routing target, a duplicate role id, or a `start` role
+    /// that does not exist).
+    #[error("invalid role graph: {0}")]
+    RoleGraph(String),
 }
 
 #[cfg(test)]
@@ -131,6 +137,15 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "config error in nightshift.toml: expected `=`"
+        );
+    }
+
+    #[test]
+    fn role_graph_error_displays_message() {
+        let error = Error::RoleGraph("unknown target role 'qa'".into());
+        assert_eq!(
+            error.to_string(),
+            "invalid role graph: unknown target role 'qa'"
         );
     }
 }
