@@ -37,6 +37,8 @@ pub struct RoleContext {
     pub findings: Vec<String>,
     /// Clarifying questions from the previous role (a `questions` back-edge).
     pub questions: Vec<String>,
+    /// Human answers from a pre-flight Q&A round (the `plan` mode).
+    pub clarifications: Vec<String>,
 }
 
 /// Outcome of executing one role.
@@ -166,6 +168,10 @@ fn user_prompt(context: &RoleContext, artifacts: &[(String, String)], tool_outpu
             .join("\n");
         parts.push(format!("Clarifying questions:\n{questions}"));
     }
+    if !context.clarifications.is_empty() {
+        let clarifications = context.clarifications.join("\n");
+        parts.push(format!("Clarifications:\n{clarifications}"));
+    }
     if !artifacts.is_empty() {
         let block = artifacts
             .iter()
@@ -252,6 +258,7 @@ mod tests {
             goal: "add /health".into(),
             findings: Vec::new(),
             questions: Vec::new(),
+            clarifications: Vec::new(),
         }
     }
 
@@ -440,10 +447,24 @@ mod tests {
             goal: "g".into(),
             findings: vec!["compile error".into()],
             questions: vec!["which port?".into()],
+            clarifications: vec![],
         };
         let prompt = user_prompt(&ctx, &[], "");
         assert!(prompt.contains("Goal: g"), "{prompt}");
         assert!(prompt.contains("compile error"), "{prompt}");
         assert!(prompt.contains("which port?"), "{prompt}");
+    }
+
+    #[test]
+    fn user_prompt_renders_clarifications() {
+        let ctx = RoleContext {
+            goal: "g".into(),
+            findings: vec![],
+            questions: vec![],
+            clarifications: vec!["Q: port?\nA: 8080".into()],
+        };
+        let prompt = user_prompt(&ctx, &[], "");
+        assert!(prompt.contains("Clarifications:"), "{prompt}");
+        assert!(prompt.contains("A: 8080"), "{prompt}");
     }
 }

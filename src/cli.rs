@@ -87,6 +87,24 @@ pub enum Command {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Pre-flight: run the entry role and resolve its questions interactively.
+    Plan {
+        /// Business goal for the run.
+        #[arg(long)]
+        goal: String,
+        /// Role-graph config file (default: `nightshift.toml`).
+        #[arg(long, default_value = "nightshift.toml")]
+        config: PathBuf,
+        /// Artifact root (default: `./artifacts`).
+        #[arg(long, default_value = crate::artifacts::DEFAULT_OUT_DIR)]
+        out: PathBuf,
+        /// Directory slug (default: slugified goal).
+        #[arg(long)]
+        name: Option<String>,
+        /// Target repo (default: current directory).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
 }
 
 #[cfg(test)]
@@ -302,6 +320,16 @@ mod tests {
                 assert_eq!(config, PathBuf::from("nightshift.toml"));
             }
             other => panic!("expected Harness, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_plan() {
+        let cli =
+            Cli::try_parse_from(["nightshift", "plan", "--goal", "add /health"]).expect("parse");
+        match cli.command {
+            Command::Plan { goal, .. } => assert_eq!(goal, "add /health"),
+            other => panic!("expected Plan, got {other:?}"),
         }
     }
 }

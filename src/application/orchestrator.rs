@@ -69,6 +69,7 @@ where
         goal: request.goal.to_string(),
         findings: Vec::new(),
         questions: Vec::new(),
+        clarifications: Vec::new(),
     };
     let mut artifacts: Vec<String> = Vec::new();
 
@@ -195,6 +196,7 @@ where
                     goal: request.goal.to_string(),
                     findings: Vec::new(),
                     questions: Vec::new(),
+                    clarifications: Vec::new(),
                 };
             }
             RoutingDecision::LoopBack(target, findings, questions) => {
@@ -229,6 +231,7 @@ where
                     goal: request.goal.to_string(),
                     findings,
                     questions,
+                    clarifications: Vec::new(),
                 };
                 current = target;
             }
