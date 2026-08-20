@@ -66,7 +66,8 @@ pub fn head_commit(repo: &Path) -> Result<String, Error> {
 pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
     validate_patch_paths(&patch_paths(patch))?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
-    std::fs::write(tmp.path(), patch)?;
+    std::fs::write(tmp.path(), patch)
+        .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
     git(
         repo,
         &[
@@ -84,7 +85,8 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
 pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
     apply_check(repo, patch)?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
-    std::fs::write(tmp.path(), patch)?;
+    std::fs::write(tmp.path(), patch)
+        .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
     git(
         repo,
         &[

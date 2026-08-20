@@ -1,6 +1,6 @@
 //! Test-adapter: detect and run the target repo's test command (never from model output).
 
-use crate::error::{ArtifactError, Error, ProviderError};
+use crate::error::{ArtifactError, Error};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -100,7 +100,9 @@ impl TestRunner for ProcessTestRunner {
                 Ok(None) if start.elapsed() >= self.timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(Error::from(ProviderError::Timeout));
+                    return Err(Error::from(ArtifactError::artifact(
+                        "test command timed out",
+                    )));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(error) => return Err(error.into()),
@@ -302,7 +304,7 @@ mod tests {
             .run(tmp.path(), &["sleep".into(), "5".into()])
             .expect_err("timeout");
         assert!(
-            matches!(err, Error::Provider(ProviderError::Timeout)),
+            matches!(err, Error::Artifact(ArtifactError::Artifact(ref msg)) if msg.contains("timed out")),
             "{err:?}"
         );
     }

@@ -10,7 +10,7 @@
 //! lives in the adapter layer alongside the real provider adapters, keeping
 //! `generate.rs` focused on the shared `complete_text` call-site helper.
 
-use crate::error::Error;
+use crate::error::{ArtifactError, Error, ProviderError};
 use crate::generate::Origin;
 use llm_kernel::error::KernelError;
 use llm_kernel::llm::{LLMClient, LLMRequest, LLMResponse};
@@ -98,9 +98,9 @@ impl LLMClient for ScriptedGenerator {
             .expect("script mutex")
             .pop_front()
             .unwrap_or_else(|| {
-                Err(Error::Ollama(
+                Err(Error::from(ProviderError::Ollama(
                     "ScriptedGenerator: no remaining replies".into(),
-                ))
+                )))
             });
         result
             .map(|content| LLMResponse {
@@ -108,8 +108,8 @@ impl LLMClient for ScriptedGenerator {
                 ..LLMResponse::default()
             })
             .map_err(|e| match e {
-                Error::Timeout => KernelError::Timeout(0),
-                Error::ModelNotFound { model } => KernelError::Http {
+                Error::Provider(ProviderError::Timeout) => KernelError::Timeout(0),
+                Error::Provider(ProviderError::ModelNotFound { model }) => KernelError::Http {
                     status: 404,
                     message: model,
                 },
@@ -154,11 +154,11 @@ mod tests {
     #[tokio::test]
     async fn scripted_push_err_is_returned() {
         let gen = ScriptedGenerator::new();
-        gen.push_err(Error::Timeout);
+        gen.push_err(Error::from(ProviderError::Timeout));
         let err = complete_text(&gen, "m", "p", ROLE_TEMPERATURE)
             .await
             .expect_err("scripted error");
-        assert!(matches!(err, Error::Timeout));
+        assert!(matches!(err, Error::Provider(ProviderError::Timeout)));
     }
 
     #[tokio::test]
@@ -211,9 +211,9 @@ mod tests {
     #[tokio::test]
     async fn scripted_maps_model_not_found_to_kernel_http_404() {
         let gen = ScriptedGenerator::new();
-        gen.push_err(Error::ModelNotFound {
+        gen.push_err(Error::from(ProviderError::ModelNotFound {
             model: "nope".into(),
-        });
+        }));
         let err = gen
             .complete(LLMRequest::default())
             .await
@@ -230,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn scripted_maps_other_error_to_llm_api() {
         let gen = ScriptedGenerator::new();
-        gen.push_err(Error::Artifact("boom".into()));
+        gen.push_err(Error::from(ArtifactError::artifact("boom")));
         let err = gen
             .complete(LLMRequest::default())
             .await
