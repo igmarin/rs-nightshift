@@ -2,6 +2,10 @@
 fd = "latest"
 gum = "latest"
 rust = "1.92"
+cargo-binstall = "1.21.1"
+"cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-llvm-cov" = "0.6.13"
 
 [settings]
 experimental = true
