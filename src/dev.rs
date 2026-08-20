@@ -101,8 +101,8 @@ pub fn read_tech_spec(run: &RunDir) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::providers::ScriptedGenerator;
     use crate::artifacts::ArtifactStore;
-    use crate::generate::ScriptedGenerator;
     use crate::techlead::impacted_files;
     use std::process::Command;
 

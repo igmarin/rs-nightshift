@@ -109,8 +109,8 @@ pub async fn write_user_story<G: LLMClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::providers::ScriptedGenerator;
     use crate::artifacts::ArtifactStore;
-    use crate::generate::ScriptedGenerator;
 
     const COMPLETE: &str = r#"
 # Overnight job

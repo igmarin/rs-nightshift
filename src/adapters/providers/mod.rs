@@ -39,6 +39,8 @@ mod factory;
 mod ollama;
 mod openai;
 mod options;
+#[cfg(test)]
+mod scripted;
 
 pub use factory::{
     build_model_client, ProviderFactory, DEFAULT_DEEPSEEK_API_KEY_ENV, DEFAULT_DEEPSEEK_BASE_URL,
@@ -46,6 +48,8 @@ pub use factory::{
 };
 pub use ollama::OllamaAdapter;
 pub use openai::OpenAICompatibleAdapter;
+#[cfg(test)]
+pub use scripted::{GenerateCall, ScriptedGenerator};
 
 #[cfg(test)]
 mod test_support;
