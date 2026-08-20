@@ -97,3 +97,27 @@ is used as a catch-all in ~6 places in `pipeline.rs` and `artifacts/mod.rs`.
 **Trigger for revisiting:** If the `Artifact(String)` catch-all starts producing
 ambiguous error messages during real beta runs (#36), promote #52 to 0.2.0 and
 introduce specific variants.
+
+## ADR-006: Config-driven role graph replaces the fixed pipeline
+
+**Date:** 2026-08-19
+
+**Context:** The fixed five-stage pipeline (PM → TechLead → Dev → QA → Writer)
+with a hardcoded `Role` enum is too rigid to validate against real models and
+cannot express arbitrary role compositions (Product Owner / Developer / QA, or
+Researcher / Writer / Editor). The operator wants to leave a task overnight and
+review a report in the morning, with per-role control over provider, model, and
+model-specific options (think/reasoning, temperature).
+
+**Decision:** Replace the hardcoded pipeline with a config-driven **role graph**.
+Roles are declared in `nightshift.toml` (provider, model, options, prompt,
+output, routing). The harness routes on a small deterministic verdict vocabulary
+(`continue`/`issues`/`questions`/`done`/`fail`). See `docs/role-graph.md`.
+
+**Consequences:**
+- The `Role` enum and the hardcoded `run()` orchestration are retired.
+- Reusable primitives (test detection, `git apply`, context gather, error
+  mapping, unload) become code-side capabilities, preserving INV-1..INV-11.
+- Beta scope: linear chain + loop-backs; providers Ollama, Deepseek,
+  Kimi/Moonshot; env-var auth.
+- crates.io stays out (ADR-001 reaffirmed); Cline is deferred post-beta.
