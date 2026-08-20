@@ -3,7 +3,7 @@
 use crate::domain::rolegraph::config::ProviderSpec;
 use crate::ports::GenerateRequest;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -51,33 +51,43 @@ pub(crate) fn spec_with(base_url: &str, api_key_env: &str) -> ProviderSpec {
     }
 }
 
-/// Serializes env-var mutation so parallel tests cannot race on a shared var.
+/// Serializes env-var mutation: a guard holds the lock for its whole lifetime,
+/// so concurrent env-mutating tests run one at a time.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Sets an env var for the lifetime of the test and restores it afterwards.
 ///
 /// The prior value (including absence) is captured and restored on drop, so a
 /// real operator key (e.g. `MOONSHOT_API_KEY`) is never clobbered by a test.
+/// The lock is held for the guard's entire lifetime, so two guards can never
+/// interleave their env mutations.
 pub(crate) struct EnvGuard {
     /// The variable name.
     name: &'static str,
     /// The value present before `set`, or `None` if the variable was unset.
     prior: Option<std::ffi::OsString>,
+    /// Holds `ENV_LOCK` for the guard's lifetime (released after restore).
+    _guard: MutexGuard<'static, ()>,
 }
 
 impl EnvGuard {
     /// Set `name` to `value`; restores the previous value (or absence) on drop.
     pub(crate) fn set(name: &'static str, value: &str) -> Self {
-        let _lock = ENV_LOCK.lock().expect("env mutex");
+        let guard = ENV_LOCK.lock().expect("env mutex");
         let prior = std::env::var_os(name);
         std::env::set_var(name, value);
-        Self { name, prior }
+        Self {
+            name,
+            prior,
+            _guard: guard,
+        }
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        let _lock = ENV_LOCK.lock().expect("env mutex");
+        // The lock is still held via `_guard` (dropped after this returns),
+        // so the restore cannot race with another guard's mutation.
         match &self.prior {
             Some(value) => std::env::set_var(self.name, value),
             None => std::env::remove_var(self.name),
