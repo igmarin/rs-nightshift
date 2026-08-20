@@ -247,6 +247,71 @@ pub trait ModelClientFactory: Send + Sync {
     ) -> Result<Box<dyn ModelClient>, Error>;
 }
 
+/// Runs a declared capability (`run-tests`, `apply-patch`, `gather-context`).
+#[async_trait::async_trait]
+pub trait ToolRunner: Send + Sync {
+    /// Run `tool` against `repo`, using `input` (the role's artifact text, or
+    /// empty when the tool needs no input). Returns the tool's output.
+    async fn run(&self, tool: &str, repo: &Path, input: &str) -> Result<String, Error>;
+}
+
+/// Gathers repo context (codegraph/graphify) for context injection.
+#[async_trait::async_trait]
+pub trait ContextProvider: Send + Sync {
+    /// Gather context about `repo` for `goal`, returning text to inject.
+    async fn gather(&self, repo: &Path, goal: &str) -> Result<String, Error>;
+}
+
+/// Test double for [`ToolRunner`]: returns a fixed reply for any tool.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct StubToolRunner {
+    output: std::sync::Mutex<String>,
+}
+
+#[cfg(test)]
+impl StubToolRunner {
+    /// A stub that always returns `output`.
+    #[must_use]
+    pub fn new(output: impl Into<String>) -> Self {
+        Self {
+            output: std::sync::Mutex::new(output.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ToolRunner for StubToolRunner {
+    async fn run(&self, _tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+        Ok(self.output.lock().expect("stub mutex").clone())
+    }
+}
+
+/// Test double for [`ContextProvider`]: returns fixed text.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct StubContextProvider {
+    text: String,
+}
+
+#[cfg(test)]
+impl StubContextProvider {
+    /// A stub that always returns `text`.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ContextProvider for StubContextProvider {
+    async fn gather(&self, _repo: &Path, _goal: &str) -> Result<String, Error> {
+        Ok(self.text.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +395,25 @@ mod tests {
         };
         store.write_snapshot(run, &snap).expect("write");
         assert_eq!(store.read_snapshot(run).expect("read"), snap);
+    }
+
+    #[tokio::test]
+    async fn stub_tool_runner_returns_fixed_output() {
+        let runner = StubToolRunner::new("all tests pass");
+        let out = runner
+            .run("run-tests", Path::new("/repo"), "")
+            .await
+            .expect("run");
+        assert_eq!(out, "all tests pass");
+    }
+
+    #[tokio::test]
+    async fn stub_context_provider_returns_fixed_text() {
+        let provider = StubContextProvider::new("graph context");
+        let text = provider
+            .gather(Path::new("/repo"), "goal")
+            .await
+            .expect("gather");
+        assert_eq!(text, "graph context");
     }
 }
