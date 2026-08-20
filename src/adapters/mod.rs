@@ -37,6 +37,7 @@
 //! errors so typos surface at build time rather than silently.
 
 pub mod artifact_store;
+pub mod capabilities;
 pub mod clock;
 pub mod state;
 
