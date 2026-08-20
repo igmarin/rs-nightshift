@@ -59,7 +59,7 @@ pub async fn execute<C, A>(
     artifacts: &[String],
 ) -> Result<ExecuteOutcome, Error>
 where
-    C: ModelClient,
+    C: ModelClient + ?Sized,
     A: ArtifactStore,
 {
     let mut contents = Vec::with_capacity(artifacts.len());

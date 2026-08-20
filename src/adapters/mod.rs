@@ -40,7 +40,7 @@ use crate::domain::rolegraph::config::ProviderSpec;
 use crate::error::Error;
 use crate::generate::{map_kernel_error, Origin};
 use crate::ollama::{OllamaClient, DEFAULT_GENERATE_TIMEOUT};
-use crate::ports::{GenerateRequest, ModelClient};
+use crate::ports::{GenerateRequest, ModelClient, ModelClientFactory};
 use async_trait::async_trait;
 use llm_kernel::llm::{ChatMessage, LLMClient, LLMRequest, OpenAIClient};
 use std::collections::BTreeMap;
@@ -381,6 +381,24 @@ pub fn build_model_client(
                 ),
             }),
         },
+    }
+}
+
+/// [`ModelClientFactory`] implementation that wires provider names to concrete
+/// adapters via [`build_model_client`].
+///
+/// The CLI edge constructs this and hands it to the orchestrator, so the
+/// application never imports an adapter directly.
+pub struct ProviderFactory;
+
+impl ModelClientFactory for ProviderFactory {
+    fn build(
+        &self,
+        provider: &str,
+        spec: Option<&ProviderSpec>,
+        options: &BTreeMap<String, toml::Value>,
+    ) -> Result<Box<dyn ModelClient>, Error> {
+        build_model_client(provider, spec, options)
     }
 }
 

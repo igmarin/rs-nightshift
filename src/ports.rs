@@ -9,8 +9,10 @@
 //! (the capabilities ticket) rather than speculatively, so each trait's shape
 //! is driven by real usage.
 
+use crate::domain::rolegraph::config::ProviderSpec;
 use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot};
 use crate::error::Error;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// One LLM completion request for a single role call.
@@ -220,6 +222,22 @@ impl StateStore for MemoryStateStore {
             .clone()
             .ok_or_else(|| Error::Artifact("no snapshot written".into()))
     }
+}
+
+/// Builds a [`ModelClient`] for a role's provider, spec, and options.
+///
+/// The application depends on this factory port rather than on any concrete
+/// provider, so the orchestrator can select a per-role client without knowing
+/// about adapters. The adapters layer implements it.
+pub trait ModelClientFactory: Send + Sync {
+    /// Build a client for `provider`, honoring `spec` (base URL / key env) and
+    /// `options` (temperature, max_tokens, think, …).
+    fn build(
+        &self,
+        provider: &str,
+        spec: Option<&ProviderSpec>,
+        options: &BTreeMap<String, toml::Value>,
+    ) -> Result<Box<dyn ModelClient>, Error>;
 }
 
 #[cfg(test)]

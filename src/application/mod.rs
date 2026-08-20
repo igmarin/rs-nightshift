@@ -5,3 +5,4 @@
 //! `docs/role-graph.md` §Hexagonal and ADR-007.
 
 pub mod executor;
+pub mod orchestrator;
