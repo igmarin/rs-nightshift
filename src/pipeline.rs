@@ -1,10 +1,10 @@
 //! Overnight pipeline orchestration.
 
+use crate::adapters::context::{gather, ContextProbe};
 use crate::adapters::git::working_tree_dirty;
 use crate::adapters::test::{detect_test_command, TestRunner};
 use crate::artifacts::{ArtifactStore, QaStatus, RunDir};
 use crate::cli::Until;
-use crate::context::{gather, ContextProbe};
 use crate::dev::{read_tech_spec, write_and_apply_patch};
 use crate::error::Error;
 use crate::generate::{LLMClient, Origin};
@@ -259,7 +259,7 @@ mod tests {
 
     struct StubProbe;
 
-    impl crate::context::ContextProbe for StubProbe {
+    impl crate::adapters::context::ContextProbe for StubProbe {
         fn codegraph_available(&self) -> bool {
             true
         }
@@ -301,7 +301,7 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
+            &crate::adapters::context::PathProbe,
             &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
@@ -356,7 +356,7 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
+            &crate::adapters::context::PathProbe,
             &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
@@ -395,7 +395,7 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
+            &crate::adapters::context::PathProbe,
             &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
@@ -428,7 +428,7 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
+            &crate::adapters::context::PathProbe,
             &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
@@ -466,7 +466,7 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
+            &crate::adapters::context::PathProbe,
             &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
@@ -496,7 +496,7 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
+            &crate::adapters::context::PathProbe,
             &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await

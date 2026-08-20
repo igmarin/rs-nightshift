@@ -1,7 +1,7 @@
 //! Tech Lead stage: validated `02_tech_spec.md` grounded in context tools.
 
+use crate::adapters::context::{extract_paths, path_allowed, ContextBundle};
 use crate::artifacts::RunDir;
-use crate::context::{extract_paths, path_allowed, ContextBundle};
 use crate::error::Error;
 use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};

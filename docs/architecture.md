@@ -163,16 +163,16 @@ src/
 ├── domain/rolegraph/   # pure domain: config, verdict, routing, state (no I/O)
 ├── ports.rs            # port traits + test doubles
 ├── application/        # executor, orchestrator, report (orchestration only)
-├── adapters/           # the only I/O layer: providers, capabilities, stores, clock
+├── adapters/           # the only I/O layer: providers, capabilities, context, stores, clock
 ├── cli.rs              # clap parsing: doctor | status | run | harness | plan
 ├── main.rs             # CLI edge: wires adapters, owns process exit
 └── legacy pipeline modules, being retired under ADR-006:
     pipeline.rs, pm.rs, techlead.rs, qa.rs, writer.rs, models.rs,
-    artifacts/, doctor/, ollama.rs, generate.rs, context.rs, testrun.rs,
+    artifacts/, doctor/, ollama.rs, generate.rs, testrun.rs,
     dev.rs, error.rs
 ```
 
 `nightshift run` and `nightshift status` are the legacy fixed-pipeline
 commands, superseded by `harness` / `plan`; the shared primitives they and the
-adapters both use (`ollama.rs`, `generate.rs`, `context.rs`, `testrun.rs`,
+adapters both use (`ollama.rs`, `generate.rs`, `adapters/context.rs`, `testrun.rs`,
 `dev.rs`) stay until the migration completes.

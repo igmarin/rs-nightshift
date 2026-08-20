@@ -3,11 +3,12 @@
 //! This is the only layer allowed to import `llm-kernel` and `reqwest`
 //! (ADR-007; `docs/role-graph.md` §Hexagonal). Provider adapters (Ollama,
 //! OpenAI-compatible, and the factory) live in [`providers`]; the remaining
-//! modules are filesystem/state/clock/capability adapters.
+//! modules are filesystem/state/clock/capability/context adapters.
 
 pub mod artifact_store;
 pub mod capabilities;
 pub mod clock;
+pub mod context;
 pub mod git;
 pub mod kernel_error;
 pub mod providers;

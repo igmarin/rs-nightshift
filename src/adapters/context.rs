@@ -1,4 +1,5 @@
-//! AST / knowledge-graph context via `codegraph` and optional `graphify`.
+//! Context adapter (`adapters/context.rs`): AST / knowledge-graph context via
+//! `codegraph` and optional `graphify`.
 
 use crate::error::Error;
 use std::path::{Path, PathBuf};
