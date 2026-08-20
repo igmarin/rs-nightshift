@@ -7,10 +7,12 @@
 //! blocking primitive across `.await`.
 
 use crate::adapters::git::apply_checked;
+use crate::adapters::test::{
+    detect_test_command, ProcessTestRunner, TestRunner, DEFAULT_TEST_TIMEOUT,
+};
 use crate::context::{gather, PathProbe};
 use crate::error::Error;
 use crate::ports::{ContextProvider, ToolRunner};
-use crate::testrun::{detect_test_command, ProcessTestRunner, TestRunner, DEFAULT_TEST_TIMEOUT};
 use std::path::Path;
 use std::time::Duration;
 
