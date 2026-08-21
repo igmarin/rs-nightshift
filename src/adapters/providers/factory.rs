@@ -2,7 +2,7 @@
 
 use crate::adapters::ollama::{OllamaClient, DEFAULT_GENERATE_TIMEOUT};
 use crate::domain::rolegraph::config::ProviderSpec;
-use crate::error::Error;
+use crate::error::{ConfigError, Error};
 use crate::ports::{ModelClient, ModelClientFactory};
 use std::collections::BTreeMap;
 
@@ -56,17 +56,17 @@ pub fn build_model_client(
         ),
         other => match spec.and_then(|s| s.backend.as_deref()) {
             Some("openai-compatible") => build_openai_compatible(other, None, None, spec, parsed),
-            Some(backend) => Err(Error::Config {
+            Some(backend) => Err(Error::from(ConfigError {
                 path: format!("provider {other:?}"),
                 message: format!("unknown backend {backend:?}; expected \"openai-compatible\""),
-            }),
-            None => Err(Error::Config {
+            })),
+            None => Err(Error::from(ConfigError {
                 path: format!("provider {other:?}"),
                 message: format!(
                     "unknown provider; define a [providers.{other}] block with \
                      backend = \"openai-compatible\""
                 ),
-            }),
+            })),
         },
     }
 }
@@ -122,20 +122,26 @@ fn build_openai_compatible(
     let base_url = spec
         .and_then(|s| s.base_url.clone())
         .or_else(|| default_base_url.map(str::to_owned))
-        .ok_or_else(|| Error::Config {
-            path: format!("provider {provider:?}"),
-            message: "no base_url configured and no built-in default".into(),
+        .ok_or_else(|| {
+            Error::from(ConfigError {
+                path: format!("provider {provider:?}"),
+                message: "no base_url configured and no built-in default".into(),
+            })
         })?;
     let api_key_env = spec
         .and_then(|s| s.api_key_env.clone())
         .or_else(|| default_api_key_env.map(str::to_owned))
-        .ok_or_else(|| Error::Config {
-            path: format!("provider {provider:?}"),
-            message: "no api_key_env configured and no built-in default".into(),
+        .ok_or_else(|| {
+            Error::from(ConfigError {
+                path: format!("provider {provider:?}"),
+                message: "no api_key_env configured and no built-in default".into(),
+            })
         })?;
-    let api_key = std::env::var(&api_key_env).map_err(|_| Error::Config {
-        path: api_key_env.clone(),
-        message: "environment variable not set".into(),
+    let api_key = std::env::var(&api_key_env).map_err(|_| {
+        Error::from(ConfigError {
+            path: api_key_env.clone(),
+            message: "environment variable not set".into(),
+        })
     })?;
     let client = OpenAICompatibleAdapter::with_timeout(
         base_url,

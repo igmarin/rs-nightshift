@@ -2,7 +2,7 @@
 
 use crate::adapters::test::{format_command, TestOutcome};
 use crate::artifacts::{QaReport, QaStatus, RunDir};
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 
@@ -32,7 +32,8 @@ pub fn truncate_log(text: &str) -> String {
 
 /// Persist `04_qa_report.json`.
 pub fn write_qa_report(run: &RunDir, report: &QaReport) -> Result<(), Error> {
-    let bytes = serde_json::to_vec_pretty(report).map_err(|e| Error::Artifact(e.to_string()))?;
+    let bytes = serde_json::to_vec_pretty(report)
+        .map_err(|e| Error::from(ArtifactError::artifact(e.to_string())))?;
     std::fs::write(run.path.join(QA_REPORT_FILE), bytes)?;
     Ok(())
 }
@@ -40,7 +41,7 @@ pub fn write_qa_report(run: &RunDir, report: &QaReport) -> Result<(), Error> {
 /// Read a previously written QA report.
 pub fn read_qa_report(run: &RunDir) -> Result<QaReport, Error> {
     let bytes = std::fs::read(run.path.join(QA_REPORT_FILE))?;
-    serde_json::from_slice(&bytes).map_err(|e| Error::Artifact(e.to_string()))
+    serde_json::from_slice(&bytes).map_err(|e| Error::from(ArtifactError::artifact(e.to_string())))
 }
 
 /// Build a report from a test outcome (no model).

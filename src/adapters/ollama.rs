@@ -7,7 +7,7 @@
 //! `keep_alive: 0` so the model is released from VRAM between stages —
 //! preserving the memory behavior of the original hand-rolled client.
 
-use crate::error::Error;
+use crate::error::{Error, ProviderError};
 use crate::generate::Origin;
 use async_trait::async_trait;
 use llm_kernel::error::KernelError;
@@ -28,8 +28,10 @@ const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Validate an Ollama HTTP(S) origin and return its normalized form.
 pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
-    let mut parsed = reqwest::Url::parse(value).map_err(|_| Error::InvalidOllamaUrl {
-        url: redact_ollama_url(value),
+    let mut parsed = reqwest::Url::parse(value).map_err(|_| {
+        Error::from(ProviderError::InvalidOllamaUrl {
+            url: redact_ollama_url(value),
+        })
     })?;
     if !matches!(parsed.scheme(), "http" | "https")
         || parsed.host_str().is_none()
@@ -39,9 +41,9 @@ pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
         || !parsed.username().is_empty()
         || parsed.password().is_some()
     {
-        return Err(Error::InvalidOllamaUrl {
+        return Err(Error::from(ProviderError::InvalidOllamaUrl {
             url: redact_ollama_url(value),
-        });
+        }));
     }
     parsed.set_path("");
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
@@ -161,7 +163,7 @@ impl OllamaClient {
         let http_client = reqwest::Client::builder()
             .no_proxy()
             .build()
-            .map_err(|error| Error::Ollama(error.to_string()))?;
+            .map_err(|error| Error::from(ProviderError::Ollama(error.to_string())))?;
         let inner = OpenAIClient::from_key_with_base_url(
             "ollama",
             "ollama",
@@ -205,17 +207,17 @@ impl OllamaClient {
         let response = tokio::time::timeout(UNLOAD_TIMEOUT, send)
             .await
             .map_err(|_| {
-                Error::Ollama(format!(
+                Error::from(ProviderError::Ollama(format!(
                     "unload timed out after {}s",
                     UNLOAD_TIMEOUT.as_secs()
-                ))
+                )))
             })?
-            .map_err(|e| Error::Ollama(e.to_string()))?;
+            .map_err(|e| Error::from(ProviderError::Ollama(e.to_string())))?;
         if !response.status().is_success() {
-            return Err(Error::Ollama(format!(
+            return Err(Error::from(ProviderError::Ollama(format!(
                 "unload status {}",
                 response.status()
-            )));
+            ))));
         }
         Ok(())
     }
@@ -401,7 +403,7 @@ mod tests {
         let err = client.complete(request).await.expect_err("missing model");
         let mapped = map_kernel_error(err, "nope");
         match mapped {
-            Error::ModelNotFound { model } => assert_eq!(model, "nope"),
+            ProviderError::ModelNotFound { model } => assert_eq!(model, "nope"),
             other => panic!("expected ModelNotFound, got {other:?}"),
         }
     }
@@ -425,7 +427,7 @@ mod tests {
         let err = client.complete(request).await.expect_err("status");
         let mapped = map_kernel_error(err, "m");
         match mapped {
-            Error::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
+            ProviderError::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
             other => panic!("expected Ollama status error, got {other:?}"),
         }
     }
@@ -454,7 +456,7 @@ mod tests {
         let err = client.complete(request).await.expect_err("timeout");
         let mapped = map_kernel_error(err, "m");
         match mapped {
-            Error::Timeout => {}
+            ProviderError::Timeout => {}
             other => panic!("expected Timeout, got {other:?}"),
         }
     }

@@ -1,7 +1,7 @@
 //! Product-manager stage: validated `01_user_story.md`.
 
 use crate::artifacts::RunDir;
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 
@@ -43,10 +43,11 @@ pub fn validate_user_story(markdown: &str) -> Result<(), Error> {
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(Error::InvalidArtifact {
+        Err(ArtifactError::InvalidArtifact {
             artifact: USER_STORY_FILE,
             reason: format!("missing headings: {}", missing.join(", ")),
-        })
+        }
+        .into())
     }
 }
 
@@ -149,7 +150,7 @@ z
         assert_eq!(missing_user_story_headings(md), ["Out of Scope"]);
         let err = validate_user_story(md).expect_err("incomplete");
         match err {
-            Error::InvalidArtifact { artifact, reason } => {
+            Error::Artifact(ArtifactError::InvalidArtifact { artifact, reason }) => {
                 assert_eq!(artifact, USER_STORY_FILE);
                 assert!(reason.contains("Out of Scope"), "{reason}");
             }
@@ -223,7 +224,7 @@ n/a
             .await
             .expect_err("still invalid");
         match err {
-            Error::InvalidArtifact { artifact, reason } => {
+            Error::Artifact(ArtifactError::InvalidArtifact { artifact, reason }) => {
                 assert_eq!(artifact, USER_STORY_FILE);
                 assert!(reason.contains("missing headings"), "{reason}");
             }

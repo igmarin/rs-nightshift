@@ -1,7 +1,7 @@
 //! Filesystem [`StateStore`] adapter: append-only JSONL action log + JSON snapshot.
 
 use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot};
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::ports::StateStore;
 use std::io::Write;
 use std::path::Path;
@@ -32,16 +32,25 @@ impl FsStateStore {
 
 impl StateStore for FsStateStore {
     fn append_action(&self, run: &Path, event: &ActionEvent) -> Result<(), Error> {
-        let line =
-            serde_json::to_string(event).map_err(|error| Error::Artifact(error.to_string()))?;
+        let line = serde_json::to_string(event)
+            .map_err(|error| Error::from(ArtifactError::artifact(error.to_string())))?;
         let path = run.join(ACTIONS_FILE);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|error| Error::Artifact(format!("open {}: {error}", path.display())))?;
-        writeln!(file, "{line}")
-            .map_err(|error| Error::Artifact(format!("write {}: {error}", path.display())))
+            .map_err(|error| {
+                Error::from(ArtifactError::artifact(format!(
+                    "open {}: {error}",
+                    path.display()
+                )))
+            })?;
+        writeln!(file, "{line}").map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "write {}: {error}",
+                path.display()
+            )))
+        })
     }
 
     fn read_actions(&self, run: &Path) -> Result<Vec<ActionEvent>, Error> {
@@ -49,7 +58,12 @@ impl StateStore for FsStateStore {
         let content = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(Error::Artifact(format!("read {}: {error}", path.display()))),
+            Err(error) => {
+                return Err(Error::from(ArtifactError::artifact(format!(
+                    "read {}: {error}",
+                    path.display()
+                ))))
+            }
         };
         // Skip blank lines and lines that fail to parse (e.g. a truncated final
         // line after a crash) so a complete run still yields a readable report.
@@ -62,23 +76,39 @@ impl StateStore for FsStateStore {
 
     fn write_snapshot(&self, run: &Path, snapshot: &StatusSnapshot) -> Result<(), Error> {
         let json = serde_json::to_string_pretty(snapshot)
-            .map_err(|error| Error::Artifact(error.to_string()))?;
+            .map_err(|error| Error::from(ArtifactError::artifact(error.to_string())))?;
         let path = run.join(SNAPSHOT_FILE);
         // Write to a temp file then rename, so an interruption never leaves a
         // truncated `state.json`.
         let tmp = run.join(format!("{SNAPSHOT_FILE}.tmp"));
-        std::fs::write(&tmp, json)
-            .map_err(|error| Error::Artifact(format!("write {}: {error}", tmp.display())))?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|error| Error::Artifact(format!("rename {}: {error}", path.display())))
+        std::fs::write(&tmp, json).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "write {}: {error}",
+                tmp.display()
+            )))
+        })?;
+        std::fs::rename(&tmp, &path).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "rename {}: {error}",
+                path.display()
+            )))
+        })
     }
 
     fn read_snapshot(&self, run: &Path) -> Result<StatusSnapshot, Error> {
         let path = run.join(SNAPSHOT_FILE);
-        let bytes = std::fs::read(&path)
-            .map_err(|error| Error::Artifact(format!("read {}: {error}", path.display())))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| Error::Artifact(format!("parse {}: {error}", path.display())))
+        let bytes = std::fs::read(&path).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "read {}: {error}",
+                path.display()
+            )))
+        })?;
+        serde_json::from_slice(&bytes).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "parse {}: {error}",
+                path.display()
+            )))
+        })
     }
 }
 

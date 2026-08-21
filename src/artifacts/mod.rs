@@ -7,7 +7,7 @@ mod util;
 pub use qa::{write_status, QaReport, QaStatus};
 pub use util::slugify;
 
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use std::path::PathBuf;
 
 /// Default artifact root relative to the process CWD.
@@ -49,9 +49,10 @@ impl ArtifactStore {
         let mut suffix = 2;
         while path.exists() {
             if suffix > 10_000 {
-                return Err(Error::Artifact(
-                    "too many runs with same date and slug; clean up old runs".into(),
-                ));
+                return Err(ArtifactError::artifact(
+                    "too many runs with same date and slug; clean up old runs",
+                )
+                .into());
             }
             dir_name = format!("{date}_{slug}-{suffix}");
             path = self.root.join(&dir_name);
@@ -105,7 +106,9 @@ mod tests {
         let (tmp, store) = store();
         let err = store.create_run("../oops", "x").expect_err("escaped date");
         match err {
-            Error::Artifact(msg) => assert!(msg.contains("YYYY-MM-DD"), "{msg}"),
+            Error::Artifact(ArtifactError::Artifact(msg)) => {
+                assert!(msg.contains("YYYY-MM-DD"), "{msg}")
+            }
             other => panic!("expected Artifact, got {other:?}"),
         }
         assert!(!tmp.path().join("oops").exists());

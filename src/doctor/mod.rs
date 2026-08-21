@@ -10,6 +10,8 @@ pub use report::{write_report, Check, DoctorReport};
 
 use crate::domain::rolegraph::config::{NightshiftConfig, ProviderSpec};
 use crate::error::Error;
+#[cfg(test)]
+use crate::error::ProviderError;
 use std::collections::BTreeSet;
 
 /// Run readiness checks against the role graph, an injected catalog, and host.
@@ -195,7 +197,9 @@ model = "phi4"
     #[tokio::test]
     async fn ollama_unreachable_is_not_ready() {
         let catalog = FakeCatalog {
-            result: Err(Error::Ollama("connection refused".into())),
+            result: Err(Error::from(ProviderError::Ollama(
+                "connection refused".into(),
+            ))),
         };
         let report = run_doctor(&config(OLLAMA_QA), &catalog, &healthy_host())
             .await

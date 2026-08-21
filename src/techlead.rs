@@ -2,7 +2,7 @@
 
 use crate::adapters::context::{extract_paths, path_allowed, ContextBundle};
 use crate::artifacts::RunDir;
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::pm::has_atx_heading;
@@ -58,17 +58,19 @@ fn section_body(markdown: &str, title: &str) -> String {
 pub fn validate_tech_spec(markdown: &str, allowed: &[PathBuf]) -> Result<(), Error> {
     let missing = missing_tech_spec_headings(markdown);
     if !missing.is_empty() {
-        return Err(Error::InvalidArtifact {
+        return Err(ArtifactError::InvalidArtifact {
             artifact: TECH_SPEC_FILE,
             reason: format!("missing headings: {}", missing.join(", ")),
-        });
+        }
+        .into());
     }
     let listed = impacted_files(markdown);
     if listed.is_empty() {
-        return Err(Error::InvalidArtifact {
+        return Err(ArtifactError::InvalidArtifact {
             artifact: TECH_SPEC_FILE,
             reason: "Impacted files listed no repo paths".into(),
-        });
+        }
+        .into());
     }
     let unknown: Vec<_> = listed
         .iter()
@@ -78,7 +80,7 @@ pub fn validate_tech_spec(markdown: &str, allowed: &[PathBuf]) -> Result<(), Err
     if unknown.is_empty() {
         Ok(())
     } else {
-        Err(Error::InvalidArtifact {
+        Err(ArtifactError::InvalidArtifact {
             artifact: TECH_SPEC_FILE,
             reason: format!(
                 "impacted paths not in codegraph/graphify output: {}",
@@ -88,7 +90,8 @@ pub fn validate_tech_spec(markdown: &str, allowed: &[PathBuf]) -> Result<(), Err
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-        })
+        }
+        .into())
     }
 }
 
@@ -174,8 +177,9 @@ pub async fn write_tech_spec<G: LLMClient>(
 
 /// Read the PM story from the run directory.
 pub fn read_user_story(run: &RunDir) -> Result<String, Error> {
-    std::fs::read_to_string(run.path.join(crate::pm::USER_STORY_FILE))
-        .map_err(|e| Error::Artifact(format!("missing {}: {e}", crate::pm::USER_STORY_FILE)))
+    std::fs::read_to_string(run.path.join(crate::pm::USER_STORY_FILE)).map_err(|e| {
+        ArtifactError::artifact(format!("missing {}: {e}", crate::pm::USER_STORY_FILE)).into()
+    })
 }
 
 #[cfg(test)]
@@ -232,7 +236,7 @@ z
 "#;
         let err = validate_tech_spec(md, &allowed()).expect_err("unknown");
         match err {
-            Error::InvalidArtifact { reason, .. } => {
+            Error::Artifact(ArtifactError::InvalidArtifact { reason, .. }) => {
                 assert!(reason.contains("src/secret.rs"), "{reason}");
             }
             other => panic!("expected InvalidArtifact, got {other:?}"),
@@ -299,7 +303,10 @@ z
         let err = write_tech_spec(&gen, &run, "g", "s", &ctx)
             .await
             .expect_err("invalid");
-        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        assert!(matches!(
+            err,
+            Error::Artifact(ArtifactError::InvalidArtifact { .. })
+        ));
         assert!(!run.path.join(TECH_SPEC_FILE).exists());
     }
 }

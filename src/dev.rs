@@ -2,7 +2,7 @@
 
 use crate::adapters::git;
 use crate::artifacts::RunDir;
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::generate::{complete_text, LLMClient, ROLE_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::techlead::TECH_SPEC_FILE;
@@ -95,7 +95,7 @@ pub async fn write_and_apply_patch<G: LLMClient>(
 /// Read the tech spec from the run directory.
 pub fn read_tech_spec(run: &RunDir) -> Result<String, Error> {
     std::fs::read_to_string(run.path.join(TECH_SPEC_FILE))
-        .map_err(|e| Error::Artifact(format!("missing {TECH_SPEC_FILE}: {e}")))
+        .map_err(|e| ArtifactError::artifact(format!("missing {TECH_SPEC_FILE}: {e}")).into())
 }
 
 #[cfg(test)]
@@ -157,13 +157,16 @@ diff --git a/hello.txt b/hello.txt
     fn escaping_patch_is_rejected() {
         let err = git::validate_patch_paths(&[PathBuf::from("../secret")]).expect_err("escape");
         match err {
-            Error::InvalidArtifact { reason, .. } => {
+            Error::Artifact(ArtifactError::InvalidArtifact { reason, .. }) => {
                 assert!(reason.contains("escapes"), "{reason}");
             }
             other => panic!("expected InvalidArtifact, got {other:?}"),
         }
         let err = git::validate_patch_paths(&[PathBuf::from("/etc/passwd")]).expect_err("abs");
-        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        assert!(matches!(
+            err,
+            Error::Artifact(ArtifactError::InvalidArtifact { .. })
+        ));
     }
 
     #[test]

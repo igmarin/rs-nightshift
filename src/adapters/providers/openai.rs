@@ -1,7 +1,7 @@
 //! OpenAI-compatible [`ModelClient`] adapter (Deepseek, Kimi, custom).
 
 use crate::adapters::kernel_error::map_kernel_error;
-use crate::error::Error;
+use crate::error::{ConfigError, Error, ProviderError};
 use crate::ports::{GenerateRequest, ModelClient};
 use async_trait::async_trait;
 use llm_kernel::llm::{ChatMessage, LLMClient, LLMRequest, OpenAIClient};
@@ -35,27 +35,29 @@ pub(crate) fn to_llm_request(
 fn validate_chat_base_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
     let redacted = crate::adapters::ollama::redact_ollama_url(value);
-    let parsed = reqwest::Url::parse(value).map_err(|_| Error::Config {
-        path: "provider base_url".into(),
-        message: format!(
-            "invalid base URL {redacted:?}: expected an http:// or https:// URL with a host"
-        ),
-    })?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(Error::Config {
+    let parsed = reqwest::Url::parse(value).map_err(|_| {
+        Error::from(ConfigError {
             path: "provider base_url".into(),
             message: format!(
                 "invalid base URL {redacted:?}: expected an http:// or https:// URL with a host"
             ),
-        });
+        })
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(Error::from(ConfigError {
+            path: "provider base_url".into(),
+            message: format!(
+                "invalid base URL {redacted:?}: expected an http:// or https:// URL with a host"
+            ),
+        }));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(Error::Config {
+        return Err(Error::from(ConfigError {
             path: "provider base_url".into(),
             message: format!(
                 "base URL {redacted:?} must not embed credentials; use the API key header instead"
             ),
-        });
+        }));
     }
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
 }
@@ -67,7 +69,7 @@ fn validate_chat_base_url(value: &str) -> Result<String, Error> {
 /// (model, system, a single user message, temperature, optional max tokens).
 /// Kernel errors are mapped via [`map_kernel_error`]. Completions are bounded
 /// by `tokio::time::timeout` so a hanging provider surfaces as
-/// [`Error::Timeout`] (the kernel's own client would otherwise surface reqwest
+/// [`ProviderError::Timeout`] (the kernel's own client would otherwise surface reqwest
 /// timeouts as `LlmApi`, losing the structured info).
 pub struct OpenAICompatibleAdapter {
     /// `llm-kernel` OpenAI-compatible client; the model is set per-request.
@@ -110,12 +112,12 @@ impl OpenAICompatibleAdapter {
         let redacted_base_url = crate::adapters::ollama::redact_ollama_url(&base_url);
         // The per-request model always overrides the placeholder below, so the
         // client-level model name is never sent to the provider.
-        let http_client = reqwest::Client::builder()
-            .build()
-            .map_err(|error| Error::Config {
+        let http_client = reqwest::Client::builder().build().map_err(|error| {
+            Error::from(ConfigError {
                 path: "provider base_url".into(),
                 message: format!("failed to build HTTP client: {error}"),
-            })?;
+            })
+        })?;
         let inner = OpenAIClient::from_key_with_base_url("unset", api_key, base_url, http_client);
         Ok(Self {
             inner,
@@ -136,8 +138,10 @@ impl ModelClient for OpenAICompatibleAdapter {
                 .complete(to_llm_request(request, self.temperature, self.max_tokens)),
         )
         .await
-        .map_err(|_| Error::Timeout)
-        .and_then(|result| result.map_err(|error| map_kernel_error(error, &request.model)))?;
+        .map_err(|_| Error::from(ProviderError::Timeout))
+        .and_then(|result| {
+            result.map_err(|error| Error::from(map_kernel_error(error, &request.model)))
+        })?;
         Ok(response.content)
     }
 
@@ -231,7 +235,7 @@ mod tests {
             .await
             .expect_err("missing model");
         match err {
-            Error::ModelNotFound { model } => assert_eq!(model, "nope"),
+            Error::Provider(ProviderError::ModelNotFound { model }) => assert_eq!(model, "nope"),
             other => panic!("expected ModelNotFound, got {other:?}"),
         }
     }
@@ -249,7 +253,7 @@ mod tests {
             .expect("client");
         let err = client.generate(&request("m")).await.expect_err("status");
         match err {
-            Error::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
+            Error::Provider(ProviderError::Ollama(msg)) => assert!(msg.contains("500"), "{msg}"),
             other => panic!("expected Ollama status error, got {other:?}"),
         }
     }
@@ -277,7 +281,7 @@ mod tests {
         .expect("client");
         let err = client.generate(&request("m")).await.expect_err("timeout");
         assert!(
-            matches!(err, Error::Timeout),
+            matches!(err, Error::Provider(ProviderError::Timeout)),
             "expected Timeout, got {err:?}"
         );
     }

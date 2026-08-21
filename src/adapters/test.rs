@@ -1,6 +1,6 @@
 //! Test-adapter: detect and run the target repo's test command (never from model output).
 
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -47,7 +47,9 @@ impl Default for ProcessTestRunner {
 impl TestRunner for ProcessTestRunner {
     fn run(&self, repo: &Path, argv: &[String]) -> Result<TestOutcome, Error> {
         if argv.is_empty() {
-            return Err(Error::Artifact("test command is empty".into()));
+            return Err(Error::from(ArtifactError::artifact(
+                "test command is empty",
+            )));
         }
         let mut child = Command::new(&argv[0])
             .args(&argv[1..])
@@ -55,7 +57,11 @@ impl TestRunner for ProcessTestRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| Error::Artifact(format!("failed to spawn test command: {e}")))?;
+            .map_err(|e| {
+                Error::from(ArtifactError::artifact(format!(
+                    "failed to spawn test command: {e}"
+                )))
+            })?;
         let start = Instant::now();
         loop {
             match child.try_wait() {
@@ -94,7 +100,9 @@ impl TestRunner for ProcessTestRunner {
                 Ok(None) if start.elapsed() >= self.timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(Error::Timeout);
+                    return Err(Error::from(ArtifactError::artifact(
+                        "test command timed out",
+                    )));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(error) => return Err(error.into()),
@@ -110,9 +118,9 @@ pub fn detect_test_command(repo: &Path) -> Result<Vec<String>, Error> {
         let text = std::fs::read_to_string(&config)?;
         if let Some(argv) = parse_test_command(&text) {
             if argv.is_empty() {
-                return Err(Error::Artifact(
-                    "nightshift.toml [test] command is empty".into(),
-                ));
+                return Err(Error::from(ArtifactError::artifact(
+                    "nightshift.toml [test] command is empty",
+                )));
             }
             return Ok(argv);
         }
@@ -132,9 +140,9 @@ pub fn detect_test_command(repo: &Path) -> Result<Vec<String>, Error> {
     {
         return Ok(vec!["pytest".into()]);
     }
-    Err(Error::Artifact(
-        "no test command: add nightshift.toml [test] command = \"...\"".into(),
-    ))
+    Err(Error::from(ArtifactError::artifact(
+        "no test command: add nightshift.toml [test] command = \"...\"",
+    )))
 }
 
 /// Parse `[test] command = "..."` from a tiny TOML subset.
@@ -220,7 +228,11 @@ impl TestRunner for ScriptedRunner {
             .lock()
             .expect("runner")
             .pop_front()
-            .unwrap_or_else(|| Err(Error::Artifact("no scripted test outcome".into())))
+            .unwrap_or_else(|| {
+                Err(Error::from(ArtifactError::artifact(
+                    "no scripted test outcome",
+                )))
+            })
     }
 }
 
@@ -259,7 +271,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let err = detect_test_command(tmp.path()).expect_err("none");
         match err {
-            Error::Artifact(msg) => assert!(msg.contains("nightshift.toml"), "{msg}"),
+            Error::Artifact(ArtifactError::Artifact(msg)) => {
+                assert!(msg.contains("nightshift.toml"), "{msg}")
+            }
             other => panic!("expected Artifact, got {other:?}"),
         }
     }
@@ -289,6 +303,9 @@ mod tests {
         let err = runner
             .run(tmp.path(), &["sleep".into(), "5".into()])
             .expect_err("timeout");
-        assert!(matches!(err, Error::Timeout), "{err:?}");
+        assert!(
+            matches!(err, Error::Artifact(ArtifactError::Artifact(ref msg)) if msg.contains("timed out")),
+            "{err:?}"
+        );
     }
 }

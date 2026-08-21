@@ -1,6 +1,6 @@
 //! Role to local Ollama model mapping.
 
-use crate::error::Error;
+use crate::error::{ConfigError, Error};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -84,23 +84,25 @@ fn load_models_config_from_inner(path: &Path, explicit_path: bool) -> Result<Mod
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if explicit_path {
-                return Err(Error::Config {
+                return Err(Error::from(ConfigError {
                     path: path.display().to_string(),
                     message: "file not found (NIGHTSHIFT_CONFIG was set explicitly)".into(),
-                });
+                }));
             }
             return Ok(ModelsConfig::default());
         }
         Err(error) => {
-            return Err(Error::Config {
+            return Err(Error::from(ConfigError {
                 path: path.display().to_string(),
                 message: error.to_string(),
-            });
+            }));
         }
     };
-    toml::from_str(&content).map_err(|error| Error::Config {
-        path: path.display().to_string(),
-        message: error.to_string(),
+    toml::from_str(&content).map_err(|error| {
+        Error::from(ConfigError {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })
     })
 }
 

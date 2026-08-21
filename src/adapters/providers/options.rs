@@ -1,6 +1,6 @@
 //! Per-role option parsing shared by the provider adapters.
 
-use crate::error::Error;
+use crate::error::{ConfigError, Error};
 use std::collections::BTreeMap;
 
 /// Resolved per-role options that the adapters act on.
@@ -68,8 +68,8 @@ impl ModelOptions {
 
 /// Build an [`Error::Config`] for a malformed role option.
 fn bad_option(name: &str, expected: &str) -> Error {
-    Error::Config {
+    Error::from(ConfigError {
         path: format!("option {name:?}"),
         message: format!("expected {expected}"),
-    }
+    })
 }

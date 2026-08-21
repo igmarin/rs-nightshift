@@ -11,7 +11,7 @@ use crate::adapters::git::apply_checked;
 use crate::adapters::test::{
     detect_test_command, ProcessTestRunner, TestRunner, DEFAULT_TEST_TIMEOUT,
 };
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::ports::{ContextProvider, ToolRunner};
 use std::path::Path;
 use std::time::Duration;
@@ -45,7 +45,11 @@ impl CapabilityRunner {
         let runner = ProcessTestRunner::new(self.test_timeout);
         let outcome = tokio::task::spawn_blocking(move || runner.run(&repo, &argv))
             .await
-            .map_err(|error| Error::Artifact(format!("test runner join: {error}")))??;
+            .map_err(|error| {
+                Error::from(ArtifactError::artifact(format!(
+                    "test runner join: {error}"
+                )))
+            })??;
         Ok(format!(
             "exit code: {}\n{}",
             outcome.exit_code, outcome.output
@@ -58,7 +62,9 @@ impl CapabilityRunner {
         let patch = input.to_string();
         tokio::task::spawn_blocking(move || apply_checked(&repo, &patch))
             .await
-            .map_err(|error| Error::Artifact(format!("git apply join: {error}")))??;
+            .map_err(|error| {
+                Error::from(ArtifactError::artifact(format!("git apply join: {error}")))
+            })??;
         Ok("patch applied".to_string())
     }
 }
@@ -77,7 +83,9 @@ impl ToolRunner for CapabilityRunner {
         match tool {
             "run-tests" => self.run_tests(repo).await,
             "apply-patch" => self.apply_patch(repo, input).await,
-            other => Err(Error::Artifact(format!("unknown tool {other:?}"))),
+            other => Err(Error::from(ArtifactError::artifact(format!(
+                "unknown tool {other:?}"
+            )))),
         }
     }
 }
