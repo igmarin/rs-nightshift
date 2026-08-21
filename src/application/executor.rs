@@ -119,8 +119,9 @@ where
         // Write the raw model response to a debug artifact so the operator can
         // inspect what the model actually returned when parsing fails. Include
         // the role id in the filename so multiple failing roles don't overwrite
-        // each other's evidence.
-        let debug_name = format!("raw_response_{}.txt", params.role.id);
+        // each other's evidence. Sanitize the role id to prevent path traversal.
+        let safe_id = sanitize_filename(&params.role.id);
+        let debug_name = format!("raw_response_{safe_id}.txt");
         if let Err(write_err) = store.write_artifact(params.run, &debug_name, &text) {
             eprintln!("warning: failed to write debug artifact {debug_name}: {write_err}");
         }
@@ -291,15 +292,17 @@ fn extract_balanced_object(text: &str) -> Result<String, Error> {
 fn sanitize_json_value(json: &str) -> Result<serde_json::Value, Error> {
     let mut value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
         invalid_envelope(&format!(
-            "not a valid role envelope after repair: {e} (see raw_response.txt)"
+            "not a valid role envelope after repair: {e} (see raw_response_*.txt)"
         ))
     })?;
-    // Coerce `content` to a string if the model put an array/object/number there.
+    // Coerce `content` to a string if the model put a non-string there.
+    // Null is left as-is so the caller's `#[serde(default)]` produces an empty
+    // string only when the field is absent, not when the model explicitly sent
+    // null — that case is treated as a missing deliverable and rejected.
     if let Some(obj) = value.as_object_mut() {
         if let Some(content) = obj.get("content") {
-            if !content.is_string() {
+            if !content.is_string() && !content.is_null() {
                 let text = match content {
-                    serde_json::Value::Null => String::new(),
                     serde_json::Value::Bool(b) => b.to_string(),
                     serde_json::Value::Number(n) => n.to_string(),
                     other => other.to_string(),
@@ -395,6 +398,20 @@ fn escape_control_char(c: char) -> String {
 
 fn invalid_envelope(reason: &str) -> Error {
     ArtifactError::invalid("role output", reason.to_string()).into()
+}
+
+/// Reduce a role id to a safe filename component: keep `[A-Za-z0-9_-]`,
+/// replace everything else (including path separators) with `_`.
+fn sanitize_filename(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -799,5 +816,21 @@ mod tests {
         let output = parse_role_output(raw).expect("ansi escaped");
         assert_eq!(output.verdict, Verdict::Done);
         assert!(output.content.contains("red"), "{}", output.content);
+    }
+
+    #[test]
+    fn sanitize_filename_strips_path_separators() {
+        assert_eq!(sanitize_filename("developer"), "developer");
+        assert_eq!(sanitize_filename("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(sanitize_filename("qa-role"), "qa-role");
+        assert_eq!(sanitize_filename("a/b\\c"), "a_b_c");
+    }
+
+    #[test]
+    fn parse_rejects_null_content() {
+        // Model sends "content": null — should not be coerced to empty string.
+        let raw = r#"{"verdict":"done","content":null}"#;
+        let err = parse_role_output(raw).expect_err("null content rejected");
+        assert!(err.to_string().contains("role output"), "{err}");
     }
 }
