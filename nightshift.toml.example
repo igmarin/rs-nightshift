@@ -45,7 +45,8 @@ You are the Developer. Implement the brief as a patch. If the brief raises
 non-blocking questions, proceed with reasonable assumptions and note them.
 """
 output = "02_patch.patch"
-tools = ["apply-patch"]
+tools = ["gather-context", "apply-patch"]
+# context_files = ["public/index.html"]   # raw file content for non-code files
 on = { continue = "qa" }
 
 [[roles]]

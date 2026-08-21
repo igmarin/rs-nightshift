@@ -75,6 +75,10 @@ pub struct RoleSpec {
     /// Code-side tools the role declares (`apply-patch`, `run-tests`, …).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Repo-relative files to read and inject as raw context (for non-code
+    /// files that `codegraph`/`graphify` don't index, e.g. HTML, CSS).
+    #[serde(default)]
+    pub context_files: Vec<String>,
     /// Verdict → target routing map.
     #[serde(default)]
     pub on: Routing,
@@ -164,6 +168,32 @@ impl NightshiftConfig {
                     return Err(Error::RoleGraph(format!(
                         "role {:?} declares unknown tool {:?}",
                         role.id, tool
+                    )));
+                }
+            }
+        }
+        for role in &self.roles {
+            for file in &role.context_files {
+                let path = std::path::Path::new(file);
+                if file.is_empty() {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} has an empty context_files entry",
+                        role.id
+                    )));
+                }
+                if path.is_absolute() {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} context_files entry {:?} must be repo-relative, not absolute",
+                        role.id, file
+                    )));
+                }
+                if path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} context_files entry {:?} must not contain '..'",
+                        role.id, file
                     )));
                 }
             }
@@ -405,5 +435,110 @@ model = "phi4"
         let config = load_role_graph_config_from(&example).expect("example must parse + validate");
         assert_eq!(config.run.start, "product-owner");
         assert_eq!(config.roles.len(), 3);
+    }
+
+    #[test]
+    fn context_files_parse_from_toml() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["public/index.html", "README.md"]
+"#,
+        )
+        .expect("parse");
+        let dev = &config.roles[0];
+        assert_eq!(dev.context_files, vec!["public/index.html", "README.md"]);
+    }
+
+    #[test]
+    fn context_files_default_to_empty() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+"#,
+        )
+        .expect("parse");
+        assert!(config.roles[0].context_files.is_empty());
+    }
+
+    #[test]
+    fn context_files_absolute_path_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["/etc/passwd"]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("absolute path must fail");
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn context_files_parent_dir_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["../escape.txt"]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("parent dir must fail");
+        assert!(err.to_string().contains("'..'"), "{err}");
+    }
+
+    #[test]
+    fn context_files_empty_entry_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = [""]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("empty entry must fail");
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn context_files_valid_relative_path_passes() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["public/index.html"]
+"#,
+        )
+        .expect("parse");
+        config.validate().expect("valid relative path should pass");
     }
 }

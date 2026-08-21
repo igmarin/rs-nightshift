@@ -93,6 +93,34 @@ where
                 if !text.is_empty() {
                     tool_output.push_str(&format!("### repo context\n{text}\n\n"));
                 }
+                // Inject raw file content for files the role declared
+                // (non-code files that codegraph/graphify don't index).
+                // Truncate at 8 KiB so large files don't exhaust the model's
+                // context window or cause inference timeouts.
+                const MAX_FILE_BYTES: usize = 8 * 1024;
+                for file in &params.role.context_files {
+                    let path = params.repo.join(file);
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            if content.len() > MAX_FILE_BYTES {
+                                tool_output.push_str(&format!(
+                                    "### file: {file} (truncated to {MAX_FILE_BYTES} bytes)\n{}\
+                                     \n<!-- truncated: {} bytes total -->\n\n",
+                                    &content[..MAX_FILE_BYTES],
+                                    content.len()
+                                ));
+                            } else {
+                                tool_output.push_str(&format!("### file: {file}\n{content}\n\n"));
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "warning: context_files: could not read {}: {error}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
             }
             "run-tests" => {
                 let out = tools.run("run-tests", params.repo, "").await?;
@@ -433,6 +461,7 @@ mod tests {
             prompt: "You are a developer.".into(),
             output: output.map(String::from),
             tools: Vec::new(),
+            context_files: Vec::new(),
             on: Routing::default(),
             max_loop: 3,
         }
@@ -832,5 +861,121 @@ mod tests {
         let raw = r#"{"verdict":"done","content":null}"#;
         let err = parse_role_output(raw).expect_err("null content rejected");
         assert!(err.to_string().contains("role output"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn execute_injects_context_files_into_prompt() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::write(repo.path().join("index.html"), "<h1>Hello World</h1>").expect("write html");
+
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+
+        let mut role = role_with_tools(None, &["gather-context"]);
+        role.context_files = vec!["index.html".to_string()];
+
+        let ctx = context();
+        execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::new("graph: src/lib.rs"),
+            &ExecuteParams {
+                run,
+                repo: repo.path(),
+                role: &role,
+                context: &ctx,
+                artifacts: &[],
+            },
+        )
+        .await
+        .expect("execute");
+
+        let calls = client.calls();
+        assert!(
+            calls[0].prompt.contains("### file: index.html"),
+            "{}",
+            calls[0].prompt
+        );
+        assert!(
+            calls[0].prompt.contains("<h1>Hello World</h1>"),
+            "{}",
+            calls[0].prompt
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_missing_context_file_warns_not_errors() {
+        let repo = tempfile::tempdir().expect("repo");
+        // No file created — the run should still succeed.
+
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+
+        let mut role = role_with_tools(None, &["gather-context"]);
+        role.context_files = vec!["nonexistent.html".to_string()];
+
+        let ctx = context();
+        let outcome = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                run,
+                repo: repo.path(),
+                role: &role,
+                context: &ctx,
+                artifacts: &[],
+            },
+        )
+        .await
+        .expect("execute should succeed despite missing file");
+
+        assert_eq!(outcome.output.verdict, Verdict::Done);
+    }
+
+    #[tokio::test]
+    async fn execute_truncates_large_context_file() {
+        let repo = tempfile::tempdir().expect("repo");
+        // Create a file larger than 8 KiB.
+        let big_content = "x".repeat(10 * 1024);
+        std::fs::write(repo.path().join("big.html"), &big_content).expect("write");
+
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+
+        let mut role = role_with_tools(None, &["gather-context"]);
+        role.context_files = vec!["big.html".to_string()];
+
+        let ctx = context();
+        execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                run,
+                repo: repo.path(),
+                role: &role,
+                context: &ctx,
+                artifacts: &[],
+            },
+        )
+        .await
+        .expect("execute");
+
+        let calls = client.calls();
+        assert!(
+            calls[0].prompt.contains("truncated"),
+            "prompt should mention truncation: {}",
+            &calls[0].prompt[..200]
+        );
     }
 }
