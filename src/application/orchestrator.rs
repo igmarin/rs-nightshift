@@ -110,8 +110,25 @@ where
         )?;
 
         let spec = request.config.providers.get(&role.provider);
-        let client = factory.build(&role.provider, spec, &role.options)?;
-        let outcome = executor::execute(
+        let client = match factory.build(&role.provider, spec, &role.options) {
+            Ok(c) => c,
+            Err(error) => {
+                record_failure(
+                    state,
+                    clock,
+                    request.run,
+                    &FailureCtx {
+                        current: current.clone(),
+                        provider: provider.clone(),
+                        model: model.clone(),
+                    },
+                    steps,
+                    &loop_counters,
+                )?;
+                return Err(error);
+            }
+        };
+        let outcome = match executor::execute(
             client.as_ref(),
             store,
             tools,
@@ -124,7 +141,25 @@ where
                 artifacts: &artifacts,
             },
         )
-        .await?;
+        .await
+        {
+            Ok(o) => o,
+            Err(error) => {
+                record_failure(
+                    state,
+                    clock,
+                    request.run,
+                    &FailureCtx {
+                        current: current.clone(),
+                        provider: provider.clone(),
+                        model: model.clone(),
+                    },
+                    steps,
+                    &loop_counters,
+                )?;
+                return Err(error);
+            }
+        };
         last_verdict = Some(outcome.output.verdict);
         if let Some(name) = &outcome.artifact {
             if !artifacts.contains(name) {
@@ -362,9 +397,59 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
     })
 }
 
+/// Record a `Fail` action event and a `Failed` snapshot when `execute` or
+/// `factory.build` returns an error, so the persisted state does not stay
+/// stuck at `Running` after the process exits.
+fn record_failure<S: StateStore, K: Clock>(
+    state: &S,
+    clock: &K,
+    run: &Path,
+    ctx: &FailureCtx,
+    steps: u32,
+    loop_counters: &BTreeMap<String, u32>,
+) -> Result<(), Error> {
+    let reason = BlockReason::ToolFailure;
+    state.append_action(
+        run,
+        &ActionEvent {
+            ts: clock.now_iso(),
+            event: EventKind::Fail,
+            role: ctx.current.to_string(),
+            provider: ctx.provider.to_string(),
+            model: ctx.model.to_string(),
+            verdict: None,
+            artifact: None,
+            block_reason: reason,
+        },
+    )?;
+    state.write_snapshot(
+        run,
+        &StatusSnapshot {
+            current_role: Some(ctx.current.to_string()),
+            steps,
+            last_verdict: None,
+            status: RunStatus::Failed,
+            block_reason: reason,
+            loop_counters: loop_counters.clone(),
+        },
+    )?;
+    Ok(())
+}
+
+/// Role context for [`record_failure`]: the active role id, provider, and model.
+struct FailureCtx {
+    /// Role id.
+    current: String,
+    /// Provider name.
+    provider: String,
+    /// Model tag.
+    model: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ArtifactError;
     use crate::ports::{
         FixedClock, MemoryArtifactStore, MemoryStateStore, StubContextProvider, StubToolRunner,
     };
@@ -612,5 +697,129 @@ on = { continue = "loop" }
         assert_eq!(result.status, RunStatus::Blocked);
         assert_eq!(result.block_reason, BlockReason::BudgetExhausted);
         assert_eq!(result.steps, 3);
+    }
+
+    /// Factory whose `build` always fails — exercises the error path before
+    /// the client is even constructed.
+    struct ErrorFactory;
+
+    impl ModelClientFactory for ErrorFactory {
+        fn build(
+            &self,
+            _provider: &str,
+            _spec: Option<&crate::domain::rolegraph::config::ProviderSpec>,
+            _options: &BTreeMap<String, toml::Value>,
+        ) -> Result<Box<dyn crate::ports::ModelClient>, Error> {
+            Err(Error::from(ArtifactError::artifact("factory boom")))
+        }
+    }
+
+    /// Run the graph and return the error result (not `RunResult`), so the
+    /// caller can assert that the error was propagated and then inspect the
+    /// state store for the `Failed` snapshot.
+    async fn run_err<F: ModelClientFactory>(
+        cfg: &NightshiftConfig,
+        factory: &F,
+        state: &MemoryStateStore,
+    ) -> Error {
+        let store = MemoryArtifactStore::default();
+        run_graph(
+            factory,
+            &store,
+            state,
+            &clock(),
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &RunRequest {
+                run: Path::new("/tmp/run/x"),
+                repo: Path::new("/repo"),
+                config: cfg,
+                goal: "goal",
+            },
+        )
+        .await
+        .expect_err("should error")
+    }
+
+    #[tokio::test]
+    async fn build_error_records_failed_snapshot() {
+        let cfg = config(
+            r#"
+[run]
+start = "po"
+[[roles]]
+id = "po"
+provider = "ollama"
+model = "phi4"
+"#,
+        );
+        let state = MemoryStateStore::default();
+        let error = run_err(&cfg, &ErrorFactory, &state).await;
+        assert!(error.to_string().contains("factory boom"), "{error}");
+        let snap = state
+            .read_snapshot(Path::new("/tmp/run/x"))
+            .expect("snapshot");
+        assert_eq!(snap.status, RunStatus::Failed, "snapshot should be Failed");
+        assert_eq!(snap.block_reason, BlockReason::ToolFailure);
+        assert_eq!(snap.current_role.as_deref(), Some("po"));
+        let events = state.events();
+        let fail = events.iter().find(|e| e.event == EventKind::Fail);
+        assert!(fail.is_some(), "actions should contain a Fail event");
+        assert_eq!(fail.unwrap().role, "po");
+    }
+
+    /// Client whose `generate` always fails — exercises the error path inside
+    /// `executor::execute`.
+    struct ErrorClient;
+
+    #[async_trait::async_trait]
+    impl crate::ports::ModelClient for ErrorClient {
+        async fn generate(
+            &self,
+            _request: &crate::ports::GenerateRequest,
+        ) -> Result<String, Error> {
+            Err(Error::from(ArtifactError::artifact("generate boom")))
+        }
+    }
+
+    /// Factory that always returns [`ErrorClient`].
+    struct ErrorClientFactory;
+
+    impl ModelClientFactory for ErrorClientFactory {
+        fn build(
+            &self,
+            _provider: &str,
+            _spec: Option<&crate::domain::rolegraph::config::ProviderSpec>,
+            _options: &BTreeMap<String, toml::Value>,
+        ) -> Result<Box<dyn crate::ports::ModelClient>, Error> {
+            Ok(Box::new(ErrorClient))
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_error_records_failed_snapshot() {
+        let cfg = config(
+            r#"
+[run]
+start = "po"
+[[roles]]
+id = "po"
+provider = "ollama"
+model = "phi4"
+"#,
+        );
+        let state = MemoryStateStore::default();
+        let error = run_err(&cfg, &ErrorClientFactory, &state).await;
+        assert!(error.to_string().contains("generate boom"), "{error}");
+        let snap = state
+            .read_snapshot(Path::new("/tmp/run/x"))
+            .expect("snapshot");
+        assert_eq!(snap.status, RunStatus::Failed, "snapshot should be Failed");
+        assert_eq!(snap.block_reason, BlockReason::ToolFailure);
+        assert_eq!(snap.current_role.as_deref(), Some("po"));
+        let events = state.events();
+        let fail = events.iter().find(|e| e.event == EventKind::Fail);
+        assert!(fail.is_some(), "actions should contain a Fail event");
+        assert_eq!(fail.unwrap().role, "po");
     }
 }
