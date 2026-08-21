@@ -117,9 +117,12 @@ where
         .await?;
     let output = parse_role_output(&text).inspect_err(|_error| {
         // Write the raw model response to a debug artifact so the operator can
-        // inspect what the model actually returned when parsing fails.
-        if params.role.output.is_some() {
-            let _ = store.write_artifact(params.run, "raw_response.txt", &text);
+        // inspect what the model actually returned when parsing fails. Include
+        // the role id in the filename so multiple failing roles don't overwrite
+        // each other's evidence.
+        let debug_name = format!("raw_response_{}.txt", params.role.id);
+        if let Err(write_err) = store.write_artifact(params.run, &debug_name, &text) {
+            eprintln!("warning: failed to write debug artifact {debug_name}: {write_err}");
         }
     })?;
 
@@ -208,7 +211,7 @@ fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
         Err(_) => {
             // Slow path: parse as raw Value, coerce content to string, retry.
             let value = sanitize_json_value(&json)?;
-            let repaired = serde_json::to_string(&value).unwrap_or(json.clone());
+            let repaired = serde_json::to_string(&value).unwrap_or_else(|_| json.clone());
             serde_json::from_str::<RoleOutput>(&repaired).map_err(|error| {
                 ArtifactError::invalid("role output", format!("not a valid role envelope: {error}"))
                     .into()
@@ -235,11 +238,9 @@ fn extract_json_object(text: &str) -> Result<String, Error> {
     }
     // Find the first `{` and track brace depth (respecting strings) to find
     // the matching `}`. This handles trailing text after the JSON object.
-    let extracted = extract_balanced_object(&sanitized)?;
-    if serde_json::from_str::<serde_json::Value>(&extracted).is_ok() {
-        return Ok(extracted);
-    }
-    Ok(extracted)
+    // Return the extracted text even when it is still invalid; the caller
+    // attempts value-level repair before failing.
+    extract_balanced_object(&sanitized)
 }
 
 /// Find the first `{` and return the substring through the matching `}`,
@@ -284,13 +285,13 @@ fn extract_balanced_object(text: &str) -> Result<String, Error> {
     Err(invalid_envelope("model did not return a JSON object"))
 }
 
-/// Parse JSON into a `Value`, repairing common model mistakes: literal
-/// newlines inside strings, trailing commas, and non-string `content` fields.
+/// Parse JSON into a `Value`, repairing non-string `content` fields.
+/// The input has already been sanitized by `extract_json_object`, so no
+/// second pass of `sanitize_string_literals` is needed here.
 fn sanitize_json_value(json: &str) -> Result<serde_json::Value, Error> {
-    let repaired = sanitize_string_literals(json);
-    let mut value: serde_json::Value = serde_json::from_str(&repaired).map_err(|e| {
+    let mut value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
         invalid_envelope(&format!(
-            "not a valid role envelope: {e} (raw response: {json:.500})"
+            "not a valid role envelope after repair: {e} (see raw_response.txt)"
         ))
     })?;
     // Coerce `content` to a string if the model put an array/object/number there.
@@ -310,9 +311,9 @@ fn sanitize_json_value(json: &str) -> Result<serde_json::Value, Error> {
     Ok(value)
 }
 
-/// Replace literal newlines, tabs, and carriage returns inside JSON string
-/// values with their escaped equivalents, and strip trailing commas before
-/// closing braces/brackets. Leaves non-string content untouched.
+/// Replace literal control characters (anything below U+0020) inside JSON
+/// string values with their escaped equivalents, and strip trailing commas
+/// before closing braces/brackets. Leaves non-string content untouched.
 fn sanitize_string_literals(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut in_string = false;
@@ -323,7 +324,14 @@ fn sanitize_string_literals(input: &str) -> String {
         let c = chars[i];
         if in_string {
             if escaped {
-                out.push(c);
+                // Even in the escaped branch, a literal control character is
+                // invalid JSON — escape it so the backslash precedes a valid
+                // escape sequence rather than a raw byte.
+                if (c as u32) < 0x20 {
+                    out.push_str(&escape_control_char(c));
+                } else {
+                    out.push(c);
+                }
                 escaped = false;
                 i += 1;
                 continue;
@@ -340,12 +348,11 @@ fn sanitize_string_literals(input: &str) -> String {
                 i += 1;
                 continue;
             }
-            // Replace literal control chars with escapes.
-            match c {
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                _ => out.push(c),
+            // Replace all literal control chars below U+0020 with escapes.
+            if (c as u32) < 0x20 {
+                out.push_str(&escape_control_char(c));
+            } else {
+                out.push(c);
             }
             i += 1;
         } else {
@@ -372,6 +379,18 @@ fn sanitize_string_literals(input: &str) -> String {
         }
     }
     out
+}
+
+/// Return the JSON escape sequence for a control character below U+0020.
+fn escape_control_char(c: char) -> String {
+    match c {
+        '\n' => "\\n".into(),
+        '\r' => "\\r".into(),
+        '\t' => "\\t".into(),
+        '\u{08}' => "\\b".into(),
+        '\u{0c}' => "\\f".into(),
+        _ => format!("\\u{:04x}", c as u32),
+    }
 }
 
 fn invalid_envelope(reason: &str) -> Error {
@@ -693,19 +712,47 @@ mod tests {
         let run = Path::new("/tmp/run/raw");
         let role = role(Some("01_brief.md"));
         let ctx = context();
-        let _ = execute(
+        let err = execute(
             &client,
             &store,
             &StubToolRunner::default(),
             &StubContextProvider::default(),
             &params(run, &role, &ctx),
         )
-        .await;
-        // The raw response should be written for inspection.
+        .await
+        .expect_err("parse failure");
+        assert!(err.to_string().contains("role output"), "{err}");
+        // The raw response should be written for inspection, named with the role id.
         let raw = store
-            .read_artifact(run, "raw_response.txt")
+            .read_artifact(run, "raw_response_developer.txt")
             .expect("raw response written");
         assert!(raw.contains("totally not json"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn execute_writes_raw_response_even_without_output() {
+        // A role with no output file should still get a raw_response artifact
+        // on parse failure — the debug evidence is independent of the artifact.
+        let client = ScriptedModelClient::new();
+        client.push_text("not json");
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/no-output");
+        let role = role(None);
+        let ctx = context();
+        let err = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect_err("parse failure");
+        assert!(err.to_string().contains("role output"), "{err}");
+        let raw = store
+            .read_artifact(run, "raw_response_developer.txt")
+            .expect("raw response written even without output");
+        assert!(raw.contains("not json"), "{raw}");
     }
 
     #[test]
@@ -732,5 +779,25 @@ mod tests {
         let output = parse_role_output(raw).expect("balanced extraction");
         assert_eq!(output.verdict, Verdict::Done);
         assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_escapes_backslash_followed_by_control_char() {
+        // Backslash followed by a literal newline inside a string — the
+        // escaped branch must still escape the control character.
+        let raw = "{\"verdict\":\"done\",\"content\":\"line\\\nnext\"}";
+        let output = parse_role_output(raw).expect("escaped control char");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert!(output.content.contains("line"), "{}", output.content);
+        assert!(output.content.contains("next"), "{}", output.content);
+    }
+
+    #[test]
+    fn parse_escapes_ansi_escape_inside_string() {
+        // ANSI escape byte (0x1b) inside content — must be escaped, not emitted raw.
+        let raw = "{\"verdict\":\"done\",\"content\":\"\u{1b}[31mred\u{1b}[0m\"}";
+        let output = parse_role_output(raw).expect("ansi escaped");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert!(output.content.contains("red"), "{}", output.content);
     }
 }
