@@ -82,8 +82,27 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
 }
 
 /// `git apply --check` then `git apply`. Never add/commit/push/reset/clean.
+///
+/// If the initial check fails due to incorrect hunk-header line counts (a
+/// common model output defect), [`repair_hunk_headers`] is tried as a
+/// fallback before the apply.
 pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
-    apply_check(repo, patch)?;
+    match apply_check(repo, patch) {
+        Ok(()) => {}
+        Err(original) => {
+            let repaired = repair_hunk_headers(patch);
+            if repaired != patch {
+                apply_check(repo, &repaired)?;
+                return apply_raw(repo, &repaired);
+            }
+            return Err(original);
+        }
+    }
+    apply_raw(repo, patch)
+}
+
+/// Write `patch` to a temp file and run `git apply` (no `--check`).
+fn apply_raw(repo: &Path, patch: &str) -> Result<(), Error> {
     let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
     std::fs::write(tmp.path(), patch)
         .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
@@ -97,6 +116,111 @@ pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
         ],
     )?;
     Ok(())
+}
+
+/// Recompute hunk-header line counts from the actual hunk content.
+///
+/// Models frequently write `@@ -10,7 +10,7 @@` with wrong counts. This
+/// function parses each hunk, counts context + removed lines for the old
+/// count and context + added lines for the new count, and rewrites the
+/// header. Start line numbers are preserved (git apply tolerates off-by-one
+/// starts but not wrong counts).
+#[must_use]
+pub fn repair_hunk_headers(patch: &str) -> String {
+    let lines: Vec<&str> = patch.lines().collect();
+    let mut out = String::with_capacity(patch.len());
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+
+        if line.starts_with("@@ ") {
+            let (old_start, new_start) = parse_hunk_starts(line);
+            let mut old_count: u32 = 0;
+            let mut new_count: u32 = 0;
+            let mut j = i + 1;
+
+            while j < lines.len() {
+                let body = lines[j];
+                if body.starts_with("@@ ") || body.starts_with("diff --git") {
+                    break;
+                }
+                if body.starts_with(' ') {
+                    old_count += 1;
+                    new_count += 1;
+                } else if body.starts_with('-') {
+                    old_count += 1;
+                } else if body.starts_with('+') {
+                    new_count += 1;
+                } else if body.starts_with('\\') {
+                    // "\ No newline at end of file" — not counted.
+                } else if body.is_empty() {
+                    // Empty lines in a diff are context lines that lost
+                    // their space prefix. Treat as context.
+                    old_count += 1;
+                    new_count += 1;
+                } else {
+                    break;
+                }
+                j += 1;
+            }
+
+            out.push_str(&format_hunk_header(
+                old_start, old_count, new_start, new_count,
+            ));
+            out.push('\n');
+            for body in lines.iter().take(j).skip(i + 1) {
+                out.push_str(body);
+                out.push('\n');
+            }
+            i = j;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+            i += 1;
+        }
+    }
+
+    // git apply requires a trailing newline; ensure one is present.
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Extract `(old_start, new_start)` from a `@@ -OLD,COUNT +NEW,COUNT @@` line.
+fn parse_hunk_starts(header: &str) -> (Option<i64>, Option<i64>) {
+    // Format: @@ -START[,COUNT] +START[,COUNT] @@
+    let parts: Vec<&str> = header.split_whitespace().collect();
+    let old = parts.iter().find(|p| p.starts_with('-')).and_then(|p| {
+        let s = &p[1..]; // strip leading '-'
+        let start_str = s.split(',').next().unwrap_or(s);
+        start_str.parse::<i64>().ok()
+    });
+    let new = parts.iter().find(|p| p.starts_with('+')).and_then(|p| {
+        let s = &p[1..]; // strip leading '+'
+        let start_str = s.split(',').next().unwrap_or(s);
+        start_str.parse::<i64>().ok()
+    });
+    (old, new)
+}
+
+/// Format a hunk header with corrected counts.
+fn format_hunk_header(
+    old_start: Option<i64>,
+    old_count: u32,
+    new_start: Option<i64>,
+    new_count: u32,
+) -> String {
+    let old = match old_start {
+        Some(s) => format!("-{}", s),
+        None => "-1".to_string(),
+    };
+    let new = match new_start {
+        Some(s) => format!("+{}", s),
+        None => "+1".to_string(),
+    };
+    format!("@@ {old},{old_count} {new},{new_count} @@")
 }
 
 /// Run a git command in `repo` and return its stdout as UTF-8.
@@ -113,4 +237,148 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
         );
     }
     String::from_utf8(output.stdout).map_err(|e| GitError::new(e.to_string()).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_fixes_wrong_hunk_counts() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -10,7 +10,7 @@
+ context
+-old
++new
+ context
+";
+        let repaired = repair_hunk_headers(patch);
+        assert!(
+            repaired.contains("@@ -10,3 +10,3 @@"),
+            "expected corrected counts, got: {repaired}"
+        );
+    }
+
+    #[test]
+    fn repair_handles_multiple_hunks() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,7 +1,7 @@
+ ctx
+-a
++b
+ ctx
+@@ -20,7 +20,8 @@
+ ctx
+-c
++d
++e
+ ctx
+";
+        let repaired = repair_hunk_headers(patch);
+        assert!(
+            repaired.contains("@@ -1,3 +1,3 @@"),
+            "first hunk wrong: {repaired}"
+        );
+        assert!(
+            repaired.contains("@@ -20,3 +20,4 @@"),
+            "second hunk wrong: {repaired}"
+        );
+    }
+
+    #[test]
+    fn repair_preserves_correct_counts() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,3 +1,3 @@
+ ctx
+-a
++b
+ ctx
+";
+        let repaired = repair_hunk_headers(patch);
+        assert_eq!(repaired, patch, "already-correct patch should be unchanged");
+    }
+
+    #[test]
+    fn repair_handles_addition_only_hunk() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,1 +1,1 @@
+ ctx
++new
+";
+        let repaired = repair_hunk_headers(patch);
+        assert!(
+            repaired.contains("@@ -1,1 +1,2 @@"),
+            "addition-only hunk wrong: {repaired}"
+        );
+    }
+
+    #[test]
+    fn repair_handles_removal_only_hunk() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,1 +1,1 @@
+-old
++new
+";
+        let repaired = repair_hunk_headers(patch);
+        assert!(
+            repaired.contains("@@ -1,1 +1,1 @@"),
+            "removal-only hunk wrong: {repaired}"
+        );
+    }
+
+    #[test]
+    fn repair_preserves_start_line_numbers() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -42,7 +42,7 @@
+ ctx
+-a
++b
+";
+        let repaired = repair_hunk_headers(patch);
+        assert!(
+            repaired.contains("@@ -42,2 +42,2 @@"),
+            "start numbers should be preserved: {repaired}"
+        );
+    }
+
+    #[test]
+    fn repair_skips_no_newline_marker() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,7 +1,7 @@
+ ctx
+-a
++b
+\\ No newline at end of file
+";
+        let repaired = repair_hunk_headers(patch);
+        assert!(
+            repaired.contains("@@ -1,2 +1,2 @@"),
+            "no-newline marker should not be counted: {repaired}"
+        );
+        assert!(
+            repaired.contains("\\ No newline at end of file"),
+            "marker should be preserved: {repaired}"
+        );
+    }
 }
