@@ -22,11 +22,13 @@ matching this schema:
   \"findings\": [\"…\"],
   \"questions\": [{\"text\": \"…\", \"blocking\": true}],
   \"block_reason\": \"none\" | \"ill_defined_task\" | \"tool_failure\" | \"version_mismatch\" | \"budget_exhausted\",
-  \"content\": \"your deliverable (brief, patch, report, …)\"
+  \"content\": \"your deliverable as a plain string (brief, patch, report, …)\"
 }
-Use \"continue\" to pass work on, \"issues\" to send findings back for a fix, \
-\"questions\" to ask for clarification, \"done\" when finished, \"fail\" on a \
-hard error. Put your deliverable in \"content\".";
+CRITICAL: \"content\" MUST be a JSON string — never an array or object. \
+Escape newlines inside it as \\n. Use \"continue\" to pass work on, \"issues\" \
+to send findings back for a fix, \"questions\" to ask for clarification, \
+\"done\" when finished, \"fail\" on a hard error. Put your full deliverable \
+text in \"content\".";
 
 /// Loop-back context carried into a role when a back-edge fires.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -113,7 +115,13 @@ where
             temperature: DEFAULT_TEMPERATURE,
         })
         .await?;
-    let output = parse_role_output(&text)?;
+    let output = parse_role_output(&text).inspect_err(|_error| {
+        // Write the raw model response to a debug artifact so the operator can
+        // inspect what the model actually returned when parsing fails.
+        if params.role.output.is_some() {
+            let _ = store.write_artifact(params.run, "raw_response.txt", &text);
+        }
+    })?;
 
     // Write the artifact first (even when empty) so a later tool failure still
     // leaves the deliverable on disk for inspection, and propagate write errors.
@@ -189,13 +197,24 @@ fn user_prompt(context: &RoleContext, artifacts: &[(String, String)], tool_outpu
     parts.join("\n\n")
 }
 
-/// Parse a model reply into a [`RoleOutput`], tolerating markdown fences and
-/// surrounding prose.
+/// Parse a model reply into a [`RoleOutput`], tolerating markdown fences,
+/// surrounding prose, and common model JSON mistakes (literal newlines in
+/// strings, non-string `content` fields, trailing commas).
 fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
     let json = extract_json_object(text)?;
-    serde_json::from_str::<RoleOutput>(&json).map_err(|error| {
-        ArtifactError::invalid("role output", format!("not a valid role envelope: {error}")).into()
-    })
+    // Fast path: strict parse.
+    match serde_json::from_str::<RoleOutput>(&json) {
+        Ok(output) => Ok(output),
+        Err(_) => {
+            // Slow path: parse as raw Value, coerce content to string, retry.
+            let value = sanitize_json_value(&json)?;
+            let repaired = serde_json::to_string(&value).unwrap_or(json.clone());
+            serde_json::from_str::<RoleOutput>(&repaired).map_err(|error| {
+                ArtifactError::invalid("role output", format!("not a valid role envelope: {error}"))
+                    .into()
+            })
+        }
+    }
 }
 
 /// Extract the outermost JSON object from a model reply.
@@ -209,16 +228,150 @@ fn extract_json_object(text: &str) -> Result<String, Error> {
     if serde_json::from_str::<serde_json::Value>(stripped).is_ok() {
         return Ok(stripped.to_string());
     }
-    let start = stripped
-        .find('{')
-        .ok_or_else(|| invalid_envelope("model did not return a JSON object"))?;
-    let end = stripped
-        .rfind('}')
-        .ok_or_else(|| invalid_envelope("model did not return a JSON object"))?;
-    if end <= start {
-        return Err(invalid_envelope("model did not return a JSON object"));
+    // Try sanitizing raw newlines before giving up on the fenced block.
+    let sanitized = sanitize_string_literals(stripped);
+    if serde_json::from_str::<serde_json::Value>(&sanitized).is_ok() {
+        return Ok(sanitized);
     }
-    Ok(stripped[start..=end].to_string())
+    // Find the first `{` and track brace depth (respecting strings) to find
+    // the matching `}`. This handles trailing text after the JSON object.
+    let extracted = extract_balanced_object(&sanitized)?;
+    if serde_json::from_str::<serde_json::Value>(&extracted).is_ok() {
+        return Ok(extracted);
+    }
+    Ok(extracted)
+}
+
+/// Find the first `{` and return the substring through the matching `}`,
+/// tracking brace depth and skipping over string literals.
+fn extract_balanced_object(text: &str) -> Result<String, Error> {
+    let chars: Vec<char> = text.chars().collect();
+    let start = chars
+        .iter()
+        .position(|&c| c == '{')
+        .ok_or_else(|| invalid_envelope("model did not return a JSON object"))?;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &c) in chars.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            continue;
+        }
+        if c == '{' {
+            depth += 1;
+        } else if c == '}' {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(chars[start..=i].iter().collect());
+            }
+        }
+    }
+    Err(invalid_envelope("model did not return a JSON object"))
+}
+
+/// Parse JSON into a `Value`, repairing common model mistakes: literal
+/// newlines inside strings, trailing commas, and non-string `content` fields.
+fn sanitize_json_value(json: &str) -> Result<serde_json::Value, Error> {
+    let repaired = sanitize_string_literals(json);
+    let mut value: serde_json::Value = serde_json::from_str(&repaired).map_err(|e| {
+        invalid_envelope(&format!(
+            "not a valid role envelope: {e} (raw response: {json:.500})"
+        ))
+    })?;
+    // Coerce `content` to a string if the model put an array/object/number there.
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(content) = obj.get("content") {
+            if !content.is_string() {
+                let text = match content {
+                    serde_json::Value::Null => String::new(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
+                };
+                obj.insert("content".into(), serde_json::Value::String(text));
+            }
+        }
+    }
+    Ok(value)
+}
+
+/// Replace literal newlines, tabs, and carriage returns inside JSON string
+/// values with their escaped equivalents, and strip trailing commas before
+/// closing braces/brackets. Leaves non-string content untouched.
+fn sanitize_string_literals(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            if escaped {
+                out.push(c);
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                out.push(c);
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if c == '"' {
+                out.push(c);
+                in_string = false;
+                i += 1;
+                continue;
+            }
+            // Replace literal control chars with escapes.
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push(c),
+            }
+            i += 1;
+        } else {
+            if c == '"' {
+                in_string = true;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            // Strip trailing commas before } or ].
+            if c == ',' {
+                // Look ahead past whitespace.
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                    i += 1; // skip the comma
+                    continue;
+                }
+            }
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn invalid_envelope(reason: &str) -> Error {
@@ -468,5 +621,116 @@ mod tests {
         let prompt = user_prompt(&ctx, &[], "");
         assert!(prompt.contains("Clarifications:"), "{prompt}");
         assert!(prompt.contains("A: 8080"), "{prompt}");
+    }
+
+    // --- Beta fix tests: JSON sanitization, content coercion, debug artifact ---
+
+    #[test]
+    fn parse_coerces_array_content_to_string() {
+        // Model puts an array in content instead of a string.
+        let raw = r#"{"verdict":"continue","content":[{"a":1,"b":2}]}"#;
+        let output = parse_role_output(raw).expect("coerced");
+        assert_eq!(output.verdict, Verdict::Continue);
+        assert!(
+            output.content.contains("\"a\":1"),
+            "content should contain serialized array: {}",
+            output.content
+        );
+    }
+
+    #[test]
+    fn parse_coerces_object_content_to_string() {
+        let raw = r#"{"verdict":"done","content":{"note":"hello"}}"#;
+        let output = parse_role_output(raw).expect("coerced");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert!(
+            output.content.contains("hello"),
+            "content should contain the object text: {}",
+            output.content
+        );
+    }
+
+    #[test]
+    fn parse_repairs_literal_newlines_in_strings() {
+        // Model puts literal newlines inside the content string instead of \n.
+        let raw = "{\"verdict\":\"done\",\"content\":\"line one\nline two\"}";
+        let output = parse_role_output(raw).expect("repaired");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert!(
+            output.content.contains("line one"),
+            "content should preserve text: {}",
+            output.content
+        );
+        assert!(
+            output.content.contains("line two"),
+            "content should preserve text: {}",
+            output.content
+        );
+    }
+
+    #[test]
+    fn parse_strips_trailing_commas() {
+        let raw = r#"{"verdict":"done","content":"ok",}"#;
+        let output = parse_role_output(raw).expect("trailing comma stripped");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_preserves_escaped_newlines_in_strings() {
+        // Properly escaped \n should survive sanitization unchanged.
+        let raw = r#"{"verdict":"done","content":"line1\nline2"}"#;
+        let output = parse_role_output(raw).expect("valid json");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn execute_writes_raw_response_on_parse_failure() {
+        let client = ScriptedModelClient::new();
+        client.push_text("totally not json at all");
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/raw");
+        let role = role(Some("01_brief.md"));
+        let ctx = context();
+        let _ = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await;
+        // The raw response should be written for inspection.
+        let raw = store
+            .read_artifact(run, "raw_response.txt")
+            .expect("raw response written");
+        assert!(raw.contains("totally not json"), "{raw}");
+    }
+
+    #[test]
+    fn output_contract_says_content_must_be_string() {
+        assert!(
+            OUTPUT_CONTRACT.contains("MUST be a JSON string"),
+            "contract should enforce string content"
+        );
+    }
+
+    #[test]
+    fn parse_handles_trailing_text_after_json() {
+        // Model puts valid JSON followed by extra prose.
+        let raw = r#"{"verdict":"done","content":"ok"} This is extra text after the JSON."#;
+        let output = parse_role_output(raw).expect("trailing text ignored");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_handles_trailing_text_with_braces() {
+        // Trailing text contains } which must not confuse extraction.
+        let raw = r#"{"verdict":"done","content":"ok"} here is a } brace"#;
+        let output = parse_role_output(raw).expect("balanced extraction");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
     }
 }
