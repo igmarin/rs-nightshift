@@ -245,11 +245,29 @@ pub(crate) fn is_secret_path(file: &str) -> bool {
         return false;
     };
     let lower = name.to_ascii_lowercase();
-    lower == ".env"
-        || lower.starts_with(".env.")
-        || lower.ends_with(".pem")
+    // Exact-match credential files.
+    const SECRET_NAMES: &[&str] = &[
+        ".env",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        "credentials.json",
+        "service-account.json",
+    ];
+    if SECRET_NAMES.contains(&lower.as_str()) || lower.starts_with(".env.") {
+        return true;
+    }
+    // SSH private key filenames.
+    const SSH_KEYS: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"];
+    if SSH_KEYS.contains(&lower.as_str()) {
+        return true;
+    }
+    // Secret-bearing file extensions.
+    lower.ends_with(".pem")
         || lower.ends_with(".key")
         || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || lower.ends_with(".keystore")
 }
 
 /// Load, parse, and validate the role graph from a TOML file.
@@ -627,6 +645,13 @@ tools = ["apply-patch"]
             "deploy/.ssh/id_rsa",
             "config/.env.local",
             "certs/server.pem",
+            ".npmrc",
+            ".netrc",
+            "credentials.json",
+            "service-account.json",
+            "keys/id_ecdsa",
+            "cert.pfx",
+            "app.keystore",
         ] {
             let config: NightshiftConfig = toml::from_str(&format!(
                 r#"
@@ -648,7 +673,9 @@ tools = ["gather-context"]
 
     #[test]
     fn context_files_dot_prefix_absolute_rejected() {
-        // "./.git/config" has no ParentDir but has_root() catches the leading ./
+        // "./.git/config" — has_root() is false on Unix, but the .git
+        // component is caught by is_secret_path. On Windows, has_root()
+        // catches leading ./ paths. Either way, this must be rejected.
         let config: NightshiftConfig = toml::from_str(
             r#"
 [run]
@@ -663,7 +690,7 @@ tools = ["gather-context"]
         )
         .expect("parse");
         let err = config.validate().expect_err("dot-prefix path must fail");
-        // Either caught as absolute (has_root) or as secret path
+        // Either caught as absolute (has_root on Windows) or as secret path
         let msg = err.to_string();
         assert!(
             msg.contains("absolute") || msg.contains("secret"),

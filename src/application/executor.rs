@@ -109,7 +109,9 @@ where
                     for (file, result) in file_contents {
                         match result {
                             Ok(content) => {
-                                tool_output.push_str(&format!("### file: {file}\n{content}\n\n"));
+                                tool_output.push_str(&format!(
+                                    "### file: {file}\n<!-- begin file content -->\n{content}\n<!-- end file content -->\n\n"
+                                ));
                             }
                             Err(warning) => {
                                 tool_output.push_str(&format!("<!-- warning: {warning} -->\n\n"));
@@ -548,7 +550,7 @@ fn read_context_files(
             results.push((
                 file.clone(),
                 Ok(format!(
-                    "{content}\n<!-- truncated at {max_bytes} bytes -->"
+                    "{content}\n<!-- truncated to UTF-8 boundary, ≤ {max_bytes} bytes -->"
                 )),
             ));
         } else {
@@ -1236,7 +1238,11 @@ mod tests {
         let repo = tempfile::tempdir().expect("repo");
         // Create a .env file inside the repo (not a secret path at config
         // validation level since the symlink name is "link.html").
-        std::fs::write(repo.path().join(".env"), "API_KEY=TOP_SECRET").expect("write .env");
+        std::fs::write(
+            repo.path().join(".env"),
+            "NIGHTSHIFT_TEST_SECRET=p0ison-t0ken-value",
+        )
+        .expect("write .env");
         // Create a symlink inside the repo pointing to .env.
         #[cfg(unix)]
         {
@@ -1277,9 +1283,9 @@ mod tests {
         #[cfg(unix)]
         {
             // The symlink resolves to .env — is_secret_path on the canonical
-            // relative path must block it.
+            // relative path must block it. The sentinel value must NOT appear.
             assert!(
-                !calls[0].prompt.contains("TOP_SECRET"),
+                !calls[0].prompt.contains("p0ison-t0ken-value"),
                 "symlink to .env leaked secret: {}",
                 calls[0].prompt
             );
