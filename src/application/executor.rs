@@ -98,20 +98,22 @@ where
                 // Truncate at 8 KiB so large files don't exhaust the model's
                 // context window or cause inference timeouts.
                 const MAX_FILE_BYTES: usize = 8 * 1024;
-                let repo_root = params.repo.to_path_buf();
-                let context_files = params.role.context_files.clone();
-                let file_contents = tokio::task::spawn_blocking(move || {
-                    read_context_files(&repo_root, &context_files, MAX_FILE_BYTES)
-                })
-                .await
-                .map_err(|error| Error::Context(format!("context_files join: {error}")))?;
-                for (file, result) in file_contents {
-                    match result {
-                        Ok(content) => {
-                            tool_output.push_str(&format!("### file: {file}\n{content}\n\n"));
-                        }
-                        Err(warning) => {
-                            tool_output.push_str(&format!("<!-- warning: {warning} -->\n\n"));
+                if !params.role.context_files.is_empty() {
+                    let repo_root = params.repo.to_path_buf();
+                    let context_files = params.role.context_files.clone();
+                    let file_contents = tokio::task::spawn_blocking(move || {
+                        read_context_files(&repo_root, &context_files, MAX_FILE_BYTES)
+                    })
+                    .await
+                    .map_err(|error| Error::Context(format!("context_files join: {error}")))?;
+                    for (file, result) in file_contents {
+                        match result {
+                            Ok(content) => {
+                                tool_output.push_str(&format!("### file: {file}\n{content}\n\n"));
+                            }
+                            Err(warning) => {
+                                tool_output.push_str(&format!("<!-- warning: {warning} -->\n\n"));
+                            }
                         }
                     }
                 }
@@ -441,6 +443,9 @@ fn sanitize_filename(id: &str) -> String {
 /// Each file is canonicalized and checked against the canonical repo root to
 /// prevent symlink escapes. Content is truncated to `max_bytes` at a safe
 /// UTF-8 char boundary. Errors become warnings (the run continues).
+///
+/// Only `max_bytes + 1` bytes are read from disk (via `Read::take`), so a
+/// very large file does not exhaust memory before truncation is applied.
 fn read_context_files(
     repo_root: &Path,
     files: &[String],
@@ -483,36 +488,54 @@ fn read_context_files(
             ));
             continue;
         }
-        match std::fs::read_to_string(&canonical) {
-            Ok(content) => {
-                if content.len() > max_bytes {
-                    let end = floor_char_boundary(&content, max_bytes);
-                    results.push((
-                        file.clone(),
-                        Ok(format!(
-                            "{}\n<!-- truncated: {} bytes total -->",
-                            &content[..end],
-                            content.len()
-                        )),
-                    ));
-                } else {
-                    results.push((file.clone(), Ok(content)));
-                }
-            }
+        // Read at most max_bytes+1 bytes: the +1 lets us detect truncation
+        // without loading the entire file into memory.
+        let mut file_handle = match std::fs::File::open(&canonical) {
+            Ok(f) => f,
             Err(error) => {
                 results.push((file.clone(), Err(format!("could not read {file}: {error}"))));
+                continue;
             }
+        };
+        use std::io::Read;
+        let mut buf = Vec::with_capacity(max_bytes + 1);
+        if let Err(error) = file_handle
+            .by_ref()
+            .take((max_bytes + 1) as u64)
+            .read_to_end(&mut buf)
+        {
+            results.push((file.clone(), Err(format!("could not read {file}: {error}"))));
+            continue;
+        }
+        let is_truncated = buf.len() > max_bytes;
+        if is_truncated {
+            // Truncate at a safe UTF-8 char boundary.
+            let end = floor_char_boundary_bytes(&buf, max_bytes);
+            buf.truncate(end);
+            let content = String::from_utf8_lossy(&buf);
+            results.push((
+                file.clone(),
+                Ok(format!(
+                    "{content}\n<!-- truncated at {max_bytes} bytes -->"
+                )),
+            ));
+        } else {
+            let content = String::from_utf8_lossy(&buf);
+            results.push((file.clone(), Ok(content.into_owned())));
         }
     }
     results
 }
 
-/// Find the largest byte index `<= max_bytes` that is a UTF-8 char boundary.
-fn floor_char_boundary(s: &str, mut max_bytes: usize) -> usize {
-    if max_bytes >= s.len() {
-        return s.len();
+/// Find the largest byte index `<= max_bytes` that is a UTF-8 char boundary,
+/// working on raw bytes (avoids needing a valid &str).
+fn floor_char_boundary_bytes(buf: &[u8], mut max_bytes: usize) -> usize {
+    if max_bytes >= buf.len() {
+        return buf.len();
     }
-    while !s.is_char_boundary(max_bytes) {
+    // A UTF-8 char boundary is a byte that is NOT a continuation byte
+    // (continuation bytes have the top bits 10xxxxxx, i.e. 0x80..=0xBF).
+    while max_bytes > 0 && (buf[max_bytes] & 0xC0) == 0x80 {
         max_bytes -= 1;
     }
     max_bytes
@@ -1065,9 +1088,10 @@ mod tests {
     #[tokio::test]
     async fn execute_truncates_multibyte_utf8_without_panic() {
         let repo = tempfile::tempdir().expect("repo");
-        // "é" is 2 bytes in UTF-8. 4097 chars = 8194 bytes, so the 8192-byte
-        // cutoff lands mid-character (byte 8192 is the first byte of "é").
-        let big_content = "é".repeat(4097);
+        // "中" is 3 bytes in UTF-8. 2731 chars = 8193 bytes, so the 8192-byte
+        // cutoff lands mid-character (byte 8192 is the 2nd byte of the 2731st
+        // "中"). This must not panic.
+        let big_content = "中".repeat(2731);
         std::fs::write(repo.path().join("multi.html"), &big_content).expect("write");
 
         let client = ScriptedModelClient::new();
@@ -1171,12 +1195,13 @@ mod tests {
     fn floor_char_boundary_handles_multibyte() {
         // "é" is 2 bytes; "中" is 3 bytes.
         let s = "é中";
-        assert_eq!(floor_char_boundary(s, 0), 0);
-        assert_eq!(floor_char_boundary(s, 1), 0); // mid-é → back to 0
-        assert_eq!(floor_char_boundary(s, 2), 2); // end of é
-        assert_eq!(floor_char_boundary(s, 3), 2); // mid-中 → back to 2
-        assert_eq!(floor_char_boundary(s, 4), 2); // mid-中 → back to 2
-        assert_eq!(floor_char_boundary(s, 5), 5); // end of 中
-        assert_eq!(floor_char_boundary(s, 100), 5); // beyond len → len
+        let buf = s.as_bytes();
+        assert_eq!(floor_char_boundary_bytes(buf, 0), 0);
+        assert_eq!(floor_char_boundary_bytes(buf, 1), 0); // mid-é → back to 0
+        assert_eq!(floor_char_boundary_bytes(buf, 2), 2); // end of é
+        assert_eq!(floor_char_boundary_bytes(buf, 3), 2); // mid-中 → back to 2
+        assert_eq!(floor_char_boundary_bytes(buf, 4), 2); // mid-中 → back to 2
+        assert_eq!(floor_char_boundary_bytes(buf, 5), 5); // end of 中
+        assert_eq!(floor_char_boundary_bytes(buf, 100), 5); // beyond len → len
     }
 }

@@ -172,7 +172,15 @@ impl NightshiftConfig {
                 }
             }
         }
+        const MAX_CONTEXT_FILES: usize = 10;
         for role in &self.roles {
+            if role.context_files.len() > MAX_CONTEXT_FILES {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} declares {} context_files entries; limit is {MAX_CONTEXT_FILES}",
+                    role.id,
+                    role.context_files.len()
+                )));
+            }
             for file in &role.context_files {
                 let path = std::path::Path::new(file);
                 if file.is_empty() {
@@ -196,6 +204,14 @@ impl NightshiftConfig {
                         role.id, file
                     )));
                 }
+                if is_secret_path(file) {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} context_files entry {:?} looks like a secret-bearing \
+                         file (.env, *.pem, *.key, .git/config, etc.) — refusing to \
+                         inject potentially sensitive content into the model prompt",
+                        role.id, file
+                    )));
+                }
             }
             if !role.context_files.is_empty() && !role.tools.iter().any(|t| t == "gather-context") {
                 return Err(Error::RoleGraph(format!(
@@ -208,6 +224,24 @@ impl NightshiftConfig {
         }
         Ok(())
     }
+}
+
+/// Reject file paths that commonly hold secrets or credentials.
+fn is_secret_path(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    if lower == ".env" || lower.starts_with(".env.") {
+        return true;
+    }
+    if lower.ends_with(".pem") || lower.ends_with(".key") || lower.ends_with(".p12") {
+        return true;
+    }
+    if lower == ".git/config" || lower == ".git/credentials" {
+        return true;
+    }
+    if lower == ".ssh/id_rsa" || lower == ".ssh/id_ed25519" {
+        return true;
+    }
+    false
 }
 
 /// Load, parse, and validate the role graph from a TOML file.
@@ -570,5 +604,57 @@ tools = ["apply-patch"]
             .validate()
             .expect_err("context_files without gather-context must fail");
         assert!(err.to_string().contains("gather-context"), "{err}");
+    }
+
+    #[test]
+    fn context_files_secret_paths_rejected() {
+        for secret in [
+            ".env",
+            "config.pem",
+            "secret.key",
+            ".git/config",
+            ".ssh/id_rsa",
+        ] {
+            let config: NightshiftConfig = toml::from_str(&format!(
+                r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["{secret}"]
+tools = ["gather-context"]
+"#
+            ))
+            .expect("parse");
+            let err = config.validate().expect_err("secret path must fail");
+            assert!(err.to_string().contains("secret"), "for {secret}: {err}");
+        }
+    }
+
+    #[test]
+    fn context_files_too_many_entries_rejected() {
+        let entries: Vec<String> = (0..11).map(|i| format!("file{i}.html")).collect();
+        let entries_toml = entries
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config: NightshiftConfig = toml::from_str(&format!(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = [{entries_toml}]
+tools = ["gather-context"]
+"#
+        ))
+        .expect("parse");
+        let err = config.validate().expect_err("too many entries must fail");
+        assert!(err.to_string().contains("limit"), "{err}");
     }
 }
