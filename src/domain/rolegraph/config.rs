@@ -161,7 +161,7 @@ impl NightshiftConfig {
                 }
             }
         }
-        const KNOWN_TOOLS: [&str; 3] = ["gather-context", "run-tests", "apply-patch"];
+        const KNOWN_TOOLS: [&str; 4] = ["gather-context", "run-tests", "apply-patch", "write-file"];
         for role in &self.roles {
             for tool in &role.tools {
                 if !KNOWN_TOOLS.contains(&tool.as_str()) {

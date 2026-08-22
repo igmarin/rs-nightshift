@@ -67,6 +67,50 @@ impl CapabilityRunner {
             })??;
         Ok("patch applied".to_string())
     }
+
+    /// Write `input` as full file content to `repo`. The input must start
+    /// with a header line `file: <path>` followed by the file content.
+    /// This is a fallback for small models that can't generate proper diffs.
+    async fn write_file(&self, repo: &Path, input: &str) -> Result<String, Error> {
+        let repo = repo.to_path_buf();
+        let content = input.to_string();
+        tokio::task::spawn_blocking(move || {
+            // Parse the "file: <path>" header line
+            let mut lines = content.lines();
+            let header = lines
+                .next()
+                .ok_or_else(|| ArtifactError::artifact("write-file: empty input"))?;
+            let path = header
+                .strip_prefix("file: ")
+                .ok_or_else(|| {
+                    ArtifactError::artifact("write-file: input must start with 'file: <path>'")
+                })?
+                .trim();
+            // Validate the path is repo-relative and safe
+            let file_path = repo.join(path);
+            let canonical = file_path
+                .canonicalize()
+                .map_err(|e| ArtifactError::artifact(format!("write-file: invalid path: {e}")))?;
+            let repo_canonical = repo
+                .canonicalize()
+                .map_err(|e| ArtifactError::artifact(format!("write-file: invalid repo: {e}")))?;
+            if !canonical.starts_with(&repo_canonical) {
+                return Err(Error::from(ArtifactError::artifact(
+                    "write-file: path escapes repo root",
+                )));
+            }
+            // Write the remaining content (everything after the header line)
+            let body = content.lines().skip(1).collect::<Vec<_>>().join("\n");
+            let body_len = body.len();
+            std::fs::write(&file_path, body)
+                .map_err(|e| ArtifactError::artifact(format!("write-file: {e}")))?;
+            Ok(format!("wrote {path} ({body_len} bytes)"))
+        })
+        .await
+        .map_err(|error| {
+            Error::from(ArtifactError::artifact(format!("write-file join: {error}")))
+        })?
+    }
 }
 
 impl Default for CapabilityRunner {
@@ -78,11 +122,12 @@ impl Default for CapabilityRunner {
 
 #[async_trait::async_trait]
 impl ToolRunner for CapabilityRunner {
-    /// Dispatch `run-tests` or `apply-patch` for `repo`.
+    /// Dispatch `run-tests`, `apply-patch`, or `write-file` for `repo`.
     async fn run(&self, tool: &str, repo: &Path, input: &str) -> Result<String, Error> {
         match tool {
             "run-tests" => self.run_tests(repo).await,
             "apply-patch" => self.apply_patch(repo, input).await,
+            "write-file" => self.write_file(repo, input).await,
             other => Err(Error::from(ArtifactError::artifact(format!(
                 "unknown tool {other:?}"
             )))),

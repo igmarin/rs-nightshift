@@ -90,7 +90,10 @@ where
                 let text = context_provider
                     .gather(params.repo, &params.context.goal)
                     .await?;
-                if !text.is_empty() {
+                // Suppress output that is only CodeGraph status noise with
+                // no actual code findings — it confuses small models into
+                // ignoring the output contract.
+                if !text.is_empty() && !is_empty_context(&text) {
                     tool_output.push_str(&format!("### repo context\n{text}\n\n"));
                 }
                 // Inject raw file content for files the role declared
@@ -163,12 +166,17 @@ where
         None => None,
     };
 
-    // Post-tools: apply the patch only for verdicts that carry a deliverable.
+    // Post-tools: apply the patch or write the file only for verdicts that
+    // carry a deliverable.
     if matches!(output.verdict, Verdict::Continue | Verdict::Done) {
         for tool in &params.role.tools {
             if tool == "apply-patch" {
                 tools
                     .run("apply-patch", params.repo, &output.content)
+                    .await?;
+            } else if tool == "write-file" {
+                tools
+                    .run("write-file", params.repo, &output.content)
                     .await?;
             }
         }
@@ -255,13 +263,28 @@ fn extract_json_object(text: &str) -> Result<String, Error> {
         .or_else(|| trimmed.strip_prefix("```"))
         .unwrap_or(trimmed);
     let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
-    if serde_json::from_str::<serde_json::Value>(stripped).is_ok() {
-        return Ok(stripped.to_string());
+    // Repair YAML block scalars (| or >) that small models emit instead of
+    // JSON strings for multi-line content fields.
+    let repaired = repair_yaml_block_scalars(stripped);
+    if serde_json::from_str::<serde_json::Value>(&repaired).is_ok() {
+        return Ok(repaired);
     }
     // Try sanitizing raw newlines before giving up on the fenced block.
-    let sanitized = sanitize_string_literals(stripped);
+    let sanitized = sanitize_string_literals(&repaired);
     if serde_json::from_str::<serde_json::Value>(&sanitized).is_ok() {
         return Ok(sanitized);
+    }
+    // Try escaping unescaped quotes inside string values (common when models
+    // embed HTML attributes like href="..." inside JSON content strings).
+    let quote_fixed = escape_unescaped_quotes_in_strings(&sanitized);
+    if serde_json::from_str::<serde_json::Value>(&quote_fixed).is_ok() {
+        return Ok(quote_fixed);
+    }
+    // Try closing truncated JSON (model hit max_tokens before closing the
+    // string and object). Append missing closing quotes and braces.
+    let closed = close_truncated_json(&quote_fixed);
+    if serde_json::from_str::<serde_json::Value>(&closed).is_ok() {
+        return Ok(closed);
     }
     // Find the first `{` and track brace depth (respecting strings) to find
     // the matching `}`. This handles trailing text after the JSON object.
@@ -424,6 +447,213 @@ fn escape_control_char(c: char) -> String {
 
 fn invalid_envelope(reason: &str) -> Error {
     ArtifactError::invalid("role output", reason.to_string()).into()
+}
+
+/// Repair YAML block scalars (`|` or `>`) that small models emit instead of
+/// JSON strings for multi-line content fields.
+///
+/// Converts patterns like:
+/// ```text
+/// "content": |
+///   ### Change 1
+///   - **Current:** "old"
+/// ```
+/// to a proper JSON string:
+/// ```text
+/// "content": "### Change 1\n- **Current:** \"old\""
+/// ```
+fn repair_yaml_block_scalars(input: &str) -> String {
+    // Only attempt repair if the input looks like it has a YAML block scalar.
+    if !input.contains("\"content\": |") && !input.contains("\"content\": >") {
+        return input.to_string();
+    }
+    let mut result = String::with_capacity(input.len());
+    let lines: Vec<&str> = input.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        // Detect "content": | or "content": > (with optional trailing whitespace)
+        let trimmed = line.trim_end();
+        if trimmed.ends_with('|') || trimmed.ends_with('>') {
+            // Check if this is a content field with a block scalar
+            let before = trimmed[..trimmed.len() - 1].trim_end();
+            if before.ends_with("\"content\":") {
+                // Collect indented lines that follow
+                let mut block_lines = Vec::new();
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let next = lines[j];
+                    // Block scalar content is indented (starts with spaces)
+                    // or is a blank line. Stop at the first non-indented,
+                    // non-blank line.
+                    if next.trim().is_empty() {
+                        block_lines.push("");
+                        j += 1;
+                    } else if next.starts_with(' ') || next.starts_with('\t') {
+                        // Strip the common indent (one level)
+                        block_lines.push(next.trim_start());
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                // Trim trailing blank lines
+                while block_lines.last().is_some_and(|l| l.is_empty()) {
+                    block_lines.pop();
+                }
+                // Join with \n and escape for JSON
+                let content = block_lines.join("\n");
+                let escaped = escape_json_string(&content);
+                result.push_str("\"content\": \"");
+                result.push_str(&escaped);
+                result.push('"');
+                i = j;
+                continue;
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+        i += 1;
+    }
+    result.trim_end().to_string()
+}
+
+/// Escape a string for use inside a JSON string value.
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Heuristic repair: escape unescaped double quotes inside JSON string values.
+///
+/// Small models often embed HTML with attributes like `href="/about"` inside
+/// JSON content strings without escaping the inner quotes. This function
+/// walks the input tracking string boundaries (respecting `\"` escapes) and
+/// when it detects an unescaped `"` that is followed by characters that don't
+/// look like JSON structure (`,`, `}`, `]`, `:`, whitespace), it escapes it.
+///
+/// This is a best-effort heuristic — it may not fix all cases, but it handles
+/// the common HTML-in-JSON pattern.
+fn escape_unescaped_quotes_in_strings(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if c == '"' {
+                // Check if this quote ends the string or is an unescaped
+                // quote inside the string. If the next non-whitespace char
+                // is a JSON structural char (, } ] :), it ends the string.
+                // Otherwise, it's likely an unescaped quote (e.g., href=").
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                let next_structural =
+                    matches!(chars.get(j), Some(',') | Some('}') | Some(']') | Some(':'));
+                if next_structural {
+                    in_string = false;
+                    out.push(c);
+                } else {
+                    // Unescaped quote inside string — escape it
+                    out.push_str("\\\"");
+                }
+                i += 1;
+                continue;
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Heuristic repair: close truncated JSON that was cut off by max_tokens.
+///
+/// Models sometimes hit the token limit before closing all strings and
+/// objects. This function tracks open strings and braces, then appends
+/// the missing closing characters.
+fn close_truncated_json(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth: i32 = 0;
+    for &c in &chars {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+        } else if c == '{' || c == '[' {
+            depth += 1;
+        } else if c == '}' || c == ']' {
+            depth -= 1;
+        }
+    }
+    let mut result = input.to_string();
+    if in_string {
+        result.push('"');
+    }
+    while depth > 0 {
+        result.push('}');
+        depth -= 1;
+    }
+    result
+}
+
+/// Check if the CodeGraph output contains only status noise with no actual
+/// code findings. Suppresses output like "No relevant code found" and
+/// CodeGraph status tables for empty repos.
+fn is_empty_context(text: &str) -> bool {
+    text.contains("No relevant code found")
+        && !text.contains("fn ")
+        && !text.contains("struct ")
+        && !text.contains("class ")
+        && !text.contains("def ")
+        && !text.contains("```")
 }
 
 /// Reduce a role id to a safe filename component: keep `[A-Za-z0-9_-]`,
@@ -710,6 +940,70 @@ mod tests {
         .await
         .expect("execute");
         assert_eq!(outcome.output.verdict, Verdict::Done);
+    }
+
+    #[tokio::test]
+    async fn execute_repairs_yaml_block_scalar_content() {
+        let client = ScriptedModelClient::new();
+        // Model emits YAML | block scalar instead of JSON string
+        client.push_text(
+            r#"{
+  "verdict": "continue",
+  "summary": "Brief",
+  "findings": [],
+  "questions": [],
+  "block_reason": "none",
+  "content": |
+    ### Change 1: Headline
+    - **Current:** "old"
+    - **Proposed:** "new"
+}"#,
+        );
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role(Some("01_brief.md"));
+        let ctx = context();
+        let outcome = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        assert_eq!(outcome.output.verdict, Verdict::Continue);
+        let artifact = store.read_artifact(run, "01_brief.md").expect("artifact");
+        assert!(artifact.contains("### Change 1"), "{artifact}");
+        assert!(artifact.contains("**Current:**"), "{artifact}");
+    }
+
+    #[tokio::test]
+    async fn execute_repairs_unescaped_quotes_in_content() {
+        let client = ScriptedModelClient::new();
+        // Model embeds HTML with unescaped quotes in href attribute
+        client.push_text(
+            r#"{"verdict":"continue","summary":"Patch","findings":[],"questions":[],"block_reason":"none","content":"diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,6 +1,6 @@\n <html>\n <body>\n-<h1>Welcome</h1>\n+<h1>Hello</h1>\n <a href="/about">About</a>\n </body>\n </html>"}"#,
+        );
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role(Some("02_patch.patch"));
+        let ctx = context();
+        let outcome = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        assert_eq!(outcome.output.verdict, Verdict::Continue);
+        let artifact = store
+            .read_artifact(run, "02_patch.patch")
+            .expect("artifact");
+        assert!(artifact.contains("href"), "{artifact}");
+        assert!(artifact.contains("/about"), "{artifact}");
     }
 
     #[tokio::test]
