@@ -102,7 +102,6 @@ fn build_ollama(
     Ok(Box::new(OllamaAdapter::with_options(
         inner,
         options.think,
-        options.think_explicitly_false,
         options.temperature,
         options.max_tokens,
     )))

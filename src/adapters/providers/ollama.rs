@@ -24,11 +24,6 @@ pub struct OllamaAdapter {
     inner: OllamaClient,
     /// Whether the `:think` model-tag suffix should be applied.
     think: bool,
-    /// Whether `think` was explicitly set to `false` (vs absent).
-    ///
-    /// When `true`, the adapter uses Ollama's native `/api/chat` endpoint
-    /// with `think: false` to actively disable qwen3's reasoning mode.
-    think_explicitly_false: bool,
     /// Overrides the request temperature when set.
     temperature: Option<f32>,
     /// Requested max output tokens.
@@ -42,29 +37,22 @@ impl OllamaAdapter {
         Self {
             inner,
             think,
-            think_explicitly_false: false,
             temperature: None,
             max_tokens: None,
         }
     }
 
     /// Adapter over `inner` with an explicit think flag and per-role options.
-    ///
-    /// `think_explicitly_false` should be `true` when the role's options
-    /// contain `think = false` (as opposed to `think` being absent). This
-    /// triggers the native `/api/chat` path with `think: false`.
     #[must_use]
     pub fn with_options(
         inner: OllamaClient,
         think: bool,
-        think_explicitly_false: bool,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Self {
         Self {
             inner,
             think,
-            think_explicitly_false,
             temperature,
             max_tokens,
         }
@@ -74,22 +62,6 @@ impl OllamaAdapter {
 #[async_trait]
 impl ModelClient for OllamaAdapter {
     async fn generate(&self, request: &GenerateRequest) -> Result<String, Error> {
-        // When think is explicitly false, use the native /api/chat endpoint
-        // with think:false to actively disable qwen3's reasoning mode. This
-        // cuts token generation by ~2x compared to the OpenAI-compatible
-        // endpoint (which has no think parameter).
-        if self.think_explicitly_false {
-            let temp = self.temperature.unwrap_or(request.temperature);
-            return self
-                .inner
-                .chat_no_think(
-                    &request.model,
-                    request.system.as_deref(),
-                    &request.prompt,
-                    temp,
-                )
-                .await;
-        }
         let model = resolve_ollama_model(&request.model, self.think);
         let llm_request = LLMRequest {
             model: Some(model),
@@ -196,7 +168,7 @@ mod tests {
             .await;
 
         let inner = OllamaClient::new(server.uri()).expect("client");
-        let client = OllamaAdapter::with_options(inner, false, false, Some(0.3), Some(256));
+        let client = OllamaAdapter::with_options(inner, false, Some(0.3), Some(256));
         client
             .generate(&request("qwen2.5-coder:7b"))
             .await
