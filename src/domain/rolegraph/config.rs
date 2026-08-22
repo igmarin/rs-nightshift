@@ -230,12 +230,16 @@ impl NightshiftConfig {
 ///
 /// Checks path components (not just the full string) so that nested paths
 /// like `sub/.env`, `app/.git/config`, and `deploy/.ssh/id_rsa` are caught.
+/// Sensitive directory components include `.git`, `.ssh`, `.env`, `.aws`,
+/// `.azure`, and `.kube`.
 pub(crate) fn is_secret_path(file: &str) -> bool {
     let path = std::path::Path::new(file);
-    // Reject any entry containing a `.git` or `.ssh` component.
+    // Reject any entry containing a sensitive directory component.
     let has_sensitive_dir = path.components().any(|c| {
         matches!(c, std::path::Component::Normal(name)
-            if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".ssh"))
+            if matches!(name.to_str(), Some(n)
+                if [".git", ".ssh", ".env", ".aws", ".azure", ".kube"]
+                    .contains(&n.to_ascii_lowercase().as_str())))
     });
     if has_sensitive_dir {
         return true;
@@ -652,6 +656,10 @@ tools = ["apply-patch"]
             "keys/id_ecdsa",
             "cert.pfx",
             "app.keystore",
+            "foo/.env/bar",
+            "config/.aws/credentials",
+            "deploy/.kube/config",
+            "ci/.azure/credentials",
         ] {
             let config: NightshiftConfig = toml::from_str(&format!(
                 r#"
