@@ -197,6 +197,14 @@ impl NightshiftConfig {
                     )));
                 }
             }
+            if !role.context_files.is_empty() && !role.tools.iter().any(|t| t == "gather-context") {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} declares context_files but does not include \
+                     the \"gather-context\" tool — context_files are only \
+                     injected during gather-context",
+                    role.id
+                )));
+            }
         }
         Ok(())
     }
@@ -536,9 +544,31 @@ id = "dev"
 provider = "ollama"
 model = "phi4"
 context_files = ["public/index.html"]
+tools = ["gather-context"]
 "#,
         )
         .expect("parse");
         config.validate().expect("valid relative path should pass");
+    }
+
+    #[test]
+    fn context_files_without_gather_context_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["public/index.html"]
+tools = ["apply-patch"]
+"#,
+        )
+        .expect("parse");
+        let err = config
+            .validate()
+            .expect_err("context_files without gather-context must fail");
+        assert!(err.to_string().contains("gather-context"), "{err}");
     }
 }

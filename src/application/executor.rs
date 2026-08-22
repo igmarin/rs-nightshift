@@ -98,26 +98,20 @@ where
                 // Truncate at 8 KiB so large files don't exhaust the model's
                 // context window or cause inference timeouts.
                 const MAX_FILE_BYTES: usize = 8 * 1024;
-                for file in &params.role.context_files {
-                    let path = params.repo.join(file);
-                    match std::fs::read_to_string(&path) {
+                let repo_root = params.repo.to_path_buf();
+                let context_files = params.role.context_files.clone();
+                let file_contents = tokio::task::spawn_blocking(move || {
+                    read_context_files(&repo_root, &context_files, MAX_FILE_BYTES)
+                })
+                .await
+                .map_err(|error| Error::Context(format!("context_files join: {error}")))?;
+                for (file, result) in file_contents {
+                    match result {
                         Ok(content) => {
-                            if content.len() > MAX_FILE_BYTES {
-                                tool_output.push_str(&format!(
-                                    "### file: {file} (truncated to {MAX_FILE_BYTES} bytes)\n{}\
-                                     \n<!-- truncated: {} bytes total -->\n\n",
-                                    &content[..MAX_FILE_BYTES],
-                                    content.len()
-                                ));
-                            } else {
-                                tool_output.push_str(&format!("### file: {file}\n{content}\n\n"));
-                            }
+                            tool_output.push_str(&format!("### file: {file}\n{content}\n\n"));
                         }
-                        Err(error) => {
-                            eprintln!(
-                                "warning: context_files: could not read {}: {error}",
-                                path.display()
-                            );
+                        Err(warning) => {
+                            tool_output.push_str(&format!("<!-- warning: {warning} -->\n\n"));
                         }
                     }
                 }
@@ -440,6 +434,88 @@ fn sanitize_filename(id: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Read `context_files` from `repo_root`, returning `(file, result)` pairs.
+///
+/// Each file is canonicalized and checked against the canonical repo root to
+/// prevent symlink escapes. Content is truncated to `max_bytes` at a safe
+/// UTF-8 char boundary. Errors become warnings (the run continues).
+fn read_context_files(
+    repo_root: &Path,
+    files: &[String],
+    max_bytes: usize,
+) -> Vec<(String, Result<String, String>)> {
+    let canonical_root = match repo_root.canonicalize() {
+        Ok(p) => p,
+        Err(error) => {
+            return files
+                .iter()
+                .map(|f| {
+                    (
+                        f.clone(),
+                        Err(format!(
+                            "could not canonicalize repo root {}: {error}",
+                            repo_root.display()
+                        )),
+                    )
+                })
+                .collect();
+        }
+    };
+
+    let mut results = Vec::with_capacity(files.len());
+    for file in files {
+        let path = repo_root.join(file);
+        let canonical = match path.canonicalize() {
+            Ok(p) => p,
+            Err(error) => {
+                results.push((file.clone(), Err(format!("could not read {file}: {error}"))));
+                continue;
+            }
+        };
+        if !canonical.starts_with(&canonical_root) {
+            results.push((
+                file.clone(),
+                Err(format!(
+                    "context_files: {file} resolves outside the repo root (symlink escape)"
+                )),
+            ));
+            continue;
+        }
+        match std::fs::read_to_string(&canonical) {
+            Ok(content) => {
+                if content.len() > max_bytes {
+                    let end = floor_char_boundary(&content, max_bytes);
+                    results.push((
+                        file.clone(),
+                        Ok(format!(
+                            "{}\n<!-- truncated: {} bytes total -->",
+                            &content[..end],
+                            content.len()
+                        )),
+                    ));
+                } else {
+                    results.push((file.clone(), Ok(content)));
+                }
+            }
+            Err(error) => {
+                results.push((file.clone(), Err(format!("could not read {file}: {error}"))));
+            }
+        }
+    }
+    results
+}
+
+/// Find the largest byte index `<= max_bytes` that is a UTF-8 char boundary.
+fn floor_char_boundary(s: &str, mut max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+    while !s.is_char_boundary(max_bytes) {
+        max_bytes -= 1;
+    }
+    max_bytes
 }
 
 #[cfg(test)]
@@ -937,6 +1013,13 @@ mod tests {
         .expect("execute should succeed despite missing file");
 
         assert_eq!(outcome.output.verdict, Verdict::Done);
+        // The warning should appear in the prompt (reviewable), not just stderr.
+        let calls = client.calls();
+        assert!(
+            calls[0].prompt.contains("warning"),
+            "prompt should contain warning: {}",
+            &calls[0].prompt[..200]
+        );
     }
 
     #[tokio::test]
@@ -977,5 +1060,123 @@ mod tests {
             "prompt should mention truncation: {}",
             &calls[0].prompt[..200]
         );
+    }
+
+    #[tokio::test]
+    async fn execute_truncates_multibyte_utf8_without_panic() {
+        let repo = tempfile::tempdir().expect("repo");
+        // "é" is 2 bytes in UTF-8. 4097 chars = 8194 bytes, so the 8192-byte
+        // cutoff lands mid-character (byte 8192 is the first byte of "é").
+        let big_content = "é".repeat(4097);
+        std::fs::write(repo.path().join("multi.html"), &big_content).expect("write");
+
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+
+        let mut role = role_with_tools(None, &["gather-context"]);
+        role.context_files = vec!["multi.html".to_string()];
+
+        let ctx = context();
+        // Must not panic.
+        execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                run,
+                repo: repo.path(),
+                role: &role,
+                context: &ctx,
+                artifacts: &[],
+            },
+        )
+        .await
+        .expect("execute");
+
+        let calls = client.calls();
+        assert!(
+            calls[0].prompt.contains("truncated"),
+            "prompt should mention truncation: {}",
+            &calls[0].prompt[..200]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_symlink_escape_in_context_files() {
+        let repo = tempfile::tempdir().expect("repo");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret.txt"), "TOP SECRET").expect("write secret");
+        // Create a symlink inside the repo pointing outside.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.txt"),
+                repo.path().join("link.html"),
+            )
+            .expect("symlink");
+        }
+        #[cfg(not(unix))]
+        {
+            // Skip on non-Unix; just write a normal file so the test passes.
+            std::fs::write(repo.path().join("link.html"), "ok").expect("write");
+        }
+
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+
+        let mut role = role_with_tools(None, &["gather-context"]);
+        role.context_files = vec!["link.html".to_string()];
+
+        let ctx = context();
+        execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                run,
+                repo: repo.path(),
+                role: &role,
+                context: &ctx,
+                artifacts: &[],
+            },
+        )
+        .await
+        .expect("execute");
+
+        let calls = client.calls();
+        #[cfg(unix)]
+        {
+            // The symlink escape should be blocked — secret must NOT appear.
+            assert!(
+                !calls[0].prompt.contains("TOP SECRET"),
+                "symlink escape leaked secret: {}",
+                &calls[0].prompt[..300]
+            );
+            assert!(
+                calls[0].prompt.contains("warning"),
+                "prompt should contain warning for symlink: {}",
+                &calls[0].prompt[..300]
+            );
+        }
+        let _ = &calls; // suppress unused warning on non-Unix
+    }
+
+    #[test]
+    fn floor_char_boundary_handles_multibyte() {
+        // "é" is 2 bytes; "中" is 3 bytes.
+        let s = "é中";
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 1), 0); // mid-é → back to 0
+        assert_eq!(floor_char_boundary(s, 2), 2); // end of é
+        assert_eq!(floor_char_boundary(s, 3), 2); // mid-中 → back to 2
+        assert_eq!(floor_char_boundary(s, 4), 2); // mid-中 → back to 2
+        assert_eq!(floor_char_boundary(s, 5), 5); // end of 中
+        assert_eq!(floor_char_boundary(s, 100), 5); // beyond len → len
     }
 }
