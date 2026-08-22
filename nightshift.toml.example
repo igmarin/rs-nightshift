@@ -45,7 +45,11 @@ You are the Developer. Implement the brief as a patch. If the brief raises
 non-blocking questions, proceed with reasonable assumptions and note them.
 """
 output = "02_patch.patch"
-tools = ["apply-patch"]
+tools = ["gather-context", "apply-patch"]
+# context_files = ["public/index.html"]   # raw file content for non-code files
+#   - requires "gather-context" in tools
+#   - max 10 files; each truncated at 8 KiB (UTF-8-safe)
+#   - secret-bearing paths (.env, *.pem, *.key, .git/*, .ssh/*, .aws/*, .kube/*) are rejected
 on = { continue = "qa" }
 
 [[roles]]

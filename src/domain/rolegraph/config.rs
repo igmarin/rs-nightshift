@@ -75,6 +75,10 @@ pub struct RoleSpec {
     /// Code-side tools the role declares (`apply-patch`, `run-tests`, …).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Repo-relative files to read and inject as raw context (for non-code
+    /// files that `codegraph`/`graphify` don't index, e.g. HTML, CSS).
+    #[serde(default)]
+    pub context_files: Vec<String>,
     /// Verdict → target routing map.
     #[serde(default)]
     pub on: Routing,
@@ -168,8 +172,106 @@ impl NightshiftConfig {
                 }
             }
         }
+        const MAX_CONTEXT_FILES: usize = 10;
+        for role in &self.roles {
+            if role.context_files.len() > MAX_CONTEXT_FILES {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} declares {} context_files entries; limit is {MAX_CONTEXT_FILES}",
+                    role.id,
+                    role.context_files.len()
+                )));
+            }
+            for file in &role.context_files {
+                let path = std::path::Path::new(file);
+                if file.is_empty() {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} has an empty context_files entry",
+                        role.id
+                    )));
+                }
+                if path.is_absolute() || path.has_root() {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} context_files entry {:?} must be repo-relative, not absolute",
+                        role.id, file
+                    )));
+                }
+                if path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} context_files entry {:?} must not contain '..'",
+                        role.id, file
+                    )));
+                }
+                if is_secret_path(file) {
+                    return Err(Error::RoleGraph(format!(
+                        "role {:?} context_files entry {:?} looks like a secret-bearing \
+                         file (.env, *.pem, *.key, .git/config, etc.) — refusing to \
+                         inject potentially sensitive content into the model prompt",
+                        role.id, file
+                    )));
+                }
+            }
+            if !role.context_files.is_empty() && !role.tools.iter().any(|t| t == "gather-context") {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} declares context_files but does not include \
+                     the \"gather-context\" tool — context_files are only \
+                     injected during gather-context",
+                    role.id
+                )));
+            }
+        }
         Ok(())
     }
+}
+
+/// Reject file paths that commonly hold secrets or credentials.
+///
+/// Checks path components (not just the full string) so that nested paths
+/// like `sub/.env`, `app/.git/config`, and `deploy/.ssh/id_rsa` are caught.
+/// Sensitive directory components include `.git`, `.ssh`, `.env`, `.aws`,
+/// `.azure`, and `.kube`.
+pub(crate) fn is_secret_path(file: &str) -> bool {
+    let path = std::path::Path::new(file);
+    // Reject any entry containing a sensitive directory component.
+    let has_sensitive_dir = path.components().any(|c| {
+        matches!(c, std::path::Component::Normal(name)
+            if matches!(name.to_str(), Some(n)
+                if [".git", ".ssh", ".env", ".aws", ".azure", ".kube"]
+                    .contains(&n.to_ascii_lowercase().as_str())))
+    });
+    if has_sensitive_dir {
+        return true;
+    }
+    // Check the file name for secret-bearing patterns.
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    // Exact-match credential files.
+    const SECRET_NAMES: &[&str] = &[
+        ".env",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        "credentials.json",
+        "service-account.json",
+    ];
+    if SECRET_NAMES.contains(&lower.as_str()) || lower.starts_with(".env.") {
+        return true;
+    }
+    // SSH private key filenames.
+    const SSH_KEYS: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"];
+    if SSH_KEYS.contains(&lower.as_str()) {
+        return true;
+    }
+    // Secret-bearing file extensions.
+    lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || lower.ends_with(".keystore")
 }
 
 /// Load, parse, and validate the role graph from a TOML file.
@@ -405,5 +507,227 @@ model = "phi4"
         let config = load_role_graph_config_from(&example).expect("example must parse + validate");
         assert_eq!(config.run.start, "product-owner");
         assert_eq!(config.roles.len(), 3);
+    }
+
+    #[test]
+    fn context_files_parse_from_toml() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["public/index.html", "README.md"]
+"#,
+        )
+        .expect("parse");
+        let dev = &config.roles[0];
+        assert_eq!(dev.context_files, vec!["public/index.html", "README.md"]);
+    }
+
+    #[test]
+    fn context_files_default_to_empty() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+"#,
+        )
+        .expect("parse");
+        assert!(config.roles[0].context_files.is_empty());
+    }
+
+    #[test]
+    fn context_files_absolute_path_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["/etc/passwd"]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("absolute path must fail");
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn context_files_parent_dir_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["../escape.txt"]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("parent dir must fail");
+        assert!(err.to_string().contains("'..'"), "{err}");
+    }
+
+    #[test]
+    fn context_files_empty_entry_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = [""]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("empty entry must fail");
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn context_files_valid_relative_path_passes() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["public/index.html"]
+tools = ["gather-context"]
+"#,
+        )
+        .expect("parse");
+        config.validate().expect("valid relative path should pass");
+    }
+
+    #[test]
+    fn context_files_without_gather_context_rejected() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["public/index.html"]
+tools = ["apply-patch"]
+"#,
+        )
+        .expect("parse");
+        let err = config
+            .validate()
+            .expect_err("context_files without gather-context must fail");
+        assert!(err.to_string().contains("gather-context"), "{err}");
+    }
+
+    #[test]
+    fn context_files_secret_paths_rejected() {
+        for secret in [
+            ".env",
+            "config.pem",
+            "secret.key",
+            ".git/config",
+            ".ssh/id_rsa",
+            "sub/.env",
+            "app/.git/config",
+            "deploy/.ssh/id_rsa",
+            "config/.env.local",
+            "certs/server.pem",
+            ".npmrc",
+            ".netrc",
+            "credentials.json",
+            "service-account.json",
+            "keys/id_ecdsa",
+            "cert.pfx",
+            "app.keystore",
+            "foo/.env/bar",
+            "config/.aws/credentials",
+            "deploy/.kube/config",
+            "ci/.azure/credentials",
+        ] {
+            let config: NightshiftConfig = toml::from_str(&format!(
+                r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["{secret}"]
+tools = ["gather-context"]
+"#
+            ))
+            .expect("parse");
+            let err = config.validate().expect_err("secret path must fail");
+            assert!(err.to_string().contains("secret"), "for {secret}: {err}");
+        }
+    }
+
+    #[test]
+    fn context_files_dot_prefix_absolute_rejected() {
+        // "./.git/config" — has_root() is false on Unix, but the .git
+        // component is caught by is_secret_path. On Windows, has_root()
+        // catches leading ./ paths. Either way, this must be rejected.
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["./.git/config"]
+tools = ["gather-context"]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("dot-prefix path must fail");
+        // Either caught as absolute (has_root on Windows) or as secret path
+        let msg = err.to_string();
+        assert!(
+            msg.contains("absolute") || msg.contains("secret"),
+            "should reject ./.git/config: {msg}"
+        );
+    }
+
+    #[test]
+    fn context_files_too_many_entries_rejected() {
+        let entries: Vec<String> = (0..11).map(|i| format!("file{i}.html")).collect();
+        let entries_toml = entries
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config: NightshiftConfig = toml::from_str(&format!(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = [{entries_toml}]
+tools = ["gather-context"]
+"#
+        ))
+        .expect("parse");
+        let err = config.validate().expect_err("too many entries must fail");
+        assert!(err.to_string().contains("limit"), "{err}");
     }
 }
