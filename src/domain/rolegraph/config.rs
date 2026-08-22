@@ -189,7 +189,7 @@ impl NightshiftConfig {
                         role.id
                     )));
                 }
-                if path.is_absolute() {
+                if path.is_absolute() || path.has_root() {
                     return Err(Error::RoleGraph(format!(
                         "role {:?} context_files entry {:?} must be repo-relative, not absolute",
                         role.id, file
@@ -227,21 +227,29 @@ impl NightshiftConfig {
 }
 
 /// Reject file paths that commonly hold secrets or credentials.
-fn is_secret_path(file: &str) -> bool {
-    let lower = file.to_ascii_lowercase();
-    if lower == ".env" || lower.starts_with(".env.") {
+///
+/// Checks path components (not just the full string) so that nested paths
+/// like `sub/.env`, `app/.git/config`, and `deploy/.ssh/id_rsa` are caught.
+pub(crate) fn is_secret_path(file: &str) -> bool {
+    let path = std::path::Path::new(file);
+    // Reject any entry containing a `.git` or `.ssh` component.
+    let has_sensitive_dir = path.components().any(|c| {
+        matches!(c, std::path::Component::Normal(name)
+            if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".ssh"))
+    });
+    if has_sensitive_dir {
         return true;
     }
-    if lower.ends_with(".pem") || lower.ends_with(".key") || lower.ends_with(".p12") {
-        return true;
-    }
-    if lower == ".git/config" || lower == ".git/credentials" {
-        return true;
-    }
-    if lower == ".ssh/id_rsa" || lower == ".ssh/id_ed25519" {
-        return true;
-    }
-    false
+    // Check the file name for secret-bearing patterns.
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
 }
 
 /// Load, parse, and validate the role graph from a TOML file.
@@ -614,6 +622,11 @@ tools = ["apply-patch"]
             "secret.key",
             ".git/config",
             ".ssh/id_rsa",
+            "sub/.env",
+            "app/.git/config",
+            "deploy/.ssh/id_rsa",
+            "config/.env.local",
+            "certs/server.pem",
         ] {
             let config: NightshiftConfig = toml::from_str(&format!(
                 r#"
@@ -631,6 +644,31 @@ tools = ["gather-context"]
             let err = config.validate().expect_err("secret path must fail");
             assert!(err.to_string().contains("secret"), "for {secret}: {err}");
         }
+    }
+
+    #[test]
+    fn context_files_dot_prefix_absolute_rejected() {
+        // "./.git/config" has no ParentDir but has_root() catches the leading ./
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+context_files = ["./.git/config"]
+tools = ["gather-context"]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("dot-prefix path must fail");
+        // Either caught as absolute (has_root) or as secret path
+        let msg = err.to_string();
+        assert!(
+            msg.contains("absolute") || msg.contains("secret"),
+            "should reject ./.git/config: {msg}"
+        );
     }
 
     #[test]

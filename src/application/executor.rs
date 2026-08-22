@@ -1,6 +1,6 @@
 //! Role executor: run one role in the graph.
 
-use crate::domain::rolegraph::config::RoleSpec;
+use crate::domain::rolegraph::config::{is_secret_path, RoleSpec};
 use crate::domain::rolegraph::verdict::{RoleOutput, Verdict};
 use crate::error::{ArtifactError, Error};
 use crate::ports::{ArtifactStore, ContextProvider, GenerateRequest, ModelClient, ToolRunner};
@@ -484,6 +484,38 @@ fn read_context_files(
                 file.clone(),
                 Err(format!(
                     "context_files: {file} resolves outside the repo root (symlink escape)"
+                )),
+            ));
+            continue;
+        }
+        // Re-check is_secret_path on the canonical relative path, so a
+        // symlink inside the repo pointing to .env or .git/config is caught.
+        let rel = canonical
+            .strip_prefix(&canonical_root)
+            .unwrap_or(&canonical);
+        let rel_str = rel.to_string_lossy();
+        if is_secret_path(&rel_str) {
+            results.push((
+                file.clone(),
+                Err(format!(
+                    "context_files: {file} resolves to secret-bearing path {rel_str} — refusing to inject"
+                )),
+            ));
+            continue;
+        }
+        // Reject non-regular files (FIFOs, devices, directories, etc.).
+        let metadata = match std::fs::symlink_metadata(&canonical) {
+            Ok(m) => m,
+            Err(error) => {
+                results.push((file.clone(), Err(format!("could not read {file}: {error}"))));
+                continue;
+            }
+        };
+        if !metadata.is_file() {
+            results.push((
+                file.clone(),
+                Err(format!(
+                    "context_files: {file} is not a regular file — skipping"
                 )),
             ));
             continue;
@@ -1041,7 +1073,7 @@ mod tests {
         assert!(
             calls[0].prompt.contains("warning"),
             "prompt should contain warning: {}",
-            &calls[0].prompt[..200]
+            calls[0].prompt
         );
     }
 
@@ -1081,7 +1113,7 @@ mod tests {
         assert!(
             calls[0].prompt.contains("truncated"),
             "prompt should mention truncation: {}",
-            &calls[0].prompt[..200]
+            calls[0].prompt
         );
     }
 
@@ -1124,7 +1156,7 @@ mod tests {
         assert!(
             calls[0].prompt.contains("truncated"),
             "prompt should mention truncation: {}",
-            &calls[0].prompt[..200]
+            calls[0].prompt
         );
     }
 
@@ -1180,15 +1212,91 @@ mod tests {
             assert!(
                 !calls[0].prompt.contains("TOP SECRET"),
                 "symlink escape leaked secret: {}",
-                &calls[0].prompt[..300]
+                calls[0].prompt
             );
             assert!(
                 calls[0].prompt.contains("warning"),
                 "prompt should contain warning for symlink: {}",
-                &calls[0].prompt[..300]
+                calls[0].prompt
             );
         }
-        let _ = &calls; // suppress unused warning on non-Unix
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, the file is a regular file — content should appear.
+            assert!(
+                calls[0].prompt.contains("ok"),
+                "prompt should contain file content: {}",
+                calls[0].prompt
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_symlink_to_secret_inside_repo() {
+        let repo = tempfile::tempdir().expect("repo");
+        // Create a .env file inside the repo (not a secret path at config
+        // validation level since the symlink name is "link.html").
+        std::fs::write(repo.path().join(".env"), "API_KEY=TOP_SECRET").expect("write .env");
+        // Create a symlink inside the repo pointing to .env.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(repo.path().join(".env"), repo.path().join("link.html"))
+                .expect("symlink");
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(repo.path().join("link.html"), "ok").expect("write");
+        }
+
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+
+        let mut role = role_with_tools(None, &["gather-context"]);
+        role.context_files = vec!["link.html".to_string()];
+
+        let ctx = context();
+        execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                run,
+                repo: repo.path(),
+                role: &role,
+                context: &ctx,
+                artifacts: &[],
+            },
+        )
+        .await
+        .expect("execute");
+
+        let calls = client.calls();
+        #[cfg(unix)]
+        {
+            // The symlink resolves to .env — is_secret_path on the canonical
+            // relative path must block it.
+            assert!(
+                !calls[0].prompt.contains("TOP_SECRET"),
+                "symlink to .env leaked secret: {}",
+                calls[0].prompt
+            );
+            assert!(
+                calls[0].prompt.contains("warning"),
+                "prompt should contain warning for symlink-to-secret: {}",
+                calls[0].prompt
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(
+                calls[0].prompt.contains("ok"),
+                "prompt should contain file content: {}",
+                calls[0].prompt
+            );
+        }
     }
 
     #[test]
