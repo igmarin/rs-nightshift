@@ -1,0 +1,89 @@
+# Beta test config — local Ollama only, ismaelmarin.dev copy review
+[run]
+start = "product-owner"
+max_steps = 20
+
+[[roles]]
+id = "product-owner"
+provider = "ollama"
+model = "qwen3:8b"
+options = { temperature = 0.3 }
+prompt = """
+You are the Product Owner for a personal portfolio website. The site belongs
+to Ismael Marin, a Tech Lead & AI Engineer. Your job is to write a brief with
+specific copy improvements for the homepage.
+
+Do NOT ask questions. Make reasonable assumptions and write the brief.
+
+Write the brief as MARKDOWN PROSE, not JSON. Use headings and bullet points.
+Start with a one-paragraph summary, then list each proposed change as:
+
+### Change N: <short title>
+- **Current text:** "quote the existing text"
+- **Proposed text:** "your replacement text"
+- **Rationale:** one sentence explaining why
+
+Identify 3-5 specific text changes that would make the branding more
+compelling. Do NOT wrap your output in JSON or code blocks.
+"""
+output = "01_brief.md"
+on = { continue = "developer", issues = "developer" }
+
+[[roles]]
+id = "developer"
+provider = "ollama"
+model = "qwen3:8b"
+options = { temperature = 0.2 }
+prompt = """
+You are the Developer. Implement the copy changes from the brief as a unified
+diff patch. Do NOT ask questions — proceed with the changes from the brief.
+
+The actual content of public/index.html is provided in the repo context below
+(under "### file: public/index.html"). Use that EXACT content as the basis for
+your diff — do NOT invent or guess file content.
+
+Your output MUST start with these three header lines:
+diff --git a/public/index.html b/public/index.html
+--- a/public/index.html
++++ b/public/index.html
+
+Then follow with one or more @@ hunk headers and the diff body.
+
+CRITICAL: The hunk header line counts MUST be exact. The format is:
+@@ -START,COUNT +START,COUNT @@
+where COUNT is the number of lines from the original (-) and new (+) file
+that this hunk covers (context + removed lines for the old count; context +
+added lines for the new count).
+
+Rules:
+- Each line starts with exactly ONE prefix char: space (context), - (removed), + (added)
+- Count context lines + removed lines for the old count
+- Count context lines + added lines for the new count
+- Do NOT duplicate lines or add extra blank lines
+- End the patch with a newline character
+
+Output ONLY the diff in the content field. Keep existing HTML structure and
+CSS classes unchanged. Only modify text content.
+"""
+output = "02_patch.patch"
+tools = ["gather-context", "apply-patch"]
+context_files = ["public/index.html"]
+on = { continue = "qa", questions = "qa" }
+
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "qwen3:8b"
+options = { temperature = 0.2 }
+prompt = """
+You are QA. Review the applied copy changes. Do NOT ask questions.
+Check that:
+- No HTML structure was broken
+- No existing styling was altered
+- The copy changes match the brief
+- No typos or grammar issues were introduced
+If there are issues, report them. If all good, mark as done.
+"""
+output = "03_qa_report.json"
+on = { issues = "developer" }
+max_loop = 3

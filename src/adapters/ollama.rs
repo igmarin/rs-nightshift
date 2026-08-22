@@ -186,6 +186,68 @@ impl OllamaClient {
         &self.redacted_base_url
     }
 
+    /// Send a chat completion via Ollama's OpenAI-compatible endpoint with
+    /// `think: false`, bypassing `llm-kernel` (which has no `think` field).
+    ///
+    /// This is used when the role explicitly sets `think = false` to disable
+    /// qwen3's reasoning mode. In Ollama 0.32.x the `think` parameter is
+    /// honored on the `/v1/chat/completions` endpoint but NOT on the native
+    /// `/api/chat` endpoint, so we use the OpenAI-compatible path.
+    pub async fn chat_no_think(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        prompt: &str,
+        temperature: f32,
+    ) -> Result<String, Error> {
+        let _guard = self.generate_lock.lock().await;
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
+        let mut messages = Vec::with_capacity(2);
+        if let Some(sys) = system {
+            messages.push(serde_json::json!({"role": "system", "content": sys}));
+        }
+        messages.push(serde_json::json!({"role": "user", "content": prompt}));
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": false,
+            "think": false,
+            "temperature": temperature,
+        });
+        let response = tokio::time::timeout(self.timeout, async {
+            self.unload_client
+                .post(&url)
+                .header("Authorization", "Bearer ollama")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| Error::from(ProviderError::Ollama(e.to_string())))
+        })
+        .await
+        .map_err(|_| Error::from(ProviderError::Timeout))??;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(Error::from(ProviderError::Ollama(format!(
+                "Ollama /v1/chat/completions returned {status}: {text}"
+            ))));
+        }
+        let chat_resp: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::from(ProviderError::Ollama(e.to_string())))?;
+        let content = chat_resp["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        // Best-effort unload via native endpoint.
+        let _ = self.unload(model).await;
+        Ok(content)
+    }
+
     /// Send Ollama a `keep_alive: 0` unload request for `model`.
     ///
     /// Errors are best-effort: a failed unload does not fail the pipeline,

@@ -6,9 +6,11 @@ use std::collections::BTreeMap;
 /// Resolved per-role options that the adapters act on.
 ///
 /// `temperature` and `max_tokens` apply to every provider; `think` is only
-/// acted on by the Ollama adapter (`:think` tag suffix). `num_ctx` is parsed
-/// and validated but deliberately not stored (llm-kernel's OpenAI-compatible
-/// request has no `num_ctx` field).
+/// acted on by the Ollama adapter (`:think` tag suffix). `think_explicitly_false`
+/// tracks whether `think = false` was explicitly set (vs absent), which
+/// triggers the native `/api/chat` path with `think: false`. `num_ctx` is
+/// parsed and validated but deliberately not stored (llm-kernel's
+/// OpenAI-compatible request has no `num_ctx` field).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ModelOptions {
     /// Overrides the request temperature when set.
@@ -17,6 +19,8 @@ pub(crate) struct ModelOptions {
     pub(crate) max_tokens: Option<u32>,
     /// Whether the Ollama `:think` tag suffix should be applied.
     pub(crate) think: bool,
+    /// Whether `think = false` was explicitly set (vs absent).
+    pub(crate) think_explicitly_false: bool,
 }
 
 impl ModelOptions {
@@ -51,6 +55,9 @@ impl ModelOptions {
                 .as_bool()
                 .ok_or_else(|| bad_option("think", "a boolean"))?,
         };
+        let think_explicitly_false = options
+            .get("think")
+            .is_some_and(|v| v.as_bool() == Some(false));
         if let Some(value) = options.get("num_ctx") {
             let value = value
                 .as_integer()
@@ -62,6 +69,7 @@ impl ModelOptions {
             temperature,
             max_tokens,
             think,
+            think_explicitly_false,
         })
     }
 }
