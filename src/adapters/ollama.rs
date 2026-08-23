@@ -16,8 +16,8 @@ use serde::Serialize;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// Default generate timeout for large-context local inference.
-pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Default generate timeout for large-context local inference on CPU.
+pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Timeout for the best-effort `keep_alive: 0` unload request.
 ///
