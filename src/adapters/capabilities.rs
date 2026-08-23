@@ -69,8 +69,11 @@ impl CapabilityRunner {
     }
 
     /// Write `input` as full file content to `repo`. The input must start
-    /// with a header line `file: <path>` followed by the file content.
-    /// This is a fallback for small models that can't generate proper diffs.
+    /// with a header line `file: <path>` followed by the file content. The
+    /// content is considered to end at the first sentinel line that looks
+    /// like another context marker (`<!-- file:`, `<!-- end file content -->`,
+    /// or `file:`) because small models sometimes echo the injected context
+    /// markers.
     async fn write_file(&self, repo: &Path, input: &str) -> Result<String, Error> {
         let repo = repo.to_path_buf();
         let content = input.to_string();
@@ -99,8 +102,27 @@ impl CapabilityRunner {
                     "write-file: path escapes repo root",
                 )));
             }
-            // Write the remaining content (everything after the header line)
-            let body = content.lines().skip(1).collect::<Vec<_>>().join("\n");
+            // Collect body lines, stopping at context-marker sentinels that
+            // small models often echo from the prompt. Also strip a common
+            // JSON artifact: a lone trailing `"` line that the model inserts
+            // when it confuses the JSON string closing quote with content.
+            let mut body_lines: Vec<&str> = Vec::new();
+            for line in lines {
+                if line.starts_with("<!-- file:")
+                    || line.starts_with("<!-- end file content -->")
+                    || line.starts_with("file: ")
+                {
+                    break;
+                }
+                body_lines.push(line);
+            }
+            // Trim trailing blank or lone-quote lines that are JSON artifacts.
+            while body_lines.last().is_some_and(|l| {
+                l.trim().is_empty() || (l.trim() == "\"" && l.trim().len() == l.len())
+            }) {
+                body_lines.pop();
+            }
+            let body = body_lines.join("\n");
             let body_len = body.len();
             std::fs::write(&file_path, body)
                 .map_err(|e| ArtifactError::artifact(format!("write-file: {e}")))?;
