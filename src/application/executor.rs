@@ -98,9 +98,9 @@ where
                 }
                 // Inject raw file content for files the role declared
                 // (non-code files that codegraph/graphify don't index).
-                // Truncate at 8 KiB so large files don't exhaust the model's
+                // Truncate at 64 KiB so large files don't exhaust the model's
                 // context window or cause inference timeouts.
-                const MAX_FILE_BYTES: usize = 8 * 1024;
+                const MAX_FILE_BYTES: usize = 64 * 1024;
                 if !params.role.context_files.is_empty() {
                     let repo_root = params.repo.to_path_buf();
                     let context_files = params.role.context_files.clone();
@@ -1376,8 +1376,8 @@ mod tests {
     #[tokio::test]
     async fn execute_truncates_large_context_file() {
         let repo = tempfile::tempdir().expect("repo");
-        // Create a file larger than 8 KiB.
-        let big_content = "x".repeat(10 * 1024);
+        // Create a file larger than 64 KiB.
+        let big_content = "x".repeat(70 * 1024);
         std::fs::write(repo.path().join("big.html"), &big_content).expect("write");
 
         let client = ScriptedModelClient::new();
@@ -1416,10 +1416,9 @@ mod tests {
     #[tokio::test]
     async fn execute_truncates_multibyte_utf8_without_panic() {
         let repo = tempfile::tempdir().expect("repo");
-        // "中" is 3 bytes in UTF-8. 2731 chars = 8193 bytes, so the 8192-byte
-        // cutoff lands mid-character (byte 8192 is the 2nd byte of the 2731st
-        // "中"). This must not panic.
-        let big_content = "中".repeat(2731);
+        // "中" is 3 bytes in UTF-8. 22000 chars = 66000 bytes, so the 65536-byte
+        // cutoff lands mid-character. This must not panic.
+        let big_content = "中".repeat(22000);
         std::fs::write(repo.path().join("multi.html"), &big_content).expect("write");
 
         let client = ScriptedModelClient::new();
