@@ -120,8 +120,8 @@ GPU offload.
 
 ## Running the demo
 
-See [`../nightshift.toml.example`](../nightshift.toml.example) for a full
-role-graph config, or copy the gist files below for the minimal harness test:
+The repo includes a minimal harness demo config at
+[`harness-demo.toml`](harness-demo.toml). Use it with the test repo below:
 
 ```bash
 # create test repo
@@ -148,6 +148,7 @@ git commit -m "initial"
 ollama create llama3.2:3b-fast -f /tmp/Modelfile.llama3.2.3b.fast
 
 # run harness
+cp docs/harness-demo.toml /tmp/test-nightshift.toml
 nightshift harness \
   --config /tmp/test-nightshift.toml \
   --goal "Improve homepage copy" \

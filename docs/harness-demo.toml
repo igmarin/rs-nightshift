@@ -1,0 +1,74 @@
+[run]
+start = "product-owner"
+max_steps = 20
+
+[[roles]]
+id = "product-owner"
+provider = "ollama"
+model = "llama3.2:3b-fast"
+options = { temperature = 0.3, max_tokens = 2048 }
+prompt = """
+You are the Product Owner. You MUST respond with a JSON object. The \
+"content" field MUST be a JSON string with escaped newlines (\\n), NOT \
+a YAML block scalar. Do NOT use | or > syntax.
+
+Inside the content string, write a brief with 2 specific copy improvements \
+for the homepage as MARKDOWN PROSE.
+
+Example response format:
+{"verdict":"continue","summary":"Brief with 2 copy changes","findings":[],"questions":[],"block_reason":"none","content":"### Change 1: Headline\\n- **Current:** \\"old text\\"\\n- **Proposed:** \\"new text\\"\\n- **Why:** reason\\n\\n### Change 2: Tagline\\n- **Current:** \\"old text\\"\\n- **Proposed:** \\"new text\\"\\n- **Why:** reason"}
+
+Do NOT ask questions. Set verdict to "continue".
+"""
+output = "01_brief.md"
+context_files = ["index.html"]
+tools = ["gather-context"]
+on = { continue = "developer", issues = "developer" }
+
+[[roles]]
+id = "developer"
+provider = "ollama"
+model = "llama3.2:3b-fast"
+options = { temperature = 0.2, max_tokens = 2048 }
+prompt = """
+You are the Developer. You MUST respond with a JSON object. The "content" \
+field MUST be a JSON string with escaped newlines (\\n). Do NOT use | or > \
+syntax.
+
+Apply the copy changes from the brief to index.html. The content field \
+must start with "file: index.html" on the first line, then the COMPLETE \
+new file content on the following lines. Stop after the closing </html> tag. \
+Do NOT include the brief, notes, or context markers in the file content.
+
+Use the specific headline and tagline proposed in the brief, NOT \
+generic placeholders like "New headline" or "New tagline".
+
+Example response:
+{"verdict":"continue","summary":"Updated index.html","findings":[],"questions":[],"block_reason":"none","content":"file: index.html\\n<!DOCTYPE html>\\n<html>\\n<head><title>Best Deals</title></head>\\n<body>\\n<h1>Best Deals This Week</h1>\\n<p>Save up to 50% on top brands.</p>\\n<a href=\\\"/about\\\">Learn More</a>\\n</body>\\n</html>"}
+
+Output ONLY the file. Stop after </html>. Set verdict to "continue".
+"""
+output = "02_patch.patch"
+tools = ["gather-context", "write-file"]
+context_files = ["index.html"]
+on = { continue = "qa", questions = "qa" }
+
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "llama3.2:3b-fast"
+options = { temperature = 0.2, max_tokens = 2048 }
+prompt = """
+You are QA. You MUST respond with a JSON object. The "content" field MUST \
+be a JSON string with escaped newlines (\\n). Do NOT use | or > syntax.
+
+Review the applied changes. Check that HTML is valid and changes match the \
+brief. If all good, set verdict to "done". If issues, set verdict to \
+"issues" and describe the problems in findings.
+
+Example:
+{"verdict":"done","summary":"Changes look good","findings":[],"questions":[],"block_reason":"none","content":"HTML is valid and changes match the brief."}
+"""
+output = "03_qa_report.json"
+on = { issues = "developer" }
+max_loop = 2
