@@ -269,8 +269,14 @@ fn extract_json_object(text: &str) -> Result<String, Error> {
     if serde_json::from_str::<serde_json::Value>(&repaired).is_ok() {
         return Ok(repaired);
     }
+    // Repair backtick-delimited strings (JS template literals) that small
+    // models emit instead of JSON strings.
+    let backtick_fixed = repair_backtick_strings(&repaired);
+    if serde_json::from_str::<serde_json::Value>(&backtick_fixed).is_ok() {
+        return Ok(backtick_fixed);
+    }
     // Try sanitizing raw newlines before giving up on the fenced block.
-    let sanitized = sanitize_string_literals(&repaired);
+    let sanitized = sanitize_string_literals(&backtick_fixed);
     if serde_json::from_str::<serde_json::Value>(&sanitized).is_ok() {
         return Ok(sanitized);
     }
@@ -598,6 +604,77 @@ fn escape_unescaped_quotes_in_strings(input: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// Repair backtick-delimited strings (JS template literals) that small models
+/// emit instead of JSON strings. Converts:
+/// ```text
+/// "content": `
+/// ## Heading
+/// some text
+/// `
+/// ```
+/// to a proper JSON string:
+/// ```text
+/// "content": "## Heading\nsome text\n"
+/// ```
+///
+/// Only triggers when the input contains a backtick after a colon (the JSON
+/// value position). Walks the input, and when it finds a backtick in a value
+/// position, collects everything until the closing backtick, escapes it for
+/// JSON, and wraps it in double quotes.
+fn repair_backtick_strings(input: &str) -> String {
+    // Fast path: no backticks means nothing to repair.
+    if !input.contains('`') {
+        return input.to_string();
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Detect a backtick in a value position: preceded by `:` (with
+        // optional whitespace). This avoids false positives from backticks
+        // inside properly-quoted JSON strings.
+        if c == '`' && backtick_in_value_position(&chars, i) {
+            // Collect the backtick string content until the closing backtick.
+            let mut content = String::new();
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '`' {
+                content.push(chars[j]);
+                j += 1;
+            }
+            // j is at the closing backtick (or end of input).
+            let escaped = escape_json_string(content.trim());
+            out.push('"');
+            out.push_str(&escaped);
+            out.push('"');
+            if j < chars.len() {
+                i = j + 1; // skip past the closing backtick
+            } else {
+                i = j; // end of input
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Check if the backtick at position `i` is in a JSON value position (preceded
+/// by a colon, with optional whitespace between the colon and the backtick).
+fn backtick_in_value_position(chars: &[char], i: usize) -> bool {
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        let c = chars[j];
+        if c.is_whitespace() {
+            continue;
+        }
+        return c == ':';
+    }
+    false
 }
 
 /// Heuristic repair: close truncated JSON that was cut off by max_tokens.
@@ -1004,6 +1081,32 @@ mod tests {
             .expect("artifact");
         assert!(artifact.contains("href"), "{artifact}");
         assert!(artifact.contains("/about"), "{artifact}");
+    }
+
+    #[tokio::test]
+    async fn execute_repairs_backtick_template_literal_content() {
+        let client = ScriptedModelClient::new();
+        // Model wraps JSON in ```json fence and uses backtick template literal
+        // for the content field instead of a JSON string. This is the exact
+        // failure pattern observed from llama3.2:3b on the no-ai-slop run.
+        client.push_text("```json\n{\n  \"verdict\": \"continue\",\n  \"summary\": \"Rewrite brief\",\n  \"findings\": [],\n  \"questions\": [],\n  \"block_reason\": \"none\",\n  \"content\": `\n## Positioning statement\n\nOur website is built by a real engineer.\n\n## public/index.html\n- Hero: change to \"Building Real Software\"\n  `\n}\n```");
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role(Some("01_brief.md"));
+        let ctx = context();
+        let outcome = execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        assert_eq!(outcome.output.verdict, Verdict::Continue);
+        let artifact = store.read_artifact(run, "01_brief.md").expect("artifact");
+        assert!(artifact.contains("Positioning statement"), "{artifact}");
+        assert!(artifact.contains("Building Real Software"), "{artifact}");
     }
 
     #[tokio::test]
