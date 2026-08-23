@@ -15,6 +15,9 @@ CLI flag  >  environment variable  >  nightshift.toml  >  built-in default
 | :------ | :------- | :------ | :------ |
 | Ollama URL | `--ollama-url` | `NIGHTSHIFT_OLLAMA_URL` | `http://127.0.0.1:11434` |
 
+For Ollama model tuning (CPU-only inference, Modelfile variants, `num_ctx`,
+`num_thread`, `num_gpu`, GPU offload), see [`docs/ollama.md`](ollama.md).
+
 Set via CLI flag or env var. This is **not** read from `nightshift.toml` — the
 Ollama URL is a runtime connection setting, not a model mapping. Invalid URLs
 (scheme other than `http`/`https`, missing host, path/query/fragment present,
