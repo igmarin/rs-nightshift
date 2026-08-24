@@ -85,17 +85,27 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
 ///
 /// If the initial check fails due to incorrect hunk-header line counts (a
 /// common model output defect), [`repair_hunk_headers`] is tried as a
-/// fallback before the apply.
+/// fallback before the apply. If that also fails, `git apply --3way` is
+/// tried as a last resort — it uses the index for 3-way merge, which
+/// tolerates context-line mismatches that trip up the strict check.
 pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
     match apply_check(repo, patch) {
         Ok(()) => {}
         Err(original) => {
             let repaired = repair_hunk_headers(patch);
             if repaired != patch {
-                apply_check(repo, &repaired)?;
-                return apply_raw(repo, &repaired);
+                if apply_check(repo, &repaired).is_ok() {
+                    return apply_raw(repo, &repaired);
+                }
             }
-            return Err(original);
+            // Last resort: 3-way merge uses the index to resolve context
+            // mismatches. This handles the common case where the model got
+            // the line numbers and context lines wrong but the actual
+            // changes (removed/added lines) are correct.
+            match apply_3way(repo, patch) {
+                Ok(()) => return Ok(()),
+                Err(_) => return Err(original),
+            }
         }
     }
     apply_raw(repo, patch)
@@ -110,6 +120,28 @@ fn apply_raw(repo: &Path, patch: &str) -> Result<(), Error> {
         repo,
         &[
             "apply",
+            tmp.path()
+                .to_str()
+                .ok_or_else(|| GitError::new("patch path".to_string()))?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Write `patch` to a temp file and run `git apply --3way` (3-way merge).
+///
+/// Unlike `apply_raw`, this uses the index as a base for 3-way merge,
+/// which tolerates context-line mismatches that cause strict `--check` to
+/// fail. This is the last-resort fallback in [`apply_checked`].
+fn apply_3way(repo: &Path, patch: &str) -> Result<(), Error> {
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
+    std::fs::write(tmp.path(), patch)
+        .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
+    git(
+        repo,
+        &[
+            "apply",
+            "--3way",
             tmp.path()
                 .to_str()
                 .ok_or_else(|| GitError::new("patch path".to_string()))?,
