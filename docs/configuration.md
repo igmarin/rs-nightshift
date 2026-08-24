@@ -120,7 +120,9 @@ new: <h1>Hello</h1>
 ```
 
 Multi-line snippets and extra `old:` / `new:` blocks (same file or another
-`file:` header) are allowed. Each `old` text must match exactly once; zero
-matches or two-plus matches abort the whole tool call and leave the repo
-unchanged. Paths must stay inside the repo. The tool never creates files and
-never commits.
+`file:` header) are allowed. Each `old` text must match exactly once, including overlapping occurrences;
+zero matches or two-plus matches abort the whole tool call and leave the repo
+unchanged. Paths must stay inside the repo. Secret-bearing paths (`.git`,
+`.env`, keys, and the rest of the `context_files` denylist) are rejected,
+including symlinks that resolve into those paths. The tool never creates
+files and never commits.

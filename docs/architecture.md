@@ -138,8 +138,9 @@ the capability adapters (`src/adapters/capabilities.rs`), declared per role via
 - **`write-file`** — write `content` that starts with `file: <path>` as the
   full file. Post-tool for `continue` / `done`. Path must stay in the repo.
 - **`search-replace`** — exact `old:` / `new:` substitutions in existing
-  files. Each `old` snippet must match once; not-found and ambiguous matches
-  abort with no writes. Post-tool for `continue` / `done`. Never commits.
+  files. Each `old` snippet must match once (including overlapping matches);
+  not-found and ambiguous matches abort with no writes. Secret-bearing paths
+  are rejected. Post-tool for `continue` / `done`. Never commits.
 - **`gather-context`** — the codegraph + graphify context bundle, injected
   into the role's prompt as repo context.
 

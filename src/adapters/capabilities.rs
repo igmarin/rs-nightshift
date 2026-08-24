@@ -12,9 +12,11 @@ use crate::adapters::git::apply_checked;
 use crate::adapters::test::{
     detect_test_command, ProcessTestRunner, TestRunner, DEFAULT_TEST_TIMEOUT,
 };
+use crate::domain::rolegraph::config::is_secret_path;
 use crate::error::{ArtifactError, Error};
 use crate::ports::{ContextProvider, ToolRunner};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -91,19 +93,7 @@ impl CapabilityRunner {
                     ArtifactError::artifact("write-file: input must start with 'file: <path>'")
                 })?
                 .trim();
-            // Validate the path is repo-relative and safe
-            let file_path = repo.join(path);
-            let canonical = file_path
-                .canonicalize()
-                .map_err(|e| ArtifactError::artifact(format!("write-file: invalid path: {e}")))?;
-            let repo_canonical = repo
-                .canonicalize()
-                .map_err(|e| ArtifactError::artifact(format!("write-file: invalid repo: {e}")))?;
-            if !canonical.starts_with(&repo_canonical) {
-                return Err(Error::from(ArtifactError::artifact(
-                    "write-file: path escapes repo root",
-                )));
-            }
+            let file_path = resolve_repo_file(&repo, path, "write-file")?;
             // Collect body lines, stopping at context-marker sentinels that
             // small models often echo from the prompt. Also strip a common
             // JSON artifact: a lone trailing `"` line that the model inserts
@@ -126,8 +116,7 @@ impl CapabilityRunner {
             }
             let body = body_lines.join("\n");
             let body_len = body.len();
-            std::fs::write(&file_path, body)
-                .map_err(|e| ArtifactError::artifact(format!("write-file: {e}")))?;
+            write_atomically(&file_path, &body, "write-file")?;
             Ok(format!("wrote {path} ({body_len} bytes)"))
         })
         .await
@@ -169,17 +158,32 @@ struct SearchReplaceBlock {
     new: String,
 }
 
+#[derive(Clone, Copy)]
+enum HeaderKind {
+    File,
+    Old,
+    New,
+}
+
+#[derive(Clone, Copy)]
+enum BodyField {
+    Old,
+    New,
+}
+
 /// Parse `file:` / `old:` / `new:` blocks from a role's `content` payload.
 fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock>, Error> {
     let mut replacements = Vec::new();
     let mut file: Option<String> = None;
     let mut old: Option<String> = None;
     let mut new: Option<String> = None;
-    let mut field: Option<&'static str> = None;
+    let mut field: Option<BodyField> = None;
+    let mut unused_file = false;
 
     let flush = |file: &Option<String>,
                  old: &mut Option<String>,
                  new: &mut Option<String>,
+                 unused_file: &mut bool,
                  replacements: &mut Vec<SearchReplaceBlock>|
      -> Result<(), Error> {
         match (file.as_ref(), old.take(), new.take()) {
@@ -209,6 +213,7 @@ fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock>, Error> {
                     old: old_text,
                     new: new_text,
                 });
+                *unused_file = false;
                 Ok(())
             }
         }
@@ -217,20 +222,38 @@ fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock>, Error> {
     for line in input.lines() {
         if let Some((kind, rest)) = header_line(line) {
             match kind {
-                "file" => {
-                    flush(&file, &mut old, &mut new, &mut replacements)?;
+                HeaderKind::File => {
+                    flush(
+                        &file,
+                        &mut old,
+                        &mut new,
+                        &mut unused_file,
+                        &mut replacements,
+                    )?;
+                    if unused_file {
+                        return Err(Error::from(ArtifactError::artifact(
+                            "search-replace: file: header has no old:/new: block",
+                        )));
+                    }
                     file = Some(rest.to_string());
                     field = None;
+                    unused_file = true;
                 }
-                "old" => {
+                HeaderKind::Old => {
                     if old.is_some() {
-                        flush(&file, &mut old, &mut new, &mut replacements)?;
+                        flush(
+                            &file,
+                            &mut old,
+                            &mut new,
+                            &mut unused_file,
+                            &mut replacements,
+                        )?;
                     }
                     old = Some(rest.to_string());
                     new = None;
-                    field = Some("old");
+                    field = Some(BodyField::Old);
                 }
-                "new" => {
+                HeaderKind::New => {
                     if old.is_none() {
                         return Err(Error::from(ArtifactError::artifact(
                             "search-replace: new: before old:",
@@ -242,30 +265,40 @@ fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock>, Error> {
                         )));
                     }
                     new = Some(rest.to_string());
-                    field = Some("new");
+                    field = Some(BodyField::New);
                 }
-                _ => unreachable!("header_line only returns file/old/new"),
             }
             continue;
         }
         match field {
-            Some("old") => {
+            Some(BodyField::Old) => {
                 let buf = old.get_or_insert_with(String::new);
                 append_body_line(buf, line);
             }
-            Some("new") => {
+            Some(BodyField::New) => {
                 let buf = new.get_or_insert_with(String::new);
                 append_body_line(buf, line);
             }
-            _ if line.trim().is_empty() => {}
-            _ => {
+            None if line.trim().is_empty() => {}
+            None => {
                 return Err(Error::from(ArtifactError::artifact(
                     "search-replace: stray content outside old:/new: blocks",
                 )));
             }
         }
     }
-    flush(&file, &mut old, &mut new, &mut replacements)?;
+    flush(
+        &file,
+        &mut old,
+        &mut new,
+        &mut unused_file,
+        &mut replacements,
+    )?;
+    if unused_file {
+        return Err(Error::from(ArtifactError::artifact(
+            "search-replace: file: header has no old:/new: block",
+        )));
+    }
     if replacements.is_empty() {
         return Err(Error::from(ArtifactError::artifact(
             "search-replace: no replacements in input",
@@ -274,8 +307,12 @@ fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock>, Error> {
     Ok(replacements)
 }
 
-fn header_line(line: &str) -> Option<(&'static str, &str)> {
-    for (kind, prefix) in [("file", "file:"), ("old", "old:"), ("new", "new:")] {
+fn header_line(line: &str) -> Option<(HeaderKind, &str)> {
+    for (kind, prefix) in [
+        (HeaderKind::File, "file:"),
+        (HeaderKind::Old, "old:"),
+        (HeaderKind::New, "new:"),
+    ] {
         if let Some(rest) = line.strip_prefix(prefix) {
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
             return Some((kind, rest));
@@ -293,8 +330,8 @@ fn append_body_line(buf: &mut String, line: &str) {
     }
 }
 
-/// Resolve `rel` inside `repo`. Rejects empty, absolute, and `..` paths.
-fn resolve_repo_file(repo: &Path, rel: &str) -> Result<PathBuf, Error> {
+/// Resolve `rel` inside `repo`. Rejects empty, absolute, `..`, and secret paths.
+fn resolve_repo_file(repo: &Path, rel: &str, tool: &str) -> Result<PathBuf, Error> {
     let path = Path::new(rel);
     if rel.is_empty()
         || path.is_absolute()
@@ -303,27 +340,78 @@ fn resolve_repo_file(repo: &Path, rel: &str) -> Result<PathBuf, Error> {
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return Err(Error::from(ArtifactError::artifact(format!(
-            "search-replace: path escapes repo root: {rel}"
+            "{tool}: path escapes repo root: {rel}"
+        ))));
+    }
+    if is_secret_path(rel) {
+        return Err(Error::from(ArtifactError::artifact(format!(
+            "{tool}: path is a secret-bearing path: {rel}"
         ))));
     }
     let file_path = repo.join(path);
-    let canonical = file_path.canonicalize().map_err(|error| {
-        ArtifactError::artifact(format!("search-replace: invalid path {rel}: {error}"))
-    })?;
-    let repo_canonical = repo.canonicalize().map_err(|error| {
-        ArtifactError::artifact(format!("search-replace: invalid repo: {error}"))
-    })?;
+    let canonical = file_path
+        .canonicalize()
+        .map_err(|error| ArtifactError::artifact(format!("{tool}: invalid path {rel}: {error}")))?;
+    let repo_canonical = repo
+        .canonicalize()
+        .map_err(|error| ArtifactError::artifact(format!("{tool}: invalid repo: {error}")))?;
     if !canonical.starts_with(&repo_canonical) {
-        return Err(Error::from(ArtifactError::artifact(
-            "search-replace: path escapes repo root",
-        )));
+        return Err(Error::from(ArtifactError::artifact(format!(
+            "{tool}: path escapes repo root"
+        ))));
+    }
+    let rel_canonical = canonical
+        .strip_prefix(&repo_canonical)
+        .unwrap_or(&canonical);
+    let rel_canonical = rel_canonical.to_string_lossy();
+    if is_secret_path(&rel_canonical) {
+        return Err(Error::from(ArtifactError::artifact(format!(
+            "{tool}: path resolves to secret-bearing path {rel_canonical}"
+        ))));
     }
     if !canonical.is_file() {
         return Err(Error::from(ArtifactError::artifact(format!(
-            "search-replace: not a file: {rel}"
+            "{tool}: not a file: {rel}"
         ))));
     }
     Ok(canonical)
+}
+
+/// Count needle occurrences in haystack, including overlapping matches.
+///
+/// `"aaa"` contains `"aa"` twice (offsets 0 and 1). `str::matches` would
+/// report one non-overlapping match and miss the ambiguity.
+fn count_overlapping(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+    let mut count = 0;
+    let mut rest = haystack;
+    while let Some(offset) = rest.find(needle) {
+        count += 1;
+        let advance = rest[offset..].chars().next().map_or(1, char::len_utf8);
+        let next = offset + advance;
+        if next >= rest.len() {
+            break;
+        }
+        rest = &rest[next..];
+    }
+    count
+}
+
+fn write_atomically(path: &Path, body: &str, tool: &str) -> Result<(), Error> {
+    let dir = path.parent().ok_or_else(|| {
+        ArtifactError::artifact(format!("{tool}: missing parent for {}", path.display()))
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|error| ArtifactError::artifact(format!("{tool}: temp file: {error}")))?;
+    tmp.write_all(body.as_bytes())
+        .map_err(|error| ArtifactError::artifact(format!("{tool}: {error}")))?;
+    tmp.flush()
+        .map_err(|error| ArtifactError::artifact(format!("{tool}: {error}")))?;
+    tmp.persist(path)
+        .map_err(|error| ArtifactError::artifact(format!("{tool}: persist: {error}")))?;
+    Ok(())
 }
 
 fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
@@ -333,7 +421,10 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
         if abs_by_rel.contains_key(&block.path) {
             continue;
         }
-        abs_by_rel.insert(block.path.clone(), resolve_repo_file(repo, &block.path)?);
+        abs_by_rel.insert(
+            block.path.clone(),
+            resolve_repo_file(repo, &block.path, "search-replace")?,
+        );
     }
 
     let mut contents: HashMap<String, String> = HashMap::new();
@@ -345,8 +436,13 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
     }
 
     for block in &replacements {
-        let body = contents.get_mut(&block.path).expect("loaded");
-        let count = body.matches(block.old.as_str()).count();
+        let body = contents.get_mut(&block.path).ok_or_else(|| {
+            ArtifactError::artifact(format!(
+                "search-replace: missing content for {}",
+                block.path
+            ))
+        })?;
+        let count = count_overlapping(body, &block.old);
         match count {
             0 => {
                 return Err(Error::from(ArtifactError::artifact(format!(
@@ -367,10 +463,10 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
     }
 
     for (rel, abs) in &abs_by_rel {
-        let body = contents.get(rel).expect("applied");
-        std::fs::write(abs, body).map_err(|error| {
-            ArtifactError::artifact(format!("search-replace: failed to write {rel}: {error}"))
+        let body = contents.get(rel).ok_or_else(|| {
+            ArtifactError::artifact(format!("search-replace: missing content for {rel}"))
         })?;
+        write_atomically(abs, body, "search-replace")?;
     }
 
     let n = replacements.len();
@@ -628,5 +724,97 @@ new: nope
         let other = std::fs::read_to_string(repo.path().join("other.txt")).expect("read");
         assert_eq!(hello, "hello\n");
         assert_eq!(other, "keep\n");
+    }
+
+    #[tokio::test]
+    async fn search_replace_overlapping_match_is_ambiguous() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("hello.txt"), "aaa\n").expect("write");
+        let runner = CapabilityRunner::new();
+        let err = runner
+            .run(
+                "search-replace",
+                repo.path(),
+                &search_replace_input("hello.txt", "aa", "b"),
+            )
+            .await
+            .expect_err("overlapping");
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+        let body = std::fs::read_to_string(repo.path().join("hello.txt")).expect("read");
+        assert_eq!(body, "aaa\n");
+    }
+
+    #[tokio::test]
+    async fn search_replace_rejects_secret_path() {
+        let repo = init_repo();
+        let runner = CapabilityRunner::new();
+        let err = runner
+            .run(
+                "search-replace",
+                repo.path(),
+                &search_replace_input(".git/config", "[core]", "[pwned]"),
+            )
+            .await
+            .expect_err("secret");
+        assert!(err.to_string().contains("secret"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_replace_rejects_symlink_to_secret() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".env"), "SECRET=1\n").expect("write");
+        std::os::unix::fs::symlink(repo.path().join(".env"), repo.path().join("link.txt"))
+            .expect("symlink");
+        let runner = CapabilityRunner::new();
+        let err = runner
+            .run(
+                "search-replace",
+                repo.path(),
+                &search_replace_input("link.txt", "SECRET=1", "SECRET=2"),
+            )
+            .await
+            .expect_err("symlink secret");
+        assert!(err.to_string().contains("secret"), "{err}");
+        let body = std::fs::read_to_string(repo.path().join(".env")).expect("read");
+        assert_eq!(body, "SECRET=1\n");
+    }
+
+    #[tokio::test]
+    async fn search_replace_trailing_file_header_is_an_error() {
+        let repo = init_repo();
+        let runner = CapabilityRunner::new();
+        let input = "\
+file: hello.txt
+old: hello
+new: hi
+file: leftover.txt
+";
+        let err = runner
+            .run("search-replace", repo.path(), input)
+            .await
+            .expect_err("trailing file");
+        assert!(err.to_string().contains("file:"), "{err}");
+        let body = std::fs::read_to_string(repo.path().join("hello.txt")).expect("read");
+        assert_eq!(body, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_secret_path() {
+        let repo = init_repo();
+        let runner = CapabilityRunner::new();
+        let err = runner
+            .run("write-file", repo.path(), "file: .git/config\npwned\n")
+            .await
+            .expect_err("secret");
+        assert!(err.to_string().contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn count_overlapping_counts_sliding_windows() {
+        assert_eq!(count_overlapping("aaa", "aa"), 2);
+        assert_eq!(count_overlapping("aaaa", "aa"), 3);
+        assert_eq!(count_overlapping("hello", "hello"), 1);
+        assert_eq!(count_overlapping("hello", "nope"), 0);
     }
 }
