@@ -113,9 +113,10 @@ CPU-only inference. They add overhead when no GPU is available.
 ## Thinking models
 
 Models such as `qwen3` and `deepseek-r1` emit a `<think>…</think>` reasoning
-preamble before the JSON envelope the harness expects. The parser strips those
-blocks only when the first `{` sits inside a think span, so literal
-`<think>` text inside a JSON `content` string is left alone.
+preamble before the JSON envelope the harness expects. The parser strips only
+the think span that contains the first `{` (draft JSON in the preamble).
+Literal `<think>` text inside a JSON `content` string is left alone, even
+when a preamble was also stripped.
 
 `/no_think` is unreliable through Ollama's OpenAI-compatible API, so the
 harness does not depend on it. Thinking models still spend tokens on reasoning

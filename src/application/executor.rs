@@ -268,13 +268,12 @@ fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
 /// Extract the outermost JSON object from a model reply.
 fn extract_json_object(text: &str) -> Result<String, Error> {
     // Strip `<think>` reasoning only when the first `{` sits inside a
-    // think block. If the envelope is already JSON, literal tags in
-    // string values (e.g. `content`) must be preserved. Allocate only
-    // when a preamble actually has to be removed.
-    let stripped;
+    // think block, and only that preamble span — not later tags inside
+    // JSON string values. Allocate only when a preamble has to be removed.
+    let think_stripped;
     let source: &str = if json_object_starts_inside_think(text) {
-        stripped = strip_think_blocks(text);
-        &stripped
+        think_stripped = strip_think_preamble(text);
+        &think_stripped
     } else {
         text
     };
@@ -348,12 +347,60 @@ fn json_object_starts_inside_think(text: &str) -> bool {
     false
 }
 
-/// Remove `<think>…</think>` reasoning (qwen3 / deepseek-r1) before JSON extraction.
+/// Remove the think span that contains the first `{`, then repeat if the
+/// next first `{` is still inside a think block.
 ///
-/// Tag names are matched case-insensitively. Nested or malformed blocks drop
-/// everything from the first `<think>` through the matching `</think>`, or
-/// through the end of the string if the tag is unclosed. Stray `</think>`
-/// leftovers are also removed.
+/// Later `<think>` text (for example inside a JSON `content` string) is
+/// left untouched.
+fn strip_think_preamble(text: &str) -> String {
+    let mut remaining = text.to_string();
+    while json_object_starts_inside_think(&remaining) {
+        remaining = remove_think_span_containing_first_brace(&remaining);
+    }
+    remaining
+}
+
+/// Drop the `<think>…</think>` (or unclosed `<think>…`) that contains the
+/// first `{`. If no such span exists, return `text` unchanged.
+fn remove_think_span_containing_first_brace(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let Some(brace) = bytes.iter().position(|&b| b == b'{') else {
+        return text.to_string();
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(open_len) = match_think_open(&bytes[i..]) {
+            let after_open = i + open_len;
+            match find_matching_think_close(&bytes[after_open..]) {
+                Some((rel_start, close_len)) => {
+                    let end = after_open + rel_start + close_len;
+                    if brace >= i && brace < end {
+                        let mut out = String::with_capacity(text.len() - (end - i));
+                        out.push_str(&text[..i]);
+                        out.push_str(&text[end..]);
+                        return out;
+                    }
+                    i = end;
+                }
+                None => {
+                    if brace >= i {
+                        return text[..i].to_string();
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    text.to_string()
+}
+
+/// Remove every `<think>…</think>` span (test helper for leftover-tag cases).
+///
+/// Production parsing uses [`strip_think_preamble`] so JSON `content` is not
+/// rewritten.
+#[cfg(test)]
 fn strip_think_blocks(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -1667,6 +1714,19 @@ mod tests {
             strip_think_blocks("</think> leftover </THINK> tail"),
             " leftover  tail"
         );
+    }
+
+    #[test]
+    fn parse_preserves_think_in_content_after_think_preamble() {
+        // Reasoning preamble contains a draft `{`, so it must be stripped,
+        // but literal tags in the real envelope's content must survive.
+        let raw = concat!(
+            "<think>draft {\"verdict\":\"fail\",\"content\":\"no\"}</think>\n",
+            r#"{"verdict":"done","content":"show <think>example</think>"}"#,
+        );
+        let output = parse_role_output(raw).expect("preamble stripped, content kept");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "show <think>example</think>");
     }
 
     #[test]
