@@ -110,6 +110,19 @@ Measured on the Ryzen 7 7730U with `llama3.2:3b` / `llama3.2:3b-fast`:
 The `q8_0` KV cache and flash-attention settings are not recommended for
 CPU-only inference. They add overhead when no GPU is available.
 
+## Thinking models
+
+Models such as `qwen3` and `deepseek-r1` emit a `<think>…</think>` reasoning
+preamble before the JSON envelope the harness expects. The parser strips only
+the think span that contains the first `{` (draft JSON in the preamble).
+Literal `<think>` text inside a JSON `content` string is left alone, even
+when a preamble was also stripped.
+
+`/no_think` is unreliable through Ollama's OpenAI-compatible API, so the
+harness does not depend on it. Thinking models still spend tokens on reasoning
+and can hit `max_tokens` without ever writing JSON — on CPU-only machines
+prefer a non-thinking model such as `llama3.2:3b-fast`.
+
 ## Why the iGPU is not used
 
 `ollama ps` will likely still report `100% CPU` even with
@@ -167,9 +180,10 @@ Roles: product-owner → developer → qa
 ## Troubleshooting
 
 - **"model did not return a JSON object"** — make sure the prompt explicitly
-  asks for a JSON object and the model is `llama3.2:3b-fast`. Models like
-  `qwen3:4b` generate verbose reasoning tokens that fill `max_tokens` before
-  the JSON envelope is produced.
+  asks for a JSON object and the model is `llama3.2:3b-fast`. Thinking models
+  like `qwen3:4b` can still fill `max_tokens` with reasoning and never emit
+  JSON; the harness strips `<think>` blocks when they are present, but it
+  cannot invent an envelope that was never produced. See [Thinking models](#thinking-models).
 - **Harness takes 3–6 minutes** — the model is generating long extra sections.
   This is usually a prompt issue, not Ollama. Verify the prompt says "ONLY 2
   specific copy improvements" and explicitly forbids additional sections.

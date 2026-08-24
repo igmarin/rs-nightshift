@@ -11,6 +11,12 @@ All notable changes to this project are documented in this file.
   exactly once; not-found and ambiguous matches abort with no writes. See
   issue [#97](https://github.com/igmarin/rs-nightshift/issues/97).
 
+### Fixed
+
+- Role JSON parsing strips `<think>…</think>` reasoning from thinking models
+  (`qwen3`, `deepseek-r1`) before extracting the envelope. See issue
+  [#98](https://github.com/igmarin/rs-nightshift/issues/98).
+
 ## [0.1.0]
 
 ### Added
