@@ -16,6 +16,7 @@ use crate::error::Error;
 use crate::error::{ArtifactError, ProviderError};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// One LLM completion request for a single role call.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +29,11 @@ pub struct GenerateRequest {
     pub prompt: String,
     /// Sampling temperature.
     pub temperature: f32,
+    /// Per-call completion timeout.
+    ///
+    /// `None` means the adapter's constructed default (typically
+    /// [`crate::domain::rolegraph::config::DEFAULT_GENERATE_TIMEOUT_SECS`]).
+    pub timeout: Option<Duration>,
 }
 
 /// Generates text for one role call.
@@ -341,6 +347,7 @@ mod tests {
             system: Some("You are QA.".into()),
             prompt: "review the patch".into(),
             temperature: 0.2,
+            timeout: None,
         }
     }
 

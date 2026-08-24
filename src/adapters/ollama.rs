@@ -17,7 +17,8 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Default generate timeout for large-context local inference on CPU.
-pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(3600);
+pub const DEFAULT_GENERATE_TIMEOUT: Duration =
+    Duration::from_secs(crate::domain::rolegraph::config::DEFAULT_GENERATE_TIMEOUT_SECS);
 
 /// Timeout for the best-effort `keep_alive: 0` unload request.
 ///
@@ -143,9 +144,15 @@ struct UnloadRequest<'a> {
 }
 
 impl OllamaClient {
-    /// Client for `base_url` with the default 10 minute generate timeout.
+    /// Client for `base_url` with the default generate timeout.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Error> {
         Self::with_timeout(base_url, DEFAULT_GENERATE_TIMEOUT)
+    }
+
+    /// Per-completion timeout used when a generate request does not set its own.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// Client with an explicit request timeout (used in tests).
@@ -221,6 +228,31 @@ impl OllamaClient {
         }
         Ok(())
     }
+
+    /// Complete with an explicit wall-clock timeout, then unload the model.
+    ///
+    /// Completions stay serialized on the internal mutex (INV-1).
+    pub async fn complete_with_timeout(
+        &self,
+        request: LLMRequest,
+        timeout: Duration,
+    ) -> Result<LLMResponse, KernelError> {
+        let _guard = self.generate_lock.lock().await;
+        // The per-request model overrides the client's placeholder model.
+        let model_for_unload = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.inner.model_name().to_string());
+        // Wrap with our own tokio timeout so we can reliably detect timeouts
+        // (the kernel's OpenAIClient maps reqwest timeouts to LlmApi, losing
+        // the structured timeout info).
+        let response = tokio::time::timeout(timeout, self.inner.complete(request))
+            .await
+            .map_err(|_| KernelError::Timeout(timeout.as_secs()))??;
+        // Best-effort unload: a failure here does not fail the completion.
+        let _ = self.unload(&model_for_unload).await;
+        Ok(response)
+    }
 }
 
 impl Origin for OllamaClient {
@@ -232,21 +264,7 @@ impl Origin for OllamaClient {
 #[async_trait]
 impl LLMClient for OllamaClient {
     async fn complete(&self, request: LLMRequest) -> Result<LLMResponse, KernelError> {
-        let _guard = self.generate_lock.lock().await;
-        // The per-request model overrides the client's placeholder model.
-        let model_for_unload = request
-            .model
-            .clone()
-            .unwrap_or_else(|| self.inner.model_name().to_string());
-        // Wrap with our own tokio timeout so we can reliably detect timeouts
-        // (the kernel's OpenAIClient maps reqwest timeouts to LlmApi, losing
-        // the structured timeout info).
-        let response = tokio::time::timeout(self.timeout, self.inner.complete(request))
-            .await
-            .map_err(|_| KernelError::Timeout(self.timeout.as_secs()))??;
-        // Best-effort unload: a failure here does not fail the completion.
-        let _ = self.unload(&model_for_unload).await;
-        Ok(response)
+        self.complete_with_timeout(request, self.timeout).await
     }
 
     fn model_name(&self) -> &str {

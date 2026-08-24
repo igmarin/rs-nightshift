@@ -11,10 +11,19 @@ All notable changes to this project are documented in this file.
   so operators can reject a thinking or too-small model in minutes instead
   of a 30–60 minute CPU run. See issue
   [#100](https://github.com/igmarin/rs-nightshift/issues/100).
+- Per-role `timeout_secs` in `nightshift.toml`. Omitted roles use the 3600s
+  generate default; `timeout_secs = 0` is a config error. See issue
+  [#101](https://github.com/igmarin/rs-nightshift/issues/101).
 - `search-replace` capability: roles can declare `tools = ["search-replace"]`
   and return `file:` / `old:` / `new:` blocks. Each `old` snippet must match
   exactly once; not-found and ambiguous matches abort with no writes. See
   issue [#97](https://github.com/igmarin/rs-nightshift/issues/97).
+
+### Fixed
+
+- Role JSON parsing strips `<think>…</think>` reasoning from thinking models
+  (`qwen3`, `deepseek-r1`) before extracting the envelope. See issue
+  [#98](https://github.com/igmarin/rs-nightshift/issues/98).
 
 ## [0.1.0]
 

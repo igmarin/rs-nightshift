@@ -132,8 +132,9 @@ impl OpenAICompatibleAdapter {
 #[async_trait]
 impl ModelClient for OpenAICompatibleAdapter {
     async fn generate(&self, request: &GenerateRequest) -> Result<String, Error> {
+        let timeout = request.timeout.unwrap_or(self.timeout);
         let response = tokio::time::timeout(
-            self.timeout,
+            timeout,
             self.inner
                 .complete(to_llm_request(request, self.temperature, self.max_tokens)),
         )
@@ -280,6 +281,36 @@ mod tests {
         )
         .expect("client");
         let err = client.generate(&request("m")).await.expect_err("timeout");
+        assert!(
+            matches!(err, Error::Provider(ProviderError::Timeout)),
+            "expected Timeout, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_generate_uses_request_timeout_override() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(200))
+                    .set_body_raw(chat_response("late").as_bytes(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = OpenAICompatibleAdapter::with_timeout(
+            format!("{}/v1", server.uri()),
+            "sk-test",
+            Duration::from_secs(60),
+            None,
+            None,
+        )
+        .expect("client");
+        let mut request = request("m");
+        request.timeout = Some(Duration::from_millis(40));
+        let err = client.generate(&request).await.expect_err("timeout");
         assert!(
             matches!(err, Error::Provider(ProviderError::Timeout)),
             "expected Timeout, got {err:?}"
