@@ -27,6 +27,7 @@ id = "product-owner"
 provider = "deepseek"
 model = "deepseek-v4-pro"        # use `deepseek-reasoner` for the high-thinking variant
 options = { temperature = 0.2 }
+# timeout_secs = 1200            # optional generate timeout; omit for 3600s default. 0 is rejected.
 prompt = """
 You are the Product Owner. Turn the operator's goal into a crisp, testable
 brief. If anything is ambiguous or underspecified, raise blocking questions
@@ -40,6 +41,7 @@ id = "developer"
 provider = "kimi"
 model = "kimi3"
 options = { think = true }
+# timeout_secs = 3600            # raise for large-file CPU inference; omit for the same default
 prompt = """
 You are the Developer. Implement the brief as a patch. If the brief raises
 non-blocking questions, proceed with reasonable assumptions and note them.
