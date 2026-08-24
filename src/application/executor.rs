@@ -274,7 +274,17 @@ fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
 
 /// Extract the outermost JSON object from a model reply.
 fn extract_json_object(text: &str) -> Result<String, Error> {
-    let trimmed = text.trim();
+    // Strip `<think>` reasoning only when the first `{` sits inside a
+    // think block, and only that preamble span — not later tags inside
+    // JSON string values. Allocate only when a preamble has to be removed.
+    let think_stripped;
+    let source: &str = if json_object_starts_inside_think(text) {
+        think_stripped = strip_think_preamble(text);
+        &think_stripped
+    } else {
+        text
+    };
+    let trimmed = source.trim();
     let stripped = trimmed
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
@@ -314,6 +324,169 @@ fn extract_json_object(text: &str) -> Result<String, Error> {
     // Return the extracted text even when it is still invalid; the caller
     // attempts value-level repair before failing.
     extract_balanced_object(&sanitized)
+}
+
+/// True when the first `{` is inside a `<think>…</think>` span (or an unclosed
+/// think block). In that case the brace is draft reasoning, not the envelope.
+fn json_object_starts_inside_think(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let Some(brace) = bytes.iter().position(|&b| b == b'{') else {
+        return false;
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(open_len) = match_think_open(&bytes[i..]) {
+            let after_open = i + open_len;
+            match find_matching_think_close(&bytes[after_open..]) {
+                Some((rel_start, close_len)) => {
+                    let end = after_open + rel_start + close_len;
+                    if brace >= i && brace < end {
+                        return true;
+                    }
+                    i = end;
+                }
+                None => return brace >= i,
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Remove the think span that contains the first `{`, then repeat if the
+/// next first `{` is still inside a think block.
+///
+/// Later `<think>` text (for example inside a JSON `content` string) is
+/// left untouched.
+fn strip_think_preamble(text: &str) -> String {
+    let mut remaining = text.to_string();
+    while json_object_starts_inside_think(&remaining) {
+        remaining = remove_think_span_containing_first_brace(&remaining);
+    }
+    remaining
+}
+
+/// Drop the `<think>…</think>` (or unclosed `<think>…`) that contains the
+/// first `{`. If no such span exists, return `text` unchanged.
+fn remove_think_span_containing_first_brace(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let Some(brace) = bytes.iter().position(|&b| b == b'{') else {
+        return text.to_string();
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(open_len) = match_think_open(&bytes[i..]) {
+            let after_open = i + open_len;
+            match find_matching_think_close(&bytes[after_open..]) {
+                Some((rel_start, close_len)) => {
+                    let end = after_open + rel_start + close_len;
+                    if brace >= i && brace < end {
+                        let mut out = String::with_capacity(text.len() - (end - i));
+                        out.push_str(&text[..i]);
+                        out.push_str(&text[end..]);
+                        return out;
+                    }
+                    i = end;
+                }
+                None => {
+                    if brace >= i {
+                        return text[..i].to_string();
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    text.to_string()
+}
+
+/// Remove every `<think>…</think>` span (test helper for leftover-tag cases).
+///
+/// Production parsing uses [`strip_think_preamble`] so JSON `content` is not
+/// rewritten.
+#[cfg(test)]
+fn strip_think_blocks(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut copy_from = 0;
+    while i < bytes.len() {
+        if let Some(open_len) = match_think_open(&bytes[i..]) {
+            out.push_str(&text[copy_from..i]);
+            let after_open = i + open_len;
+            match find_matching_think_close(&bytes[after_open..]) {
+                Some((rel_start, close_len)) => {
+                    i = after_open + rel_start + close_len;
+                    copy_from = i;
+                }
+                None => {
+                    // Unclosed: drop the rest of the input (INV-8: no panic).
+                    return out;
+                }
+            }
+            continue;
+        }
+        if let Some(close_len) = match_think_close(&bytes[i..]) {
+            // Leftover `</think>` with no open tag.
+            out.push_str(&text[copy_from..i]);
+            i += close_len;
+            copy_from = i;
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(&text[copy_from..]);
+    out
+}
+
+/// Byte length of a case-insensitive `<think>` opening tag at the start of `bytes`.
+fn match_think_open(bytes: &[u8]) -> Option<usize> {
+    match_tag(bytes, b"<think>")
+}
+
+/// Byte length of a case-insensitive `</think>` closing tag at the start of `bytes`.
+fn match_think_close(bytes: &[u8]) -> Option<usize> {
+    match_tag(bytes, b"</think>")
+}
+
+fn match_tag(bytes: &[u8], tag: &[u8]) -> Option<usize> {
+    if bytes.len() < tag.len() {
+        return None;
+    }
+    if bytes[..tag.len()].eq_ignore_ascii_case(tag) {
+        Some(tag.len())
+    } else {
+        None
+    }
+}
+
+/// Find the matching `</think>` for a block that has already consumed its open tag.
+///
+/// Nested `<think>` tags increment depth. Returns `(relative_start, close_len)`
+/// of the matching close tag, or `None` if the block is unclosed.
+fn find_matching_think_close(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut depth: usize = 1;
+    let mut j = 0;
+    while j < bytes.len() {
+        if let Some(open_len) = match_think_open(&bytes[j..]) {
+            depth = depth.saturating_add(1);
+            j += open_len;
+            continue;
+        }
+        if let Some(close_len) = match_think_close(&bytes[j..]) {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some((j, close_len));
+            }
+            j += close_len;
+            continue;
+        }
+        j += 1;
+    }
+    None
 }
 
 /// Find the first `{` and return the substring through the matching `}`,
@@ -1517,6 +1690,117 @@ mod tests {
         let raw = r#"{"verdict":"done","content":null}"#;
         let err = parse_role_output(raw).expect_err("null content rejected");
         assert!(err.to_string().contains("role output"), "{err}");
+    }
+
+    #[test]
+    fn parse_strips_think_block_before_json() {
+        // qwen3-style: reasoning in <think> can contain a draft `{` object.
+        // Extraction must ignore that and parse the envelope after </think>.
+        let raw = concat!(
+            "<think>\n",
+            "I will emit {\"verdict\":\"fail\",\"content\":\"no\"} as a draft.\n",
+            "</think>\n",
+            "{\"verdict\":\"done\",\"content\":\"ok\"}",
+        );
+        let output = parse_role_output(raw).expect("think block stripped");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_json_after_think_and_reasoning_prose() {
+        // After think-strip, remaining prose before the first `{` is ignored
+        // by extract_balanced_object (same as non-thinking models).
+        let raw = concat!(
+            "<think>draft {\"verdict\":\"fail\",\"content\":\"no\"}</think>\n",
+            "Sure, here is the envelope you asked for:\n",
+            "{\"verdict\":\"done\",\"content\":\"ok\"}",
+        );
+        let output = parse_role_output(raw).expect("prose before JSON ignored");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_think_block_only_is_error() {
+        let raw = "<think>I reasoned at length and never produced an envelope.</think>";
+        let err = parse_role_output(raw).expect_err("think-only reply is not JSON");
+        assert!(err.to_string().contains("JSON object"), "{err}");
+    }
+
+    #[test]
+    fn parse_unclosed_think_block_does_not_panic() {
+        // INV-8: unclosed <think> drops through end-of-string; JSON after a
+        // missing </think> is not parsed, and we must not panic.
+        let raw = "<think>still reasoning\n{\"verdict\":\"done\",\"content\":\"ok\"}";
+        let err = parse_role_output(raw).expect_err("unclosed think swallows trailing JSON");
+        assert!(err.to_string().contains("JSON object"), "{err}");
+    }
+
+    #[test]
+    fn parse_strips_case_insensitive_think_tags() {
+        let raw = concat!(
+            "<THINK>draft {\"verdict\":\"fail\",\"content\":\"no\"}</Think>\n",
+            "{\"verdict\":\"done\",\"content\":\"ok\"}",
+        );
+        let output = parse_role_output(raw).expect("case-insensitive think tags stripped");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_strips_nested_think_blocks() {
+        let raw = concat!(
+            "<think>outer <think>{\"verdict\":\"fail\",\"content\":\"inner\"}</think>",
+            " still {\"verdict\":\"fail\",\"content\":\"outer\"}</think>\n",
+            "{\"verdict\":\"done\",\"content\":\"ok\"}",
+        );
+        let output = parse_role_output(raw).expect("nested think blocks stripped");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_strips_leftover_think_close_tags() {
+        let raw = "</think>\n{\"verdict\":\"done\",\"content\":\"ok\"}";
+        let output = parse_role_output(raw).expect("leftover </think> stripped");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+        assert_eq!(
+            strip_think_blocks("</think> leftover </THINK> tail"),
+            " leftover  tail"
+        );
+    }
+
+    #[test]
+    fn parse_preserves_think_in_content_after_think_preamble() {
+        // Reasoning preamble contains a draft `{`, so it must be stripped,
+        // but literal tags in the real envelope's content must survive.
+        let raw = concat!(
+            "<think>draft {\"verdict\":\"fail\",\"content\":\"no\"}</think>\n",
+            r#"{"verdict":"done","content":"show <think>example</think>"}"#,
+        );
+        let output = parse_role_output(raw).expect("preamble stripped, content kept");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "show <think>example</think>");
+    }
+
+    #[test]
+    fn parse_preserves_think_tags_inside_json_content() {
+        // A valid envelope must not be rewritten: literal <think> in content
+        // is data, not a reasoning preamble.
+        let raw = r#"{"verdict":"done","content":"show <think>example</think>"}"#;
+        let output = parse_role_output(raw).expect("literal think tags in content kept");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "show <think>example</think>");
+    }
+
+    #[test]
+    fn parse_preserves_unclosed_think_tag_inside_json_content() {
+        let raw = r#"{"verdict":"done","content":"hello <think> still json"}"#;
+        let output = parse_role_output(raw).expect("unclosed think in content kept");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "hello <think> still json");
     }
 
     #[tokio::test]
