@@ -93,10 +93,8 @@ pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
         Ok(()) => {}
         Err(original) => {
             let repaired = repair_hunk_headers(patch);
-            if repaired != patch {
-                if apply_check(repo, &repaired).is_ok() {
-                    return apply_raw(repo, &repaired);
-                }
+            if repaired != patch && apply_check(repo, &repaired).is_ok() {
+                return apply_raw(repo, &repaired);
             }
             // Last resort: 3-way merge uses the index to resolve context
             // mismatches. This handles the common case where the model got
