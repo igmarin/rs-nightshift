@@ -269,11 +269,14 @@ fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
 fn extract_json_object(text: &str) -> Result<String, Error> {
     // Strip `<think>` reasoning only when the first `{` sits inside a
     // think block. If the envelope is already JSON, literal tags in
-    // string values (e.g. `content`) must be preserved.
-    let source = if json_object_starts_inside_think(text) {
-        strip_think_blocks(text)
+    // string values (e.g. `content`) must be preserved. Allocate only
+    // when a preamble actually has to be removed.
+    let stripped;
+    let source: &str = if json_object_starts_inside_think(text) {
+        stripped = strip_think_blocks(text);
+        &stripped
     } else {
-        text.to_string()
+        text
     };
     let trimmed = source.trim();
     let stripped = trimmed
