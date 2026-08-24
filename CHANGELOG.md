@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `nightshift bench --model <tag>`: three fast harness-compatibility
+  micro-tasks (JSON validity, text quoting, instruction-following format)
+  so operators can reject a thinking or too-small model in minutes instead
+  of a 30–60 minute CPU run. See issue
+  [#100](https://github.com/igmarin/rs-nightshift/issues/100).
 - `search-replace` capability: roles can declare `tools = ["search-replace"]`
   and return `file:` / `old:` / `new:` blocks. Each `old` snippet must match
   exactly once; not-found and ambiguous matches abort with no writes. See
