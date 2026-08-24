@@ -85,3 +85,42 @@ Dev = "qwen2.5-coder:14b"
 export NIGHTSHIFT_CONFIG=/etc/nightshift/production.toml
 nightshift run --goal "…" --repo ~/projects/my-app
 ```
+
+## Role tools
+
+Each `[[roles]]` block may declare `tools = [...]`. Models return text plus a
+verdict; the harness performs the side effect. Unknown names are rejected at
+config load.
+
+| Tool | When it runs | What it does |
+| :--- | :----------- | :----------- |
+| `gather-context` | Before the LLM call | Injects codegraph/graphify context (and optional `context_files`) into the prompt |
+| `run-tests` | Before the LLM call | Runs the detected test command and injects the results |
+| `apply-patch` | After `continue` / `done` | Applies the role's `content` as a unified diff (`git apply --check`, then apply) |
+| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the full file |
+| `search-replace` | After `continue` / `done` | Replaces unique `old:` snippets with `new:` text in existing files |
+
+### search-replace
+
+Prefer this over `apply-patch` or `write-file` when the model can quote a unique
+snippet but cannot emit a correct diff or regenerate a large file.
+
+```toml
+[[roles]]
+id = "developer"
+tools = ["gather-context", "search-replace"]
+```
+
+Put the edits in the JSON `content` field:
+
+```text
+file: public/index.html
+old: <h1>Welcome</h1>
+new: <h1>Hello</h1>
+```
+
+Multi-line snippets and extra `old:` / `new:` blocks (same file or another
+`file:` header) are allowed. Each `old` text must match exactly once; zero
+matches or two-plus matches abort the whole tool call and leave the repo
+unchanged. Paths must stay inside the repo. The tool never creates files and
+never commits.

@@ -8,7 +8,7 @@ satisfied.
 
 | Module         | Use case |
 | :------------- | :------- |
-| `executor.rs`  | run one role: pre-tools (`gather-context`, `run-tests`) inject real results into the prompt; the LLM call goes through the `ModelClient` port; the verdict envelope is parsed; the deliverable is written via `ArtifactStore`; the post-tool `apply-patch` runs for `continue` / `done` verdicts |
+| `executor.rs`  | run one role: pre-tools (`gather-context`, `run-tests`) inject real results into the prompt; the LLM call goes through the `ModelClient` port; the verdict envelope is parsed; the deliverable is written via `ArtifactStore`; post-tools (`apply-patch`, `write-file`, `search-replace`) run for `continue` / `done` verdicts |
 | `orchestrator.rs` | walk the role graph from `run.start`: route deterministically on each verdict (`continue` / `issues` / `questions` / `done` / `fail`), enforce the global `max_steps` ceiling and per-role `max_loop` back-edge caps, append action-log events and the status snapshot via the `StateStore` / `Clock` ports, and stop at a terminal state |
 | `report.rs`     | render the morning report from the persisted snapshot + action log: status label (`PASSED` / `FAILED` / `REQUIRES_HUMAN_REVIEW`), step count, block-reason description, and the role trail |
 

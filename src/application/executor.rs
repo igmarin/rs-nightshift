@@ -30,6 +30,14 @@ to send findings back for a fix, \"questions\" to ask for clarification, \
 \"done\" when finished, \"fail\" on a hard error. Put your full deliverable \
 text in \"content\".";
 
+/// Extra contract appended when a role declares the `search-replace` tool.
+const SEARCH_REPLACE_CONTRACT: &str =
+    "When using search-replace, put the edits in \"content\" as:\n\
+file: <repo-relative path>\n\
+old: <exact unique snippet>\n\
+new: <replacement>\n\
+Repeat old/new blocks for more edits. old_text must match exactly once.";
+
 /// Loop-back context carried into a role when a back-edge fires.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoleContext {
@@ -166,18 +174,15 @@ where
         None => None,
     };
 
-    // Post-tools: apply the patch or write the file only for verdicts that
-    // carry a deliverable.
+    // Post-tools: apply the patch, write the file, or search-replace only for
+    // verdicts that carry a deliverable.
     if matches!(output.verdict, Verdict::Continue | Verdict::Done) {
         for tool in &params.role.tools {
-            if tool == "apply-patch" {
-                tools
-                    .run("apply-patch", params.repo, &output.content)
-                    .await?;
-            } else if tool == "write-file" {
-                tools
-                    .run("write-file", params.repo, &output.content)
-                    .await?;
+            if matches!(
+                tool.as_str(),
+                "apply-patch" | "write-file" | "search-replace"
+            ) {
+                tools.run(tool, params.repo, &output.content).await?;
             }
         }
     }
@@ -188,11 +193,16 @@ where
 /// Assemble the system prompt: the role's job plus the output contract.
 fn system_prompt(role: &RoleSpec) -> String {
     let prompt = role.prompt.trim();
-    if prompt.is_empty() {
+    let mut out = if prompt.is_empty() {
         OUTPUT_CONTRACT.to_string()
     } else {
         format!("{prompt}\n\n{OUTPUT_CONTRACT}")
+    };
+    if role.tools.iter().any(|tool| tool == "search-replace") {
+        out.push_str("\n\n");
+        out.push_str(SEARCH_REPLACE_CONTRACT);
     }
+    out
 }
 
 /// Assemble the user prompt from the goal, pre-tool output, loop-back context,
@@ -1184,11 +1194,71 @@ mod tests {
         assert_eq!(calls[0].1, "--- patch ---");
     }
 
+    #[tokio::test]
+    async fn execute_runs_search_replace_after_generation() {
+        let client = ScriptedModelClient::new();
+        client.push_text(
+            r#"{"verdict":"continue","content":"file: hello.txt\nold: hello\nnew: hi"}"#,
+        );
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role_with_tools(Some("02_patch.patch"), &["search-replace"]);
+        let ctx = context();
+        let tools = StubToolRunner::new("replaced 1 block in hello.txt");
+        execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        let calls = tools.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "search-replace");
+        assert!(calls[0].1.contains("old: hello"), "{}", calls[0].1);
+        assert!(calls[0].1.contains("new: hi"), "{}", calls[0].1);
+    }
+
+    #[tokio::test]
+    async fn execute_skips_search_replace_on_issues_verdict() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"issues","content":"file: hello.txt\nold: a\nnew: b"}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role_with_tools(Some("02_patch.patch"), &["search-replace"]);
+        let ctx = context();
+        let tools = StubToolRunner::new("replaced");
+        execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        assert!(tools.calls().is_empty());
+    }
+
     #[test]
     fn system_prompt_appends_contract() {
         let system = system_prompt(&role(None));
         assert!(system.contains("You are a developer."));
         assert!(system.contains("verdict"));
+        assert!(
+            !system.contains("search-replace"),
+            "roles without the tool should not see its contract: {system}"
+        );
+    }
+
+    #[test]
+    fn system_prompt_appends_search_replace_contract_when_declared() {
+        let system = system_prompt(&role_with_tools(None, &["search-replace"]));
+        assert!(system.contains("search-replace"), "{system}");
+        assert!(system.contains("old:"), "{system}");
+        assert!(system.contains("new:"), "{system}");
     }
 
     #[test]

@@ -72,7 +72,7 @@ pub struct RoleSpec {
     /// Artifact file the role writes (relative to the run dir).
     #[serde(default)]
     pub output: Option<String>,
-    /// Code-side tools the role declares (`apply-patch`, `run-tests`, …).
+    /// Code-side tools the role declares (`apply-patch`, `search-replace`, …).
     #[serde(default)]
     pub tools: Vec<String>,
     /// Repo-relative files to read and inject as raw context (for non-code
@@ -161,7 +161,13 @@ impl NightshiftConfig {
                 }
             }
         }
-        const KNOWN_TOOLS: [&str; 4] = ["gather-context", "run-tests", "apply-patch", "write-file"];
+        const KNOWN_TOOLS: [&str; 5] = [
+            "gather-context",
+            "run-tests",
+            "apply-patch",
+            "write-file",
+            "search-replace",
+        ];
         for role in &self.roles {
             for tool in &role.tools {
                 if !KNOWN_TOOLS.contains(&tool.as_str()) {
@@ -382,6 +388,41 @@ on = { issues = "developer" }
         let qa = config.roles.iter().find(|r| r.id == "qa").expect("qa");
         assert_eq!(qa.on.continue_target(), Target::Done);
         assert_eq!(qa.on.issues_target(), Target::Role("developer".into()));
+    }
+
+    #[test]
+    fn search_replace_is_a_known_tool() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+tools = ["search-replace"]
+"#,
+        )
+        .expect("parse");
+        config.validate().expect("search-replace is a known tool");
+    }
+
+    #[test]
+    fn unknown_tool_is_an_error() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+tools = ["fly"]
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("unknown tool must fail");
+        assert!(err.to_string().contains("unknown tool"), "{err}");
     }
 
     #[test]
