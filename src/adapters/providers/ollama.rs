@@ -6,7 +6,8 @@ use crate::error::Error;
 use crate::generate::Origin;
 use crate::ports::{GenerateRequest, ModelClient};
 use async_trait::async_trait;
-use llm_kernel::llm::{LLMClient, LLMRequest};
+use llm_kernel::llm::LLMRequest;
+use std::time::Duration;
 
 use super::openai::to_llm_request;
 
@@ -28,18 +29,15 @@ pub struct OllamaAdapter {
     temperature: Option<f32>,
     /// Requested max output tokens.
     max_tokens: Option<u32>,
+    /// Per-completion timeout used when the request does not set its own.
+    timeout: Duration,
 }
 
 impl OllamaAdapter {
     /// Adapter over `inner` with no `:think` suffix and no per-role options.
     #[must_use]
     pub fn new(inner: OllamaClient, think: bool) -> Self {
-        Self {
-            inner,
-            think,
-            temperature: None,
-            max_tokens: None,
-        }
+        Self::with_options(inner, think, None, None)
     }
 
     /// Adapter over `inner` with an explicit think flag and per-role options.
@@ -50,11 +48,13 @@ impl OllamaAdapter {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Self {
+        let timeout = inner.timeout();
         Self {
             inner,
             think,
             temperature,
             max_tokens,
+            timeout,
         }
     }
 }
@@ -62,6 +62,7 @@ impl OllamaAdapter {
 #[async_trait]
 impl ModelClient for OllamaAdapter {
     async fn generate(&self, request: &GenerateRequest) -> Result<String, Error> {
+        let timeout = request.timeout.unwrap_or(self.timeout);
         let model = resolve_ollama_model(&request.model, self.think);
         let llm_request = LLMRequest {
             model: Some(model),
@@ -69,7 +70,7 @@ impl ModelClient for OllamaAdapter {
         };
         let response = self
             .inner
-            .complete(llm_request)
+            .complete_with_timeout(llm_request, timeout)
             .await
             .map_err(|error| map_kernel_error(error, &request.model))?;
         Ok(response.content)
@@ -198,5 +199,30 @@ mod tests {
             client.redacted_origin().as_deref(),
             Some("http://127.0.0.1:11434")
         );
+    }
+
+    #[tokio::test]
+    async fn ollama_generate_uses_request_timeout_override() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(200))
+                    .set_body_raw(chat_response("late").as_bytes(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let inner =
+            OllamaClient::with_timeout(server.uri(), Duration::from_secs(60)).expect("client");
+        let client = OllamaAdapter::new(inner, false);
+        let mut request = request("m");
+        request.timeout = Some(Duration::from_millis(40));
+        let err = client.generate(&request).await.expect_err("timeout");
+        match err {
+            Error::Provider(crate::error::ProviderError::Timeout) => {}
+            other => panic!("expected Timeout, got {other:?}"),
+        }
     }
 }

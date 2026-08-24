@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Per-role `timeout_secs` in `nightshift.toml`. Omitted roles use the 3600s
+  generate default; `timeout_secs = 0` is a config error. See issue
+  [#101](https://github.com/igmarin/rs-nightshift/issues/101).
 - `search-replace` capability: roles can declare `tools = ["search-replace"]`
   and return `file:` / `old:` / `new:` blocks. Each `old` snippet must match
   exactly once; not-found and ambiguous matches abort with no writes. See

@@ -86,6 +86,26 @@ export NIGHTSHIFT_CONFIG=/etc/nightshift/production.toml
 nightshift run --goal "…" --repo ~/projects/my-app
 ```
 
+## Per-role generate timeout
+
+Each `[[roles]]` block may set `timeout_secs` for that role's LLM completion.
+Omitted roles use the global default of 3600 seconds (the same value as
+`DEFAULT_GENERATE_TIMEOUT` in `src/adapters/ollama.rs`). `timeout_secs = 0` is
+rejected at config load.
+
+```toml
+[[roles]]
+id = "product-owner"
+timeout_secs = 1200  # 20 min — PO/QA often finish faster
+
+[[roles]]
+id = "developer"
+timeout_secs = 3600  # 60 min — large-file generation on CPU
+```
+
+Do not put the timeout only in `options`; it is a first-class field so the
+harness can bound the generate call, not a provider sampling knob.
+
 ## Role tools
 
 Each `[[roles]]` block may declare `tools = [...]`. Models return text plus a

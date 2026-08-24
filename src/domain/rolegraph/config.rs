@@ -12,6 +12,9 @@ pub const DEFAULT_MAX_STEPS: u32 = 30;
 /// Default per-role cap on how many times a back-edge may fire.
 pub const DEFAULT_MAX_LOOP: u32 = 3;
 
+/// Default per-role generate timeout in seconds when `timeout_secs` is omitted.
+pub const DEFAULT_GENERATE_TIMEOUT_SECS: u64 = 3600;
+
 /// How the harness treats clarifying questions it cannot resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +88,13 @@ pub struct RoleSpec {
     /// Cap on how many times a back-edge from this role may fire.
     #[serde(default = "default_max_loop")]
     pub max_loop: u32,
+    /// Per-role generate timeout in seconds.
+    ///
+    /// When omitted, the generate path falls back to
+    /// [`DEFAULT_GENERATE_TIMEOUT_SECS`]. `timeout_secs = 0` is rejected at
+    /// validation.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// The parsed `nightshift.toml` role graph.
@@ -133,6 +143,14 @@ impl NightshiftConfig {
         }
         if self.run.max_steps == 0 {
             return Err(Error::RoleGraph("max_steps must be at least 1".into()));
+        }
+        for role in &self.roles {
+            if role.timeout_secs == Some(0) {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} timeout_secs must be at least 1",
+                    role.id
+                )));
+            }
         }
         for role in &self.roles {
             if role.provider != "ollama" && !self.providers.contains_key(&role.provider) {
@@ -770,5 +788,48 @@ tools = ["gather-context"]
         .expect("parse");
         let err = config.validate().expect_err("too many entries must fail");
         assert!(err.to_string().contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn timeout_secs_parses_and_validates() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "qa"
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "phi4"
+timeout_secs = 1200
+"#,
+        )
+        .expect("parse");
+        config.validate().expect("valid timeout_secs");
+        assert_eq!(config.roles[0].timeout_secs, Some(1200));
+    }
+
+    #[test]
+    fn timeout_secs_omitted_is_none() {
+        let config = parse_example();
+        config.validate().expect("valid graph");
+        assert!(config.roles.iter().all(|role| role.timeout_secs.is_none()));
+    }
+
+    #[test]
+    fn zero_timeout_secs_is_an_error() {
+        let config: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "qa"
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "phi4"
+timeout_secs = 0
+"#,
+        )
+        .expect("parse");
+        let err = config.validate().expect_err("zero timeout_secs must fail");
+        assert!(err.to_string().contains("timeout_secs"), "{err}");
     }
 }

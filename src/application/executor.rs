@@ -1,10 +1,11 @@
 //! Role executor: run one role in the graph.
 
-use crate::domain::rolegraph::config::{is_secret_path, RoleSpec};
+use crate::domain::rolegraph::config::{is_secret_path, RoleSpec, DEFAULT_GENERATE_TIMEOUT_SECS};
 use crate::domain::rolegraph::verdict::{RoleOutput, Verdict};
 use crate::error::{ArtifactError, Error};
 use crate::ports::{ArtifactStore, ContextProvider, GenerateRequest, ModelClient, ToolRunner};
 use std::path::Path;
+use std::time::Duration;
 
 /// Default sampling temperature for role calls.
 ///
@@ -150,6 +151,12 @@ where
             system: Some(system_prompt(params.role)),
             prompt: user_prompt(params.context, &contents, &tool_output),
             temperature: DEFAULT_TEMPERATURE,
+            timeout: Some(Duration::from_secs(
+                params
+                    .role
+                    .timeout_secs
+                    .unwrap_or(DEFAULT_GENERATE_TIMEOUT_SECS),
+            )),
         })
         .await?;
     let output = parse_role_output(&text).inspect_err(|_error| {
@@ -1087,6 +1094,7 @@ mod tests {
             context_files: Vec::new(),
             on: Routing::default(),
             max_loop: 3,
+            timeout_secs: None,
         }
     }
 
@@ -1180,6 +1188,54 @@ mod tests {
             calls[0].prompt
         );
         assert!(calls[0].prompt.contains("the brief"), "{}", calls[0].prompt);
+    }
+
+    #[tokio::test]
+    async fn execute_passes_role_timeout_secs_on_generate() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let mut role = role(None);
+        role.timeout_secs = Some(1200);
+        let ctx = context();
+        execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        let calls = client.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].timeout, Some(Duration::from_secs(1200)));
+    }
+
+    #[tokio::test]
+    async fn execute_falls_back_to_default_generate_timeout() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = role(None);
+        let ctx = context();
+        execute(
+            &client,
+            &store,
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        let calls = client.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].timeout,
+            Some(Duration::from_secs(DEFAULT_GENERATE_TIMEOUT_SECS))
+        );
     }
 
     #[tokio::test]
