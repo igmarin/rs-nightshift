@@ -31,7 +31,7 @@ fn help_lists_commands() {
     let output = nightshift(&["--help"]);
     assert!(output.status.success(), "exit: {:?}", output.status);
     let text = stdout(&output);
-    for command in ["doctor", "status", "run"] {
+    for command in ["doctor", "status", "run", "bench"] {
         assert!(text.contains(command), "missing {command} in: {text}");
     }
     assert!(
@@ -41,6 +41,26 @@ fn help_lists_commands() {
     assert!(
         text.contains("NIGHTSHIFT_OLLAMA_URL"),
         "missing Ollama URL environment variable: {text}"
+    );
+}
+
+#[test]
+fn bench_help_documents_timeout_and_model() {
+    let output = nightshift(&["bench", "--help"]);
+    assert!(output.status.success(), "exit: {:?}", output.status);
+    let text = stdout(&output);
+    assert!(text.contains("--model"), "missing --model: {text}");
+    assert!(text.contains("120"), "missing 120s timeout in help: {text}");
+}
+
+#[test]
+fn bench_without_model_fails() {
+    let output = nightshift(&["bench"]);
+    assert!(!output.status.success(), "expected failure");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        text.contains("--model") || text.contains("required"),
+        "{text}"
     );
 }
 

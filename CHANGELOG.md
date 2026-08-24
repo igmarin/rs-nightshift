@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `nightshift bench --model <tag>`: three fast harness-compatibility
+  micro-tasks (JSON validity, text quoting, instruction-following format)
+  so operators can reject a thinking or too-small model in minutes instead
+  of a 30–60 minute CPU run. See issue
+  [#100](https://github.com/igmarin/rs-nightshift/issues/100).
 - Per-role `timeout_secs` in `nightshift.toml`. Omitted roles use the 3600s
   generate default; `timeout_secs = 0` is a config error. See issue
   [#101](https://github.com/igmarin/rs-nightshift/issues/101).

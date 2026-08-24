@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "nightshift", version, about)]
 pub struct Cli {
-    /// Ollama HTTP origin used by `doctor` and `run`.
+    /// Ollama HTTP origin used by `doctor`, `run`, and `bench`.
     #[arg(
         long,
         env = "NIGHTSHIFT_OLLAMA_URL",
@@ -90,6 +90,16 @@ pub enum Command {
         /// Target repo for capabilities (e.g. apply-patch).
         #[arg(long)]
         repo: PathBuf,
+    },
+    /// Probe a model with three fast harness-compatibility micro-tasks.
+    ///
+    /// Each task waits up to 120 seconds (CPU models are slow). Use this
+    /// before a full run so a thinking or too-small model fails in minutes
+    /// instead of 30–60 minutes.
+    Bench {
+        /// Model tag to probe (for example `llama3.1:8b`).
+        #[arg(long)]
+        model: String,
     },
     /// Pre-flight: run the entry role and resolve its questions interactively.
     Plan {
@@ -337,6 +347,26 @@ mod tests {
             }
             other => panic!("expected Harness, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_bench_model() {
+        let cli =
+            Cli::try_parse_from(["nightshift", "bench", "--model", "llama3.1:8b"]).expect("parse");
+        match cli.command {
+            Command::Bench { model } => assert_eq!(model, "llama3.1:8b"),
+            other => panic!("expected Bench, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bench_requires_model() {
+        let err = Cli::try_parse_from(["nightshift", "bench"]).expect_err("required");
+        let text = err.to_string();
+        assert!(
+            text.contains("required") || text.contains("--model"),
+            "{text}"
+        );
     }
 
     #[test]
