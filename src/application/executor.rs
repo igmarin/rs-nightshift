@@ -267,8 +267,15 @@ fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
 
 /// Extract the outermost JSON object from a model reply.
 fn extract_json_object(text: &str) -> Result<String, Error> {
-    let without_think = strip_think_blocks(text);
-    let trimmed = without_think.trim();
+    // Strip `<think>` reasoning only when the first `{` sits inside a
+    // think block. If the envelope is already JSON, literal tags in
+    // string values (e.g. `content`) must be preserved.
+    let source = if json_object_starts_inside_think(text) {
+        strip_think_blocks(text)
+    } else {
+        text.to_string()
+    };
+    let trimmed = source.trim();
     let stripped = trimmed
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
@@ -308,6 +315,34 @@ fn extract_json_object(text: &str) -> Result<String, Error> {
     // Return the extracted text even when it is still invalid; the caller
     // attempts value-level repair before failing.
     extract_balanced_object(&sanitized)
+}
+
+/// True when the first `{` is inside a `<think>…</think>` span (or an unclosed
+/// think block). In that case the brace is draft reasoning, not the envelope.
+fn json_object_starts_inside_think(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let Some(brace) = bytes.iter().position(|&b| b == b'{') else {
+        return false;
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(open_len) = match_think_open(&bytes[i..]) {
+            let after_open = i + open_len;
+            match find_matching_think_close(&bytes[after_open..]) {
+                Some((rel_start, close_len)) => {
+                    let end = after_open + rel_start + close_len;
+                    if brace >= i && brace < end {
+                        return true;
+                    }
+                    i = end;
+                }
+                None => return brace >= i,
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Remove `<think>…</think>` reasoning (qwen3 / deepseek-r1) before JSON extraction.
@@ -1629,6 +1664,24 @@ mod tests {
             strip_think_blocks("</think> leftover </THINK> tail"),
             " leftover  tail"
         );
+    }
+
+    #[test]
+    fn parse_preserves_think_tags_inside_json_content() {
+        // A valid envelope must not be rewritten: literal <think> in content
+        // is data, not a reasoning preamble.
+        let raw = r#"{"verdict":"done","content":"show <think>example</think>"}"#;
+        let output = parse_role_output(raw).expect("literal think tags in content kept");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "show <think>example</think>");
+    }
+
+    #[test]
+    fn parse_preserves_unclosed_think_tag_inside_json_content() {
+        let raw = r#"{"verdict":"done","content":"hello <think> still json"}"#;
+        let output = parse_role_output(raw).expect("unclosed think in content kept");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "hello <think> still json");
     }
 
     #[tokio::test]
