@@ -253,7 +253,8 @@ pub trait ModelClientFactory: Send + Sync {
     ) -> Result<Box<dyn ModelClient>, Error>;
 }
 
-/// Runs a declared capability (`run-tests`, `apply-patch`, `gather-context`).
+/// Runs a declared capability (`run-tests`, `apply-patch`, `write-file`,
+/// `search-replace`, `gather-context`).
 #[async_trait::async_trait]
 pub trait ToolRunner: Send + Sync {
     /// Run `tool` against `repo`, using `input` (the role's artifact text, or

@@ -43,8 +43,9 @@ module-by-module guide, see the per-folder READMEs under `src/`.
   graph orchestrator, and the terminal report. Orchestration only.
 - **Adapters** (`src/adapters/`) — the implementations: LLM providers + the
   client factory, capabilities (`run-tests` / `apply-patch` /
-  `gather-context`), the filesystem artifact and state stores, and the system
-  clock. The only layer that imports `llm-kernel` / `reqwest` or shells out.
+  `write-file` / `search-replace` / `gather-context`), the filesystem artifact
+  and state stores, and the system clock. The only layer that imports
+  `llm-kernel` / `reqwest` or shells out.
 
 **The rule:** domain and application never do I/O — never `std::net`,
 `reqwest`, `tokio::fs`, or `std::process` directly; every side effect happens
@@ -134,6 +135,12 @@ the capability adapters (`src/adapters/capabilities.rs`), declared per role via
 - **`apply-patch`** — validate the diff paths (no `..`, no absolute paths),
   `git apply --check`, dirty-tree guard, then apply. Runs as a post-tool for
   `continue` / `done` verdicts. Never commits.
+- **`write-file`** — write `content` that starts with `file: <path>` as the
+  full file. Post-tool for `continue` / `done`. Path must stay in the repo.
+- **`search-replace`** — exact `old:` / `new:` substitutions in existing
+  files. Each `old` snippet must match once (including overlapping matches);
+  not-found and ambiguous matches abort with no writes. Secret-bearing paths
+  are rejected. Post-tool for `continue` / `done`. Never commits.
 - **`gather-context`** — the codegraph + graphify context bundle, injected
   into the role's prompt as repo context.
 

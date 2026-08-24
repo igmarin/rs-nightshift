@@ -46,6 +46,12 @@ non-blocking questions, proceed with reasonable assumptions and note them.
 """
 output = "02_patch.patch"
 tools = ["gather-context", "apply-patch"]
+# For large-file edits, prefer search-replace over apply-patch / write-file:
+# tools = ["gather-context", "search-replace"]
+# content format:
+#   file: path/to/file
+#   old: unique snippet
+#   new: replacement
 # context_files = ["public/index.html"]   # raw file content for non-code files
 #   - requires "gather-context" in tools
 #   - max 10 files; each truncated at 8 KiB (UTF-8-safe)

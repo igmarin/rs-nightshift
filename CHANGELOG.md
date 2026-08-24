@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `search-replace` capability: roles can declare `tools = ["search-replace"]`
+  and return `file:` / `old:` / `new:` blocks. Each `old` snippet must match
+  exactly once; not-found and ambiguous matches abort with no writes. See
+  issue [#97](https://github.com/igmarin/rs-nightshift/issues/97).
+
 ## [0.1.0]
 
 ### Added

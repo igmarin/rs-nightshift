@@ -44,7 +44,7 @@ Ports (traits the domain defines; adapters implement):
 | Port | What it abstracts |
 | :--- | :--- |
 | `ModelClient` | one LLM call (`complete(model, prompt) -> text`) + error mapping |
-| `ToolRunner` | a declared capability (`run-tests`, `apply-patch`, `gather-context`) |
+| `ToolRunner` | a declared capability (`run-tests`, `apply-patch`, `write-file`, `search-replace`, `gather-context`) |
 | `ArtifactStore` | create run dir, read/write artifacts, `latest` pointer |
 | `StateStore` | append action-log events + write/read the status snapshot |
 | `ContextProvider` | repo context (codegraph/graphify) for context injection |
@@ -194,6 +194,10 @@ used as argv).
 
 - `apply-patch` — `git apply --check` first, validate patch paths stay in the
   repo, dirty-tree guard, then apply.
+- `write-file` — write `content` starting with `file: <path>` as the full file.
+- `search-replace` — exact `old:` / `new:` replacements in existing files.
+  Unique match required; not-found and ambiguous matches are errors. Never
+  creates files, never commits.
 - `run-tests` — detect the test command (`cargo test`, `bundle exec rspec`,
   `mix test`, `pytest`, or from config), run it, capture exit code + tail.
 - `gather-context` — the `codegraph` + `graphify` context bundle (as today).
