@@ -44,7 +44,7 @@ jobs:
         with:
           # The action installs this exact npm version; npm checks the package
           # integrity against the registry.
-          ocr_version: '1.12.12'
+          ocr_version: 'latest'
           llm_url: https://api.anthropic.com
           llm_auth_token: ${{ secrets.CLAUDE_API_KEY }}
           llm_model: claude-haiku-5-5
