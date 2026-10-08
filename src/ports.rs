@@ -12,8 +12,11 @@
 use crate::domain::rolegraph::config::ProviderSpec;
 use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot};
 use crate::error::Error;
+#[cfg(test)]
+use crate::error::{ArtifactError, ProviderError};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// One LLM completion request for a single role call.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +29,11 @@ pub struct GenerateRequest {
     pub prompt: String,
     /// Sampling temperature.
     pub temperature: f32,
+    /// Per-call completion timeout.
+    ///
+    /// `None` means the adapter's constructed default (typically
+    /// [`crate::domain::rolegraph::config::DEFAULT_GENERATE_TIMEOUT_SECS`]).
+    pub timeout: Option<Duration>,
 }
 
 /// Generates text for one role call.
@@ -94,7 +102,11 @@ impl ModelClient for ScriptedModelClient {
             .lock()
             .expect("script mutex")
             .pop_front()
-            .unwrap_or_else(|| Err(Error::Artifact("no scripted replies remaining".into())))
+            .unwrap_or_else(|| {
+                Err(Error::from(ArtifactError::artifact(
+                    "no scripted replies remaining",
+                )))
+            })
     }
 }
 
@@ -162,7 +174,7 @@ impl ArtifactStore for MemoryArtifactStore {
             .expect("store mutex")
             .get(name)
             .cloned()
-            .ok_or_else(|| Error::Artifact(format!("no artifact {name}")))
+            .ok_or_else(|| Error::from(ArtifactError::artifact(format!("no artifact {name}"))))
     }
 
     fn write_artifact(&self, _run: &Path, name: &str, content: &str) -> Result<(), Error> {
@@ -227,7 +239,7 @@ impl StateStore for MemoryStateStore {
             .lock()
             .expect("store mutex")
             .clone()
-            .ok_or_else(|| Error::Artifact("no snapshot written".into()))
+            .ok_or_else(|| Error::from(ArtifactError::artifact("no snapshot written")))
     }
 }
 
@@ -247,7 +259,8 @@ pub trait ModelClientFactory: Send + Sync {
     ) -> Result<Box<dyn ModelClient>, Error>;
 }
 
-/// Runs a declared capability (`run-tests`, `apply-patch`, `gather-context`).
+/// Runs a declared capability (`run-tests`, `apply-patch`, `write-file`,
+/// `search-replace`, `gather-context`).
 #[async_trait::async_trait]
 pub trait ToolRunner: Send + Sync {
     /// Run `tool` against `repo`, using `input` (the role's artifact text, or
@@ -334,6 +347,7 @@ mod tests {
             system: Some("You are QA.".into()),
             prompt: "review the patch".into(),
             temperature: 0.2,
+            timeout: None,
         }
     }
 
@@ -353,12 +367,12 @@ mod tests {
     #[tokio::test]
     async fn scripted_client_returns_queued_error() {
         let client = ScriptedModelClient::new();
-        client.push_err(Error::Timeout);
+        client.push_err(Error::from(ProviderError::Timeout));
         let err = client
             .generate(&request())
             .await
             .expect_err("scripted error");
-        assert!(matches!(err, Error::Timeout));
+        assert!(matches!(err, Error::Provider(ProviderError::Timeout)));
     }
 
     #[tokio::test]

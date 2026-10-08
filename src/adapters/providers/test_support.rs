@@ -14,6 +14,7 @@ pub(crate) fn request(model: &str) -> GenerateRequest {
         system: Some("You are QA.".into()),
         prompt: "review the patch".into(),
         temperature: 0.2,
+        timeout: None,
     }
 }
 

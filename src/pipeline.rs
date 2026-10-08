@@ -1,14 +1,15 @@
 //! Overnight pipeline orchestration.
 
+use crate::adapters::context::{gather, ContextProbe};
+use crate::adapters::git::working_tree_dirty;
+use crate::adapters::test::{detect_test_command, TestRunner};
 use crate::artifacts::{ArtifactStore, QaStatus, RunDir};
 use crate::cli::Until;
-use crate::context::{gather, ContextProbe};
-use crate::dev::{read_tech_spec, working_tree_dirty, write_and_apply_patch};
-use crate::error::Error;
+use crate::dev::{read_tech_spec, write_and_apply_patch};
+use crate::error::{ArtifactError, Error, GitError};
 use crate::generate::{LLMClient, Origin};
 use crate::qa::{fix_hints, report_from_outcome, truncate_log, write_qa_report, MAX_ITERATIONS};
 use crate::techlead::{impacted_files, read_user_story, write_tech_spec};
-use crate::testrun::{detect_test_command, TestRunner};
 use crate::writer::write_article;
 use std::path::{Path, PathBuf};
 
@@ -44,24 +45,26 @@ where
     T: TestRunner,
 {
     if request.goal.trim().is_empty() {
-        return Err(Error::Artifact("goal must not be empty".into()));
+        return Err(Error::from(ArtifactError::artifact(
+            "goal must not be empty",
+        )));
     }
     match request.until {
         None | Some(Until::Pm | Until::TechLead | Until::Dev | Until::Qa) => {}
     }
     if !repo_exists(&request.repo) {
-        return Err(Error::Artifact(format!(
+        return Err(Error::from(ArtifactError::artifact(format!(
             "repo is not a directory: {}",
             request.repo.display()
-        )));
+        ))));
     }
     if matches!(request.until, None | Some(Until::Dev | Until::Qa))
         && working_tree_dirty(&request.repo)?
         && !request.allow_dirty
     {
-        return Err(Error::Git(
-            "working tree is dirty; pass --allow-dirty or commit/restore first".into(),
-        ));
+        return Err(Error::from(GitError::new(
+            "working tree is dirty; pass --allow-dirty or commit/restore first",
+        )));
     }
     let slug = request.name.as_deref().unwrap_or(request.goal.as_str());
     let run = store.create_run(date, slug)?;
@@ -139,7 +142,7 @@ where
                         iteration,
                         command: test_argv
                             .as_ref()
-                            .map(|a| crate::testrun::format_command(a))
+                            .map(|a| crate::adapters::test::format_command(a))
                             .unwrap_or_default(),
                         exit_code: -1,
                         summary: "dev apply failed".into(),
@@ -203,7 +206,9 @@ where
             write_qa_report(&run, &report)?;
             run.write_state("qa", iteration, Some("REQUIRES_HUMAN_REVIEW"))?;
             run.append_log("stage=qa REQUIRES_HUMAN_REVIEW")?;
-            return Err(Error::Artifact("REQUIRES_HUMAN_REVIEW".into()));
+            return Err(Error::from(ArtifactError::artifact(
+                "REQUIRES_HUMAN_REVIEW",
+            )));
         }
         hints = match fix_hints(generator, &outcome).await {
             Ok(text) => text,
@@ -216,7 +221,9 @@ where
         write_qa_report(&run, &failed)?;
         run.write_state("qa", iteration, Some("FAILED"))?;
     }
-    Err(Error::Artifact("REQUIRES_HUMAN_REVIEW".into()))
+    Err(Error::from(ArtifactError::artifact(
+        "REQUIRES_HUMAN_REVIEW",
+    )))
 }
 
 /// Local calendar date as `YYYY-MM-DD` (`date +%Y-%m-%d` on Unix).
@@ -225,10 +232,12 @@ pub fn local_date() -> Result<String, Error> {
         .arg("+%Y-%m-%d")
         .output()?;
     if !output.status.success() {
-        return Err(Error::Artifact("failed to read local date".into()));
+        return Err(Error::from(ArtifactError::artifact(
+            "failed to read local date",
+        )));
     }
     let text = String::from_utf8(output.stdout)
-        .map_err(|e| Error::Artifact(e.to_string()))?
+        .map_err(|e| Error::from(ArtifactError::artifact(e.to_string())))?
         .trim()
         .to_string();
     Ok(text)
@@ -242,8 +251,8 @@ pub fn repo_exists(repo: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generate::ScriptedGenerator;
-    use crate::ollama::OllamaClient;
+    use crate::adapters::ollama::OllamaClient;
+    use crate::adapters::providers::ScriptedGenerator;
     use crate::pm::{USER_STORY_FILE, USER_STORY_HEADINGS};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -258,7 +267,7 @@ mod tests {
 
     struct StubProbe;
 
-    impl crate::context::ContextProbe for StubProbe {
+    impl crate::adapters::context::ContextProbe for StubProbe {
         fn codegraph_available(&self) -> bool {
             true
         }
@@ -300,8 +309,8 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::context::PathProbe,
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -355,8 +364,8 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::context::PathProbe,
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -394,13 +403,15 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::context::PathProbe,
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("empty goal");
         match err {
-            Error::Artifact(msg) => assert!(msg.contains("empty"), "{msg}"),
+            Error::Artifact(ArtifactError::Artifact(msg)) => {
+                assert!(msg.contains("empty"), "{msg}")
+            }
             other => panic!("expected Artifact, got {other:?}"),
         }
         assert!(!tmp.path().join("artifacts").exists());
@@ -427,8 +438,8 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::context::PathProbe,
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -465,12 +476,15 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::context::PathProbe,
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("invalid story");
-        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        assert!(matches!(
+            err,
+            Error::Artifact(ArtifactError::InvalidArtifact { .. })
+        ));
         let latest = store.root().join("latest").join("pipeline_state.json");
         let state = std::fs::read_to_string(latest).expect("state");
         assert!(state.contains("\"pm\""), "{state}");
@@ -495,13 +509,13 @@ mod tests {
                 article: true,
                 until: Some(Until::Pm),
             },
-            &crate::context::PathProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::context::PathProbe,
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("missing repo");
         match err {
-            Error::Artifact(msg) => assert!(msg.contains("repo"), "{msg}"),
+            Error::Artifact(ArtifactError::Artifact(msg)) => assert!(msg.contains("repo"), "{msg}"),
             other => panic!("expected Artifact, got {other:?}"),
         }
         assert!(!tmp.path().join("artifacts").exists());
@@ -545,7 +559,7 @@ apply the patch
                 until: Some(Until::TechLead),
             },
             &StubProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
@@ -608,12 +622,12 @@ apply the patch
                 until: Some(Until::Dev),
             },
             &StubProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect_err("dirty");
         match err {
-            Error::Git(msg) => assert!(msg.contains("dirty"), "{msg}"),
+            Error::Git(GitError(msg)) => assert!(msg.contains("dirty"), "{msg}"),
             other => panic!("expected Git, got {other:?}"),
         }
     }
@@ -624,7 +638,7 @@ apply the patch
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).expect("repo");
         git_init(&repo);
-        let before = crate::dev::head_commit(&repo).expect("head");
+        let before = crate::adapters::git::head_commit(&repo).expect("head");
         let store = ArtifactStore::new(tmp.path().join("artifacts"));
         let gen = ScriptedGenerator::new();
         gen.push_text(complete_story());
@@ -666,13 +680,16 @@ diff --git a/hello.txt b/hello.txt
                 until: Some(Until::Dev),
             },
             &StubProbe,
-            &crate::testrun::ProcessTestRunner::default(),
+            &crate::adapters::test::ProcessTestRunner::default(),
         )
         .await
         .expect("run");
-        assert!(run.path.join(crate::dev::PATCH_FILE).is_file());
-        assert!(crate::dev::working_tree_dirty(&repo).expect("dirty"));
-        assert_eq!(crate::dev::head_commit(&repo).expect("head"), before);
+        assert!(run.path.join(crate::adapters::git::PATCH_FILE).is_file());
+        assert!(crate::adapters::git::working_tree_dirty(&repo).expect("dirty"));
+        assert_eq!(
+            crate::adapters::git::head_commit(&repo).expect("head"),
+            before
+        );
     }
 
     fn qa_story_spec_and_patches(gen: &ScriptedGenerator, patches: &[&str]) {
@@ -732,7 +749,7 @@ diff --git a/hello.txt b/hello.txt
         let store = ArtifactStore::new(tmp.path().join("artifacts"));
         let gen = ScriptedGenerator::new();
         qa_story_spec_and_patches(&gen, &[PATCH_V1]);
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(0, "ok", &["true".into()]);
         let run = run(
             &gen,
@@ -773,7 +790,7 @@ diff --git a/hello.txt b/hello.txt
         let gen = ScriptedGenerator::new();
         qa_story_spec_and_patches(&gen, &[PATCH_V1]);
         gen.push_text("# Article\nNothing was committed.\n");
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(0, "ok", &["true".into()]);
         let run = run(
             &gen,
@@ -794,7 +811,7 @@ diff --git a/hello.txt b/hello.txt
         .expect("run");
         assert!(run.path.join(crate::pm::USER_STORY_FILE).is_file());
         assert!(run.path.join(crate::techlead::TECH_SPEC_FILE).is_file());
-        assert!(run.path.join(crate::dev::PATCH_FILE).is_file());
+        assert!(run.path.join(crate::adapters::git::PATCH_FILE).is_file());
         assert!(run.path.join(crate::qa::QA_REPORT_FILE).is_file());
         assert!(run.path.join(crate::writer::ARTICLE_FILE).is_file());
         assert!(run.path.join("run.log").is_file());
@@ -813,7 +830,7 @@ diff --git a/hello.txt b/hello.txt
         let gen = ScriptedGenerator::new();
         qa_story_spec_and_patches(&gen, &[PATCH_V1]);
         gen.push_text("   \n");
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(0, "ok", &["true".into()]);
         let err = run(
             &gen,
@@ -832,7 +849,10 @@ diff --git a/hello.txt b/hello.txt
         )
         .await
         .expect_err("writer");
-        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        assert!(matches!(
+            err,
+            Error::Artifact(ArtifactError::InvalidArtifact { .. })
+        ));
         let latest = store.root().join("latest");
         let report =
             crate::qa::read_qa_report(&crate::artifacts::RunDir { path: latest }).expect("report");
@@ -873,7 +893,7 @@ commit
         gen.push_text(PATCH_V2);
         gen.push_text("hint two");
         gen.push_text(PATCH_V3);
-        let runner = crate::testrun::ScriptedRunner::new();
+        let runner = crate::adapters::test::ScriptedRunner::new();
         runner.push_outcome(1, "fail 1", &["false".into()]);
         runner.push_outcome(1, "fail 2", &["false".into()]);
         runner.push_outcome(1, "fail 3", &["false".into()]);
@@ -895,7 +915,9 @@ commit
         .await
         .expect_err("freeze");
         match err {
-            Error::Artifact(msg) => assert!(msg.contains("REQUIRES_HUMAN_REVIEW"), "{msg}"),
+            Error::Artifact(ArtifactError::Artifact(msg)) => {
+                assert!(msg.contains("REQUIRES_HUMAN_REVIEW"), "{msg}")
+            }
             other => panic!("expected Artifact, got {other:?}"),
         }
         let latest = store.root().join("latest");

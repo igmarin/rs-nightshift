@@ -15,6 +15,9 @@ CLI flag  >  environment variable  >  nightshift.toml  >  built-in default
 | :------ | :------- | :------ | :------ |
 | Ollama URL | `--ollama-url` | `NIGHTSHIFT_OLLAMA_URL` | `http://127.0.0.1:11434` |
 
+For Ollama model tuning (CPU-only inference, Modelfile variants, `num_ctx`,
+`num_thread`, `num_gpu`, GPU offload), see [`docs/ollama.md`](ollama.md).
+
 Set via CLI flag or env var. This is **not** read from `nightshift.toml` — the
 Ollama URL is a runtime connection setting, not a model mapping. Invalid URLs
 (scheme other than `http`/`https`, missing host, path/query/fragment present,
@@ -82,3 +85,64 @@ Dev = "qwen2.5-coder:14b"
 export NIGHTSHIFT_CONFIG=/etc/nightshift/production.toml
 nightshift run --goal "…" --repo ~/projects/my-app
 ```
+
+## Per-role generate timeout
+
+Each `[[roles]]` block may set `timeout_secs` for that role's LLM completion.
+Omitted roles use the global default of 3600 seconds (the same value as
+`DEFAULT_GENERATE_TIMEOUT` in `src/adapters/ollama.rs`). `timeout_secs = 0` is
+rejected at config load.
+
+```toml
+[[roles]]
+id = "product-owner"
+timeout_secs = 1200  # 20 min — PO/QA often finish faster
+
+[[roles]]
+id = "developer"
+timeout_secs = 3600  # 60 min — large-file generation on CPU
+```
+
+Do not put the timeout only in `options`; it is a first-class field so the
+harness can bound the generate call, not a provider sampling knob.
+
+## Role tools
+
+Each `[[roles]]` block may declare `tools = [...]`. Models return text plus a
+verdict; the harness performs the side effect. Unknown names are rejected at
+config load.
+
+| Tool | When it runs | What it does |
+| :--- | :----------- | :----------- |
+| `gather-context` | Before the LLM call | Injects codegraph/graphify context (and optional `context_files`) into the prompt |
+| `run-tests` | Before the LLM call | Runs the detected test command and injects the results |
+| `apply-patch` | After `continue` / `done` | Applies the role's `content` as a unified diff (`git apply --check`, then apply) |
+| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the full file |
+| `search-replace` | After `continue` / `done` | Replaces unique `old:` snippets with `new:` text in existing files |
+
+### search-replace
+
+Prefer this over `apply-patch` or `write-file` when the model can quote a unique
+snippet but cannot emit a correct diff or regenerate a large file.
+
+```toml
+[[roles]]
+id = "developer"
+tools = ["gather-context", "search-replace"]
+```
+
+Put the edits in the JSON `content` field:
+
+```text
+file: public/index.html
+old: <h1>Welcome</h1>
+new: <h1>Hello</h1>
+```
+
+Multi-line snippets and extra `old:` / `new:` blocks (same file or another
+`file:` header) are allowed. Each `old` text must match exactly once, including overlapping occurrences;
+zero matches or two-plus matches abort the whole tool call and leave the repo
+unchanged. Paths must stay inside the repo. Secret-bearing paths (`.git`,
+`.env`, keys, and the rest of the `context_files` denylist) are rejected,
+including symlinks that resolve into those paths. The tool never creates
+files and never commits.

@@ -1,7 +1,7 @@
 //! Writer stage: `05_article_draft.md` after a passing run.
 
 use crate::artifacts::RunDir;
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use crate::generate::{complete_text, LLMClient, WRITER_TEMPERATURE};
 use crate::models::{model_for, Role};
 use crate::pm::USER_STORY_FILE;
@@ -39,10 +39,11 @@ pub async fn write_article<G: LLMClient>(
     )
     .await?;
     if draft.trim().is_empty() {
-        return Err(Error::InvalidArtifact {
+        return Err(ArtifactError::InvalidArtifact {
             artifact: ARTICLE_FILE,
             reason: "writer returned empty draft".into(),
-        });
+        }
+        .into());
     }
     std::fs::write(run.path.join(ARTICLE_FILE), draft)?;
     Ok(())
@@ -51,8 +52,8 @@ pub async fn write_article<G: LLMClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::providers::ScriptedGenerator;
     use crate::artifacts::ArtifactStore;
-    use crate::generate::ScriptedGenerator;
 
     #[tokio::test]
     async fn writes_article_at_writer_temperature() {
@@ -85,7 +86,10 @@ mod tests {
         let gen = ScriptedGenerator::new();
         gen.push_text("   \n");
         let err = write_article(&gen, &run, "x").await.expect_err("empty");
-        assert!(matches!(err, Error::InvalidArtifact { .. }));
+        assert!(matches!(
+            err,
+            Error::Artifact(ArtifactError::InvalidArtifact { .. })
+        ));
         assert!(!run.path.join(ARTICLE_FILE).exists());
     }
 }

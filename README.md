@@ -56,6 +56,9 @@ Before your first run, the server needs:
 - **Ollama** listening on `127.0.0.1:11434` with these models pulled:
   `llama3.2:3b`, `llama3.1:8b`, `mistral-nemo:12b`, `qwen2.5-coder:7b`,
   `deepseek-r1:7b`, `gemma2:9b`, `phi3.5:latest`
+- See [`docs/ollama.md`](docs/ollama.md) for tuning Ollama on CPU-only or
+  integrated-GPU machines (recommended `llama3.2:3b-fast` Modelfile, service
+  override, `num_ctx`, `num_thread`, and `num_gpu` guidance).
 - **codegraph** and **graphify** on `PATH`
 - **Rust** (mise or rustup) — needed by the target repo's build, not by nightshift itself
 
@@ -276,6 +279,7 @@ folder has a README describing its responsibility and ownership:
 
 ## Further reading
 
+- [docs/ollama.md](docs/ollama.md) — Ollama tuning: CPU-only and integrated-GPU setups, Modelfile variants, service overrides
 - [docs/architecture.md](docs/architecture.md) — the role-graph harness: hexagon, commands, providers, capabilities, state/report
 - [docs/role-graph.md](docs/role-graph.md) — role-graph design and the full config schema
 - [docs/configuration.md](docs/configuration.md) — full config reference with examples

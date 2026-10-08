@@ -51,7 +51,7 @@ retired under ADR-006:
   *configured* role graph instead of the fixed model tags).
 - Shared primitives reused by the adapters (and by the legacy pipeline):
   `ollama.rs` (`OllamaClient` + URL validation/redaction), `generate.rs`
-  (`map_kernel_error`), `context.rs` (codegraph/graphify gather),
+  (`map_kernel_error`), `adapters/context.rs` (codegraph/graphify gather),
   `testrun.rs` (test-command detection + runner), `dev.rs` (`apply_checked`).
 - `error.rs` — the single crate-wide `Error` enum (ADR-005).
 

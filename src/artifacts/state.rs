@@ -1,6 +1,6 @@
 //! Pipeline state persistence (`pipeline_state.json`).
 
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use serde::Serialize;
 
 /// Internal pipeline state written to `pipeline_state.json`.
@@ -24,9 +24,7 @@ pub(super) fn validate_date_format(date: &str) -> Result<(), Error> {
     if ok {
         Ok(())
     } else {
-        Err(Error::Artifact(format!(
-            "run date must be YYYY-MM-DD, got {date:?}"
-        )))
+        Err(ArtifactError::artifact(format!("run date must be YYYY-MM-DD, got {date:?}")).into())
     }
 }
 
@@ -42,7 +40,8 @@ pub(super) fn write_pipeline_state(
         iteration,
         last_error,
     };
-    let bytes = serde_json::to_vec_pretty(&state).map_err(|e| Error::Artifact(e.to_string()))?;
+    let bytes =
+        serde_json::to_vec_pretty(&state).map_err(|e| ArtifactError::artifact(e.to_string()))?;
     std::fs::write(run.join("pipeline_state.json"), bytes)?;
     Ok(())
 }

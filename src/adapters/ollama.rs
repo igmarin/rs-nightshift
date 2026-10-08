@@ -1,12 +1,13 @@
-//! Sequential Ollama client backed by `llm-kernel`'s `OpenAIClient`.
+//! Ollama client adapter.
 //!
+//! Sequential Ollama client backed by `llm-kernel`'s `OpenAIClient`.
 //! Completions go through Ollama's OpenAI-compatible `/v1/chat/completions`
 //! endpoint (via `llm_kernel::llm::OpenAIClient`). After each call, an
 //! unload request is sent to Ollama's native `/api/generate` endpoint with
 //! `keep_alive: 0` so the model is released from VRAM between stages —
 //! preserving the memory behavior of the original hand-rolled client.
 
-use crate::error::Error;
+use crate::error::{Error, ProviderError};
 use crate::generate::Origin;
 use async_trait::async_trait;
 use llm_kernel::error::KernelError;
@@ -15,8 +16,9 @@ use serde::Serialize;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// Default generate timeout (matches the original hand-rolled client).
-pub const DEFAULT_GENERATE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Default generate timeout for large-context local inference on CPU.
+pub const DEFAULT_GENERATE_TIMEOUT: Duration =
+    Duration::from_secs(crate::domain::rolegraph::config::DEFAULT_GENERATE_TIMEOUT_SECS);
 
 /// Timeout for the best-effort `keep_alive: 0` unload request.
 ///
@@ -27,8 +29,10 @@ const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Validate an Ollama HTTP(S) origin and return its normalized form.
 pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
-    let mut parsed = reqwest::Url::parse(value).map_err(|_| Error::InvalidOllamaUrl {
-        url: redact_ollama_url(value),
+    let mut parsed = reqwest::Url::parse(value).map_err(|_| {
+        Error::from(ProviderError::InvalidOllamaUrl {
+            url: redact_ollama_url(value),
+        })
     })?;
     if !matches!(parsed.scheme(), "http" | "https")
         || parsed.host_str().is_none()
@@ -38,9 +42,9 @@ pub fn validate_ollama_url(value: &str) -> Result<String, Error> {
         || !parsed.username().is_empty()
         || parsed.password().is_some()
     {
-        return Err(Error::InvalidOllamaUrl {
+        return Err(Error::from(ProviderError::InvalidOllamaUrl {
             url: redact_ollama_url(value),
-        });
+        }));
     }
     parsed.set_path("");
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
@@ -140,9 +144,15 @@ struct UnloadRequest<'a> {
 }
 
 impl OllamaClient {
-    /// Client for `base_url` with the default 10 minute generate timeout.
+    /// Client for `base_url` with the default generate timeout.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Error> {
         Self::with_timeout(base_url, DEFAULT_GENERATE_TIMEOUT)
+    }
+
+    /// Per-completion timeout used when a generate request does not set its own.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// Client with an explicit request timeout (used in tests).
@@ -160,7 +170,7 @@ impl OllamaClient {
         let http_client = reqwest::Client::builder()
             .no_proxy()
             .build()
-            .map_err(|error| Error::Ollama(error.to_string()))?;
+            .map_err(|error| Error::from(ProviderError::Ollama(error.to_string())))?;
         let inner = OpenAIClient::from_key_with_base_url(
             "ollama",
             "ollama",
@@ -204,19 +214,44 @@ impl OllamaClient {
         let response = tokio::time::timeout(UNLOAD_TIMEOUT, send)
             .await
             .map_err(|_| {
-                Error::Ollama(format!(
+                Error::from(ProviderError::Ollama(format!(
                     "unload timed out after {}s",
                     UNLOAD_TIMEOUT.as_secs()
-                ))
+                )))
             })?
-            .map_err(|e| Error::Ollama(e.to_string()))?;
+            .map_err(|e| Error::from(ProviderError::Ollama(e.to_string())))?;
         if !response.status().is_success() {
-            return Err(Error::Ollama(format!(
+            return Err(Error::from(ProviderError::Ollama(format!(
                 "unload status {}",
                 response.status()
-            )));
+            ))));
         }
         Ok(())
+    }
+
+    /// Complete with an explicit wall-clock timeout, then unload the model.
+    ///
+    /// Completions stay serialized on the internal mutex (INV-1).
+    pub async fn complete_with_timeout(
+        &self,
+        request: LLMRequest,
+        timeout: Duration,
+    ) -> Result<LLMResponse, KernelError> {
+        let _guard = self.generate_lock.lock().await;
+        // The per-request model overrides the client's placeholder model.
+        let model_for_unload = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.inner.model_name().to_string());
+        // Wrap with our own tokio timeout so we can reliably detect timeouts
+        // (the kernel's OpenAIClient maps reqwest timeouts to LlmApi, losing
+        // the structured timeout info).
+        let response = tokio::time::timeout(timeout, self.inner.complete(request))
+            .await
+            .map_err(|_| KernelError::Timeout(timeout.as_secs()))??;
+        // Best-effort unload: a failure here does not fail the completion.
+        let _ = self.unload(&model_for_unload).await;
+        Ok(response)
     }
 }
 
@@ -229,21 +264,7 @@ impl Origin for OllamaClient {
 #[async_trait]
 impl LLMClient for OllamaClient {
     async fn complete(&self, request: LLMRequest) -> Result<LLMResponse, KernelError> {
-        let _guard = self.generate_lock.lock().await;
-        // The per-request model overrides the client's placeholder model.
-        let model_for_unload = request
-            .model
-            .clone()
-            .unwrap_or_else(|| self.inner.model_name().to_string());
-        // Wrap with our own tokio timeout so we can reliably detect timeouts
-        // (the kernel's OpenAIClient maps reqwest timeouts to LlmApi, losing
-        // the structured timeout info).
-        let response = tokio::time::timeout(self.timeout, self.inner.complete(request))
-            .await
-            .map_err(|_| KernelError::Timeout(self.timeout.as_secs()))??;
-        // Best-effort unload: a failure here does not fail the completion.
-        let _ = self.unload(&model_for_unload).await;
-        Ok(response)
+        self.complete_with_timeout(request, self.timeout).await
     }
 
     fn model_name(&self) -> &str {
@@ -400,7 +421,7 @@ mod tests {
         let err = client.complete(request).await.expect_err("missing model");
         let mapped = map_kernel_error(err, "nope");
         match mapped {
-            Error::ModelNotFound { model } => assert_eq!(model, "nope"),
+            ProviderError::ModelNotFound { model } => assert_eq!(model, "nope"),
             other => panic!("expected ModelNotFound, got {other:?}"),
         }
     }
@@ -424,7 +445,7 @@ mod tests {
         let err = client.complete(request).await.expect_err("status");
         let mapped = map_kernel_error(err, "m");
         match mapped {
-            Error::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
+            ProviderError::Ollama(msg) => assert!(msg.contains("500"), "{msg}"),
             other => panic!("expected Ollama status error, got {other:?}"),
         }
     }
@@ -453,7 +474,7 @@ mod tests {
         let err = client.complete(request).await.expect_err("timeout");
         let mapped = map_kernel_error(err, "m");
         match mapped {
-            Error::Timeout => {}
+            ProviderError::Timeout => {}
             other => panic!("expected Timeout, got {other:?}"),
         }
     }

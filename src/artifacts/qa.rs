@@ -1,6 +1,6 @@
 //! QA report data model and `nightshift status` lookup.
 
-use crate::error::Error;
+use crate::error::{ArtifactError, Error};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -49,7 +49,7 @@ pub fn write_status(store: &super::ArtifactStore, mut out: impl Write) -> Result
     }
     let bytes = std::fs::read(&report_path)?;
     let report: QaReport =
-        serde_json::from_slice(&bytes).map_err(|e| Error::Artifact(e.to_string()))?;
+        serde_json::from_slice(&bytes).map_err(|e| ArtifactError::artifact(e.to_string()))?;
     writeln!(out, "{}", qa_label(report.status))?;
     if !report.summary.is_empty() {
         writeln!(out, "{}", report.summary)?;
