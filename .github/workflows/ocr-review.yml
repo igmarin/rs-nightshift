@@ -42,8 +42,8 @@ jobs:
       - name: Run ocr review
         uses: alibaba/open-code-review@182898cf522da3d04157b422752d028417974e19 # v1.12.12
         with:
-          # The action installs this exact npm version; npm checks the package
-          # integrity against the registry.
+          # Floating: the action installs the newest npm release. Pin an exact
+          # version here once a release is verified, to make reviews repeatable.
           ocr_version: 'latest'
           llm_url: https://api.anthropic.com
           llm_auth_token: ${{ secrets.CLAUDE_API_KEY }}
