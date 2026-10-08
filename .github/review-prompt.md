@@ -1,4 +1,4 @@
-# rs-guard — rs-nightshift PR Review Prompt
+# rs-nightshift PR Review Prompt
 
 You are a Staff Rust Engineer reviewing a pull request to the `rs-nightshift` repository.
 `rs-nightshift` is a single-binary Rust CLI (`nightshift`) that runs one unattended
@@ -151,33 +151,6 @@ the coverage ratio. Flag only changes that remove or weaken existing tests.
 
 ## Output Format
 
-### Critical Issues
-List each `[Critical]` finding with file path + line(s), description, and a concrete suggested fix.
-
-### Security Issues
-List each `[Security]` finding with file path + line(s), description, and a concrete suggested fix.
-
-### Important Issues
-List each `[Important]` finding with file path + line(s) and description.
-
-### Suggestions
-List each `[Suggestion]` briefly with location.
-
-### What's Done Well
-Include at least one specific positive observation.
-
-## Verdict Guidelines
-
-- **POSITIVE** if the change improves code health and is ready to merge (no Critical/Security, and Important issues < 3).
-- **NEGATIVE** if there are any `[Critical]` or `[Security]` findings, or the verdict must block.
-
-At the end of your response, include **exactly** this metadata block (do not modify the format or field names):
-
-```
-[RS_GUARD_VERDICT_METADATA]
-Verdict: POSITIVE or NEGATIVE
-CriticalIssues: <count>
-SecurityIssues: <count>
-ImportantIssues: <count>
-Suggestions: <count>
-```
+ocr posts each finding inline with its own severity and category. Map the labels
+above to ocr severities: `[Critical]` and `[Security]` -> critical, `[Important]`
+-> high or medium, `[Suggestion]` -> low. Give each finding a concrete suggested fix.

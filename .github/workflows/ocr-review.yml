@@ -1,0 +1,46 @@
+name: ocr PR Review
+
+# Replaces rs-guard-review.yml. Posts as the nebula-rs-guard bot via GH_PAT.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ocr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout (for the review prompt)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Load review prompt
+        id: prompt
+        run: |
+          {
+            echo 'text<<OCR_PROMPT_EOF'
+            cat .github/review-prompt.md
+            echo 'OCR_PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run ocr review
+        uses: alibaba/open-code-review@182898cf522da3d04157b422752d028417974e19 # v1.12.12
+        with:
+          ocr_version: '1.12.12'
+          llm_url: https://api.anthropic.com
+          llm_auth_token: ${{ secrets.CLAUDE_API_KEY }}
+          llm_model: claude-haiku-5-5
+          llm_use_anthropic: 'true'
+          github_token: ${{ secrets.GH_PAT || github.token }}
+          effort: high
+          background: ${{ steps.prompt.outputs.text }}

@@ -17,31 +17,25 @@ plus `cargo-deny`, `cargo-audit`, and `actionlint`.
 
 1. Open the PR as a **draft**. CI runs on draft PRs — let all gates go green
    while it's still draft.
-2. Do **not** mark "Ready for review" until CI is fully green. Marking ready is
-   what triggers rs-guard (the review workflow runs only on `ready_for_review`).
-3. Merge only when CI is green **and** the rs-guard verdict is **POSITIVE**
-   (0 Critical, 0 Security, Important < 3).
+2. Do **not** mark "Ready for review" until CI is fully green. The ocr review
+   runs on non-draft PRs, so marking ready is what starts it.
+3. Merge only when CI is green **and** every `critical` or `high` ocr finding
+   is fixed or answered.
 
-## rs-guard review
+## ocr review
 
 Pull requests are reviewed by
-[rs-guard](https://github.com/nebulaideas/rs-guard) using
-[`.github/review-prompt.md`](../.github/review-prompt.md). Set the
-`DEEPSEEK_API_KEY` repository secret so the review workflow can post.
+[ocr](https://github.com/alibaba/open-code-review) (Claude Haiku, high effort)
+using [`.github/review-prompt.md`](../.github/review-prompt.md) as background.
+Findings post inline as the `nebula-rs-guard` bot. Set the `CLAUDE_API_KEY` and
+`GH_PAT` repository secrets so the workflow can post. Any `critical` or `high`
+finding blocks merge; resolve it, push, and the review reruns.
 
-rs-guard posts a structured verdict:
-
-```text
-[RS_GUARD_VERDICT_METADATA]
-Verdict: POSITIVE | NEGATIVE
-CriticalIssues: N
-SecurityIssues: N
-ImportantIssues: N
-Suggestions: N
-```
-
-Any `[Critical]` or `[Security]` finding blocks merge. A `NEGATIVE` verdict
-blocks merge. Resolve the findings, push, and re-request review.
+Locally, `git config core.hooksPath .githooks` enables a pre-commit hook that
+runs `ocr review` on staged changes and blocks on critical/high findings
+(needs `CLAUDE_API_KEY` in your shell and
+`npm i -g @alibaba-group/open-code-review`; without them it skips;
+`git commit --no-verify` skips it too).
 
 ## CI gates
 
