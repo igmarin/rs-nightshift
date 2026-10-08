@@ -68,16 +68,19 @@ The full local gate (including coverage) is in the [Local gates](#local-gates) s
 2. Do **not** mark "Ready for review" until CI is fully green. The ocr review
    runs on non-draft PRs, so marking ready is what starts it.
 3. Merge only when CI is green **and** every `critical` or `high` ocr finding
-   is fixed or answered.
+   is fixed or answered. This is a manual rule: the review job posts findings
+   but does not fail, so the maintainer checks them.
 
 ## ocr review
 
 Pull requests are reviewed by
 [ocr](https://github.com/alibaba/open-code-review) (Claude Haiku, high effort)
 using [`.github/review-prompt.md`](../.github/review-prompt.md) as background.
-Findings post inline as the `nebula-rs-guard` bot. Set the `CLAUDE_API_KEY` and
-`GH_PAT` repository secrets so the workflow can post. Any `critical` or `high`
-finding blocks merge; resolve it, push, and the review reruns.
+Findings post inline (as `github-actions[bot]`, or as the `nebula-rs-guard` bot
+when `GH_PAT` is set). The workflow needs the `CLAUDE_API_KEY` repository secret.
+Pull requests from forks get no secrets, so they are not reviewed by this
+workflow; review those by hand. Resolve any `critical` or `high` finding, push,
+and the review reruns.
 
 Locally, `git config core.hooksPath .githooks` enables a pre-commit hook that
 runs `ocr review` on staged changes and blocks on critical/high findings

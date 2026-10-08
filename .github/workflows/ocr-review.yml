@@ -17,25 +17,33 @@ jobs:
   review:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # effort high allows up to 45 min per review group, plus setup and posting.
+    timeout-minutes: 60
     steps:
-      - name: Checkout (for the review prompt)
+      # The prompt comes from the base branch, not the PR head: a PR author
+      # must not be able to edit the review instructions in their own PR.
+      - name: Checkout base branch (for the review prompt)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
       - name: Load review prompt
         id: prompt
         run: |
+          # Random delimiter, so no line in the prompt can close the heredoc early.
+          delim="OCR_PROMPT_$(openssl rand -hex 16)"
           {
-            echo 'text<<OCR_PROMPT_EOF'
+            echo "text<<$delim"
             cat .github/review-prompt.md
-            echo 'OCR_PROMPT_EOF'
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run ocr review
         uses: alibaba/open-code-review@182898cf522da3d04157b422752d028417974e19 # v1.12.12
         with:
+          # The action installs this exact npm version; npm checks the package
+          # integrity against the registry.
           ocr_version: '1.12.12'
           llm_url: https://api.anthropic.com
           llm_auth_token: ${{ secrets.CLAUDE_API_KEY }}
