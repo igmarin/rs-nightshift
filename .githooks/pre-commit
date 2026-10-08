@@ -90,7 +90,8 @@ case $? in
         ;;
     *)
         # Redact the key in case ocr echoes a request in its error output.
-        tail -5 "$errlog" | sed "s/$key/[REDACTED]/g" | sed 's/^/    /'
+        # Python does a literal replace, so keys with regex characters are safe.
+        KEY="$key" python3 -c 'import os, sys; sys.stdout.write(sys.stdin.read().replace(os.environ["KEY"], "[REDACTED]"))' < <(tail -5 "$errlog") | sed 's/^/    /'
         skip "review did not complete (ocr exit $rc), see the error above"
         ;;
 esac
