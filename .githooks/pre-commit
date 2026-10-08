@@ -33,8 +33,13 @@ git diff --cached --quiet && skip "nothing staged"
 # The snapshot commit is unreferenced and is pruned by git gc.
 ident=(env GIT_AUTHOR_NAME=ocr GIT_AUTHOR_EMAIL=ocr@localhost
     GIT_COMMITTER_NAME=ocr GIT_COMMITTER_EMAIL=ocr@localhost)
-base="$(git rev-parse -q --verify HEAD || "${ident[@]}" git commit-tree "$(git hash-object -t tree /dev/null)" -m empty)"
-snapshot="$("${ident[@]}" git commit-tree "$(git write-tree)" -p "$base" -m snapshot)"
+if head="$(git rev-parse -q --verify HEAD)"; then
+    base="$head"
+else
+    base="$("${ident[@]}" git commit-tree "$(git hash-object -t tree /dev/null)" -m empty)" || skip "could not create an empty base commit"
+fi
+index_tree="$(git write-tree)" || skip "could not read the staged tree"
+snapshot="$("${ident[@]}" git commit-tree "$index_tree" -p "$base" -m snapshot)" || skip "could not create the staged snapshot"
 
 output="$(mktemp)"
 errlog="$(mktemp)"
