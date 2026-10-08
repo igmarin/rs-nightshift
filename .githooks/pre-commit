@@ -1,0 +1,102 @@
+#!/bin/bash
+# AI review of the changes about to be committed, using ocr (open-code-review).
+# Blocks the commit only on critical/high findings. Anything else — no ocr, no
+# key, no python3, the LLM failing — warns and lets the commit through.
+#
+# Install once:   git config core.hooksPath .githooks   (also enables pre-push)
+# Skip one commit: git commit --no-verify
+# Model:          OCR_MODEL=claude-sonnet-5-5 git commit   (default: Haiku, cheap)
+#
+# The key is read from the environment and handed to ocr as env vars, so it is
+# never written to ~/.opencodereview/config.json. It is still visible to the
+# ocr child process (and anything that can read its environment). CLAUDE_API_KEY
+# or ANTHROPIC_API_KEY, either works.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+ocr_bin="${OCR_BIN:-ocr}"
+key="${ANTHROPIC_API_KEY:-${CLAUDE_API_KEY:-}}"
+
+skip() {
+    echo "ocr review skipped: $1"
+    exit 0
+}
+
+command -v "$ocr_bin" > /dev/null || skip "ocr not installed (npm i -g @alibaba-group/open-code-review)"
+command -v python3 > /dev/null || skip "python3 not installed (needed to read ocr output)"
+[ -n "$key" ] || skip "set CLAUDE_API_KEY or ANTHROPIC_API_KEY"
+git diff --cached --quiet && skip "nothing staged"
+
+# Review exactly what is staged, not the working tree: ocr's default mode also
+# reads unstaged and untracked files. Build a commit from the index on top of
+# HEAD (or an empty base for the first commit) and review base..snapshot.
+# The snapshot commit is unreferenced and is pruned by git gc.
+ident=(env GIT_AUTHOR_NAME=ocr GIT_AUTHOR_EMAIL=ocr@localhost
+    GIT_COMMITTER_NAME=ocr GIT_COMMITTER_EMAIL=ocr@localhost)
+if head="$(git rev-parse -q --verify HEAD)"; then
+    base="$head"
+else
+    base="$("${ident[@]}" git commit-tree "$(git hash-object -t tree /dev/null)" -m empty)" || skip "could not create an empty base commit"
+fi
+index_tree="$(git write-tree)" || skip "could not read the staged tree"
+snapshot="$("${ident[@]}" git commit-tree "$index_tree" -p "$base" -m snapshot)" || skip "could not create the staged snapshot"
+
+output="$(mktemp)"
+errlog="$(mktemp)"
+trap 'rm -f "$output" "$errlog"' EXIT
+
+echo "ocr review (git commit --no-verify to skip)..."
+OCR_LLM_URL=https://api.anthropic.com \
+    OCR_LLM_TOKEN="$key" \
+    OCR_LLM_MODEL="${OCR_MODEL:-claude-haiku-5-5}" \
+    OCR_USE_ANTHROPIC=true \
+    OCR_NO_UPDATE=1 \
+    "$ocr_bin" review --from "$base" --to "$snapshot" --effort low --format json --audience agent \
+    -o "$output" > /dev/null 2> "$errlog"
+rc=$?
+
+# Exit 1: blocking findings. Exit 0: a complete review with none blocking, or
+# nothing reviewable. Exit 2: the review did not complete, or its output is not
+# what we expect; the caller reports that and lets the commit through.
+python3 - "$output" "$rc" << 'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(2)
+if int(sys.argv[2]) != 0 or not isinstance(data, dict):
+    sys.exit(2)
+manifest = data.get("manifest") or {}
+state = manifest.get("terminal_state")
+status = data.get("status")
+if status == "skipped" or state == "skipped":
+    sys.exit(0)
+if state is not None and state != "complete":
+    sys.exit(2)
+if state is None and status not in ("success", "completed_with_warnings"):
+    sys.exit(2)
+comments = data.get("comments")
+if comments is None:
+    comments = []
+if not isinstance(comments, list):
+    sys.exit(2)
+blocking = [c for c in comments
+            if isinstance(c, dict) and str(c.get("severity", "")).lower() in ("critical", "high")]
+for c in blocking:
+    print(f"  [{c.get('severity')}] {c.get('path') or c.get('file', '?')}: {c.get('message') or c.get('content') or c.get('body', '')}")
+sys.exit(1 if blocking else 0)
+PY
+case $? in
+    0) echo "ocr review: no blocking findings." ;;
+    1)
+        echo
+        echo "Commit stopped: critical/high findings above. Fix them, or git commit --no-verify."
+        exit 1
+        ;;
+    *)
+        # Redact the key in case ocr echoes a request in its error output.
+        # Python does a literal replace, so keys with regex characters are safe.
+        KEY="$key" python3 -c 'import os, sys; sys.stdout.write(sys.stdin.read().replace(os.environ["KEY"], "[REDACTED]"))' < "$errlog" | tail -5 | sed 's/^/    /'
+        skip "review did not complete (ocr exit $rc), see the error above"
+        ;;
+esac

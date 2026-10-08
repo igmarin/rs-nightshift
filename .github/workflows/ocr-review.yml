@@ -1,0 +1,53 @@
+name: ocr PR Review
+
+# Replaces rs-guard-review.yml. Posts as the nebula-rs-guard bot via GH_PAT.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ocr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    # effort high allows up to 45 min per review group, plus setup and posting.
+    timeout-minutes: 60
+    steps:
+      # The prompt comes from the base branch, not the PR head: a PR author
+      # must not be able to edit the review instructions in their own PR.
+      - name: Checkout base branch (for the review prompt)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Load review prompt
+        id: prompt
+        run: |
+          # Random delimiter, so no line in the prompt can close the heredoc early.
+          delim="OCR_PROMPT_$(openssl rand -hex 16)"
+          {
+            echo "text<<$delim"
+            cat .github/review-prompt.md
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run ocr review
+        uses: alibaba/open-code-review@fabbdb296b0d97e2140ada8d54ca7d6d6d1d7ad4 # v1.12.13
+        with:
+          # Pinned to the release verified on the runner. Bump deliberately.
+          ocr_version: '1.12.13'
+          llm_url: https://api.anthropic.com
+          llm_auth_token: ${{ secrets.CLAUDE_API_KEY }}
+          llm_model: claude-haiku-5-5
+          llm_use_anthropic: 'true'
+          github_token: ${{ secrets.GH_PAT || github.token }}
+          effort: high
+          background: ${{ steps.prompt.outputs.text }}
