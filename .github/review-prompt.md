@@ -86,8 +86,7 @@ workflow or script file inside a pipeline PR).
 - `actions/checkout` uses `persist-credentials: false` wherever the job does not push.
 - Release artifacts ship SHA256 checksums alongside every tarball.
 - Any `install.sh` verifies the SHA256 checksum **before** executing or installing the
-  downloaded binary, and uses `set -euo pipefail`. Treat `scripts/rs-guard-install.sh`
-  as the standard to mirror.
+  downloaded binary, and uses `set -euo pipefail`.
 - No secrets are echoed into logs, written to artifacts, or passed as command arguments.
 - No crates.io publish step for 0.1.0; release publishing is GitHub Releases only.
 
