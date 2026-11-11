@@ -8,16 +8,19 @@
 //! 2. `text-quoting`: the reply must be two lines from a snippet, exact except
 //!    that the first line may drop leading spaces (the same leeway `search-replace` gives,
 //!    since `old:` is matched as a substring), because `old:` text must match
-//!    exactly.
-//! 3. `search-replace`: the reply must parse as one `file:`/`old:`/`new:` block
-//!    ([`parse_search_replace`]) that, applied to the sample file, gives the
-//!    expected result. Nothing is written to disk (INV-9).
+//!    exactly. Informational: no real role replies with bare text, so a failure
+//!    shows as `WARN` and does not decide the verdict.
+//! 3. `search-replace`: sent with the system prompt a real `search-replace`
+//!    role gets (a role sentence plus [`output_contract`]). The reply must be a role envelope whose
+//!    `content` is one `file:`/`old:`/`new:` block ([`parse_search_replace`])
+//!    that, applied to the sample file, gives the expected result. Nothing is
+//!    written to disk (INV-9).
 //!
 //! [`run_bench`] takes any [`ModelClient`], so tests inject a scripted client
 //! and the CLI edge builds the real one through the provider factory.
 
 use crate::adapters::capabilities::parse_search_replace;
-use crate::application::executor::parse_role_output;
+use crate::application::executor::{output_contract, parse_role_output};
 use crate::ports::{GenerateRequest, ModelClient};
 use std::time::{Duration, Instant};
 
@@ -56,6 +59,8 @@ pub struct TaskScore {
     pub latencies: Vec<Duration>,
     /// Why the most recent failing run failed.
     pub last_failure: Option<String>,
+    /// Shown in the report but does not decide the verdict.
+    pub informational: bool,
 }
 
 impl TaskScore {
@@ -76,23 +81,50 @@ pub struct BenchReport {
 }
 
 impl BenchReport {
-    /// Every run of every task passed.
+    /// Every run of every deciding (non-informational) task passed.
     #[must_use]
     pub fn all_passed(&self) -> bool {
-        !self.tasks.is_empty() && self.tasks.iter().all(TaskScore::all_passed)
+        !self.tasks.is_empty()
+            && self
+                .tasks
+                .iter()
+                .all(|task| task.informational || task.all_passed())
     }
 }
 
 type Scorer = fn(&str) -> Result<(), String>;
 
-const TASKS: [(&str, &str, Scorer); 3] = [
-    ("json-validity", JSON_PROMPT, score_json),
-    ("text-quoting", QUOTE_PROMPT, score_quote),
-    (
-        "search-replace",
-        SEARCH_REPLACE_PROMPT,
-        score_search_replace,
-    ),
+struct Task {
+    name: &'static str,
+    prompt: &'static str,
+    score: Scorer,
+    /// Send the system prompt a real `search-replace` role gets.
+    search_replace_contract: bool,
+    informational: bool,
+}
+
+const TASKS: [Task; 3] = [
+    Task {
+        name: "json-validity",
+        prompt: JSON_PROMPT,
+        score: score_json,
+        search_replace_contract: false,
+        informational: false,
+    },
+    Task {
+        name: "text-quoting",
+        prompt: QUOTE_PROMPT,
+        score: score_quote,
+        search_replace_contract: false,
+        informational: true,
+    },
+    Task {
+        name: "search-replace",
+        prompt: SEARCH_REPLACE_PROMPT,
+        score: score_search_replace,
+        search_replace_contract: true,
+        informational: false,
+    },
 ];
 
 /// Run every task `params.runs` times against `client`.
@@ -103,19 +135,20 @@ const TASKS: [(&str, &str, Scorer); 3] = [
 pub async fn run_bench(client: &dyn ModelClient, params: &BenchParams) -> BenchReport {
     let mut tasks: Vec<TaskScore> = TASKS
         .iter()
-        .map(|(name, _, _)| TaskScore {
-            name,
+        .map(|spec| TaskScore {
+            name: spec.name,
             passed: 0,
             latencies: Vec::new(),
             last_failure: None,
+            informational: spec.informational,
         })
         .collect();
     for _ in 0..params.runs.max(1) {
-        for ((_, prompt, score), task) in TASKS.iter().zip(tasks.iter_mut()) {
+        for (spec, task) in TASKS.iter().zip(tasks.iter_mut()) {
             let request = GenerateRequest {
                 model: params.model.clone(),
-                system: None,
-                prompt: (*prompt).to_string(),
+                system: spec.search_replace_contract.then(search_replace_system),
+                prompt: spec.prompt.to_string(),
                 temperature: BENCH_TEMPERATURE,
                 timeout: Some(params.timeout),
             };
@@ -123,7 +156,7 @@ pub async fn run_bench(client: &dyn ModelClient, params: &BenchParams) -> BenchR
             let reply = client.generate(&request).await;
             task.latencies.push(started.elapsed());
             let outcome = match reply {
-                Ok(text) => score(&text),
+                Ok(text) => (spec.score)(&text),
                 Err(error) => Err(format!("generate failed: {error}")),
             };
             match outcome {
@@ -147,7 +180,11 @@ pub fn render_report(report: &BenchReport, origin: Option<&str>) -> String {
         None => lines.push(format!("model: {}", report.model)),
     }
     for task in &report.tasks {
-        let mark = if task.all_passed() { "PASS" } else { "FAIL" };
+        let mark = match (task.all_passed(), task.informational) {
+            (true, _) => "PASS",
+            (false, true) => "WARN",
+            (false, false) => "FAIL",
+        };
         let runs = task.latencies.len();
         let mut line = format!(
             "[{mark}] {:<15} {}/{runs} passed  avg {}  max {}",
@@ -221,18 +258,21 @@ const HELLO_PATH: &str = "src/hello.rs";
 const HELLO_BEFORE: &str = "fn main() {\n    println!(\"hello\");\n}\n";
 const HELLO_AFTER: &str = "fn main() {\n    println!(\"hello world\");\n}\n";
 
-const SEARCH_REPLACE_PROMPT: &str = "This is src/hello.rs:\n\
+/// Laid out like a real role's user prompt: the goal, then the file as tool output.
+const SEARCH_REPLACE_PROMPT: &str = "Goal: In src/hello.rs, change the printed text from \
+\"hello\" to \"hello world\" with exactly one search-replace edit. Set verdict to continue.\n\
 \n\
+Tool output:\n\
+### file: src/hello.rs\n\
 fn main() {\n\
 \x20   println!(\"hello\");\n\
-}\n\
-\n\
-Change the printed text from \"hello\" to \"hello world\".\n\
-Reply with exactly one search-replace block in this format and nothing else:\n\
-\n\
-file: <path>\n\
-old: <exact existing text>\n\
-new: <replacement text>";
+}\n";
+
+/// The system prompt a real `search-replace` role gets: a role sentence, then
+/// the contract. Some models reply with nothing when the role sentence is missing.
+fn search_replace_system() -> String {
+    format!("You are the developer.\n\n{}", output_contract(true))
+}
 
 fn score_json(text: &str) -> Result<(), String> {
     parse_role_output(text)
@@ -256,8 +296,11 @@ fn score_quote(text: &str) -> Result<(), String> {
 }
 
 fn score_search_replace(text: &str) -> Result<(), String> {
-    let blocks =
-        parse_search_replace(text).map_err(|error| format!("{error} (reply {})", preview(text)))?;
+    // The same two steps a real role's reply goes through: envelope, then blocks.
+    let output =
+        parse_role_output(text).map_err(|error| format!("{error} (reply {})", preview(text)))?;
+    let blocks = parse_search_replace(&output.content)
+        .map_err(|error| format!("{error} (content {})", preview(&output.content)))?;
     let [block] = blocks.as_slice() else {
         return Err(format!("expected 1 block, got {}", blocks.len()));
     };
@@ -298,10 +341,15 @@ mod tests {
         }
     }
 
+    /// A role envelope whose `content` is `content`, as a real role replies.
+    fn envelope(content: &str) -> String {
+        serde_json::json!({"verdict": "continue", "summary": "ok", "content": content}).to_string()
+    }
+
     fn push_round(client: &ScriptedModelClient, json: &str, quote: &str, block: &str) {
         client.push_text(json);
         client.push_text(quote);
-        client.push_text(block);
+        client.push_text(envelope(block));
     }
 
     fn task<'a>(report: &'a BenchReport, name: &str) -> &'a TaskScore {
@@ -319,6 +367,11 @@ mod tests {
         assert!(calls
             .iter()
             .all(|c| c.model == "qwen3.6-35b-4bit" && c.timeout == Some(Duration::from_secs(7))));
+        // Only the search-replace task carries a system prompt: the real role contract.
+        assert!(calls[0].system.is_none() && calls[1].system.is_none());
+        let system = calls[2].system.as_deref().expect("system prompt");
+        assert!(system.ends_with(&output_contract(true)), "{system}");
+        assert!(calls[2].prompt.starts_with("Goal: "));
         let text = render_report(&report, Some("http://127.0.0.1:8000"));
         assert!(text.contains("model: qwen3.6-35b-4bit at http://127.0.0.1:8000"));
         assert!(text.contains("[PASS] json-validity"));
@@ -349,11 +402,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quoting_failure_warns_without_failing_the_verdict() {
+        let client = ScriptedModelClient::new();
+        push_round(
+            &client,
+            ENVELOPE,
+            &format!("```rust\n{QUOTE_LINES}\n```"),
+            BLOCK,
+        );
+        let report = run_bench(&client, &params(1)).await;
+        assert!(!task(&report, "text-quoting").all_passed());
+        assert!(report.all_passed(), "{report:?}");
+        let text = render_report(&report, None);
+        assert!(text.contains("[WARN] text-quoting    0/1 passed"), "{text}");
+        assert!(text.ends_with("harness compatibility: pass"));
+    }
+
+    #[tokio::test]
     async fn generate_error_counts_as_a_failed_run() {
         let client = ScriptedModelClient::new();
         client.push_err(Error::from(ProviderError::Ollama("timed out".into())));
         client.push_text(QUOTE_LINES);
-        client.push_text(BLOCK);
+        client.push_text(envelope(BLOCK));
         let report = run_bench(&client, &params(1)).await;
         let json = task(&report, "json-validity");
         assert_eq!(json.passed, 0);
@@ -392,9 +462,9 @@ mod tests {
 
     #[test]
     fn search_replace_must_apply_cleanly_to_the_sample_file() {
-        assert!(score_search_replace(BLOCK).is_ok());
+        assert!(score_search_replace(&envelope(BLOCK)).is_ok());
         let indented = "file: src/hello.rs\nold:     println!(\"hello\");\nnew:     println!(\"hello world\");";
-        assert!(score_search_replace(indented).is_ok());
+        assert!(score_search_replace(&envelope(indented)).is_ok());
         let cases = [
             ("Here you go:\n{BLOCK}", "stray"),
             ("file: src/main.rs\nold: println!(\"hello\");\nnew: println!(\"hello world\");", "wrong file"),
@@ -404,10 +474,20 @@ mod tests {
             ("file:\nold:\nnew:", "search-replace"),
         ];
         for (reply, want) in cases {
-            let reply = reply.replace("{BLOCK}", BLOCK);
+            let reply = envelope(&reply.replace("{BLOCK}", BLOCK));
             let err = score_search_replace(&reply).expect_err(&reply);
             assert!(err.contains(want), "{reply:?} -> {err}");
         }
+    }
+
+    #[test]
+    fn search_replace_outside_the_envelope_fails() {
+        // Bare blocks: what the task accepted before it used the role contract.
+        let err = score_search_replace(BLOCK).expect_err("bare block");
+        assert!(err.contains("JSON"), "{err}");
+        // The qwen3.6 slip: the string closes after old:, new: sits outside it.
+        let split = "{\"verdict\":\"continue\",\"content\":\"file: src/hello.rs\\nold: println!(\\\"hello\\\");\"\nnew: println!(\\\"hello world\\\");\"\n}";
+        assert!(score_search_replace(split).is_err(), "{split}");
     }
 
     #[test]

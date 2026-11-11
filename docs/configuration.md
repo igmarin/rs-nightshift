@@ -187,12 +187,12 @@ Three tasks run `--runs` times each (default 3), with a `--timeout` per call
 | Task | Passes when the reply… |
 | :--- | :--- |
 | `json-validity` | parses as a role envelope with the same parser a run uses |
-| `text-quoting` | is the two requested lines, exact (the first line may drop some of its leading spaces), with no fences or prose |
-| `search-replace` | is one `file:`/`old:`/`new:` block that, applied to the sample file, gives the expected file (nothing is written to disk) |
+| `text-quoting` | is the two requested lines, exact (the first line may drop some of its leading spaces), with no fences or prose. Informational: a failure shows as `WARN` and does not change the verdict, because no real role replies with bare text |
+| `search-replace` | is a role envelope whose `content` is one `file:`/`old:`/`new:` block that, applied to the sample file, gives the expected file (nothing is written to disk). The task sends the same system prompt a real `search-replace` role gets |
 
 Output shows the pass rate and the average and max latency per task. The
 first call can be slow while the server loads the model. The command exits
-0 only when every run of every task passes:
+0 only when every run of `json-validity` and `search-replace` passes:
 
 ```text
 $ nightshift bench --provider mlx --model gemma-4-31b-4bit --runs 2
