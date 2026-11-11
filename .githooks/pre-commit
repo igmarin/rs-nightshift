@@ -5,17 +5,17 @@
 #
 # Install once:   git config core.hooksPath .githooks   (also enables pre-push)
 # Skip one commit: git commit --no-verify
-# Model:          OCR_MODEL=claude-sonnet-5-5 git commit   (default: Haiku, cheap)
+# Model:          OCR_MODEL=<model> git commit   (default: gpt-6-luna, same as CI)
 #
 # The key is read from the environment and handed to ocr as env vars, so it is
 # never written to ~/.opencodereview/config.json. It is still visible to the
-# ocr child process (and anything that can read its environment). CLAUDE_API_KEY
-# or ANTHROPIC_API_KEY, either works.
+# ocr child process (and anything that can read its environment). OPENAI_API_KEY
+# is the key, the same one CI uses.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 ocr_bin="${OCR_BIN:-ocr}"
-key="${ANTHROPIC_API_KEY:-${CLAUDE_API_KEY:-}}"
+key="${OPENAI_API_KEY:-}"
 
 skip() {
     echo "ocr review skipped: $1"
@@ -24,7 +24,7 @@ skip() {
 
 command -v "$ocr_bin" > /dev/null || skip "ocr not installed (npm i -g @alibaba-group/open-code-review)"
 command -v python3 > /dev/null || skip "python3 not installed (needed to read ocr output)"
-[ -n "$key" ] || skip "set CLAUDE_API_KEY or ANTHROPIC_API_KEY"
+[ -n "$key" ] || skip "set OPENAI_API_KEY"
 git diff --cached --quiet && skip "nothing staged"
 
 # Review exactly what is staged, not the working tree: ocr's default mode also
@@ -46,10 +46,11 @@ errlog="$(mktemp)"
 trap 'rm -f "$output" "$errlog"' EXIT
 
 echo "ocr review (git commit --no-verify to skip)..."
-OCR_LLM_URL=https://api.anthropic.com \
+OCR_LLM_URL="${OCR_LLM_URL:-https://api.openai.com/v1/responses}" \
     OCR_LLM_TOKEN="$key" \
-    OCR_LLM_MODEL="${OCR_MODEL:-claude-haiku-5-5}" \
-    OCR_USE_ANTHROPIC=true \
+    OCR_LLM_MODEL="${OCR_MODEL:-gpt-6-luna}" \
+    OCR_USE_ANTHROPIC=false \
+    OCR_LLM_PROTOCOL=openai-responses \
     OCR_NO_UPDATE=1 \
     "$ocr_bin" review --from "$base" --to "$snapshot" --effort low --format json --audience agent \
     -o "$output" > /dev/null 2> "$errlog"

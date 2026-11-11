@@ -1,0 +1,4 @@
+#!/bin/bash
+# Local twin of CI: fmt, clippy, tests, doc tests, audit, deny before every push.
+# Install once: git config core.hooksPath .githooks   Skip one push: git push --no-verify
+exec "$(git rev-parse --show-toplevel)/scripts/pre-push-gate.sh"
