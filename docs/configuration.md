@@ -115,7 +115,7 @@ placeholder bearer token (`local`), which local servers ignore. Set
 
 `nightshift doctor` calls `GET {base_url}/models` for every such provider a
 role uses: `provider:<name>` fails when the server is down, and
-`model:<model>` fails, listing the served models, when a role names a model the
+`model:<name>:<model>` fails, listing the served models, when a role names a model the
 server does not have.
 
 ## Per-role generate timeout

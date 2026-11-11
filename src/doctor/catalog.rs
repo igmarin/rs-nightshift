@@ -239,6 +239,15 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn http_provider_catalog_rejects_query_in_base_url() {
+        let catalog = HttpProviderCatalog::new().expect("catalog");
+        let err = ProviderCatalog::list_models(&catalog, "http://127.0.0.1:8000/v1?tenant=x", None)
+            .await
+            .expect_err("query must be rejected before any request");
+        assert!(err.to_string().contains("query string"), "{err}");
+    }
+
+    #[tokio::test]
     async fn http_provider_catalog_maps_error_status() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))

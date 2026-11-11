@@ -27,7 +27,7 @@ pub(crate) fn to_llm_request(
 ///
 /// Accepts `http://` / `https://` URLs with a host (a path such as `/v1` is
 /// allowed) and rejects userinfo so credentials can never be embedded in the
-/// URL. Rejected values are reported redacted.
+/// URL, and a query or fragment, which would break the appended endpoint paths. Rejected values are reported redacted.
 ///
 /// `http://` is allowed for local OpenAI-compatible proxies (vLLM, Ollama);
 /// for remote keyed providers (Deepseek/Kimi/custom) prefer `https://` so the
@@ -57,6 +57,14 @@ pub(crate) fn validate_chat_base_url(value: &str) -> Result<String, Error> {
             message: format!(
                 "base URL {redacted:?} must not embed credentials; use the API key header instead"
             ),
+        }));
+    }
+    // Endpoints are built by appending (`/chat/completions`, `/models`), which a
+    // query or fragment would swallow, so the request would go to the wrong path.
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(Error::from(ConfigError {
+            path: "provider base_url".into(),
+            message: format!("base URL {redacted:?} must not have a query string or fragment"),
         }));
     }
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
@@ -346,6 +354,23 @@ mod tests {
         let text = error.to_string();
         assert!(!text.contains("secret"), "{text}");
         assert!(!text.contains("user"), "{text}");
+    }
+
+    #[test]
+    fn openai_new_rejects_query_and_fragment() {
+        for url in [
+            "http://127.0.0.1:8000/v1?tenant=x",
+            "http://127.0.0.1:8000/v1#frag",
+        ] {
+            let error = match OpenAICompatibleAdapter::new(url, "k") {
+                Ok(_) => panic!("{url} must fail"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("query string or fragment"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

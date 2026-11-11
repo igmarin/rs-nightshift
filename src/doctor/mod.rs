@@ -144,7 +144,7 @@ fn push_toolchain_checks(checks: &mut Vec<Check>, host: &impl HostCommands) {
     });
 }
 
-/// Push `provider:<name>` plus one `model:<model>` check per model the roles
+/// Push `provider:<name>` plus one `model:<name>:<model>` check per model the roles
 /// use. Every check is required: a role cannot run without its server.
 async fn push_provider_checks<P: ProviderCatalog>(
     checks: &mut Vec<Check>,
@@ -163,7 +163,7 @@ async fn push_provider_checks<P: ProviderCatalog>(
         checks.push(check(format!("provider:{provider}"), false, detail));
         for model in models {
             checks.push(check(
-                format!("model:{model}"),
+                format!("model:{provider}:{model}"),
                 false,
                 format!("skipped; provider {provider:?} is not ready"),
             ));
@@ -201,7 +201,7 @@ async fn push_provider_checks<P: ProviderCatalog>(
                         served.join(", ")
                     )
                 };
-                checks.push(check(format!("model:{model}"), present, detail));
+                checks.push(check(format!("model:{provider}:{model}"), present, detail));
             }
         }
         Err(error) => fail(checks, format!("not reachable at {origin}: {error}")),
@@ -439,7 +439,7 @@ model = "qwen3.6-35b-4bit"
         let model = report
             .checks
             .iter()
-            .find(|c| c.name == "model:qwen3.6-35b-4bit")
+            .find(|c| c.name == "model:mlx:qwen3.6-35b-4bit")
             .expect("model check");
         assert!(!model.passed);
         assert!(model.detail.contains("gemma-4-31b-4bit"), "{model:?}");
@@ -469,7 +469,7 @@ model = "qwen3.6-35b-4bit"
         let model = report
             .checks
             .iter()
-            .find(|c| c.name == "model:qwen3.6-35b-4bit")
+            .find(|c| c.name == "model:mlx:qwen3.6-35b-4bit")
             .expect("model check");
         assert!(model.detail.starts_with("skipped"), "{model:?}");
         assert_eq!(report.exit_code(), 2);
