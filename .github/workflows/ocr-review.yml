@@ -3,7 +3,9 @@ name: ocr PR Review
 # Same setup as Ludavela: OpenAI gpt-6-luna over the Responses API, posting with
 # the workflow's own token. One review per PR, not one per push: `synchronize`
 # fires on every commit and burns Actions minutes and API spend. The pre-commit
-# hook covers the commits in between; re-run the job by hand when needed.
+# hook covers the commits in between. To review the current head after new
+# pushes, toggle the PR to draft and back (`gh pr ready --undo && gh pr ready`).
+# Re-running a finished job does NOT help: it reviews the commit it first ran on.
 on:
   pull_request:
     types: [opened, ready_for_review]

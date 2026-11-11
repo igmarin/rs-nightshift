@@ -79,8 +79,11 @@ medium effort, the same setup as Ludavela) using
 [`.github/review-prompt.md`](../.github/review-prompt.md) from the base branch as
 background. Findings post inline as `github-actions[bot]`. The workflow needs the
 `OPENAI_API_KEY` repository secret. It runs once per PR (on open and on
-ready-for-review), not on every push; after fixing a `critical` or `high`
-finding, re-run the job from the Actions tab. Pull requests from forks get no
+ready-for-review), not on every push. After pushing fixes, review the new head
+by toggling the PR to draft and back: `gh pr ready --undo && gh pr ready`.
+Re-running the old job from the Actions tab reviews the old commit, so it does
+not count. Before merging, the latest ocr run must be on the PR's current head.
+Pull requests from forks get no
 secrets, so they are not reviewed by this workflow; review those by hand.
 
 Locally, `git config core.hooksPath .githooks` enables a pre-commit hook that
