@@ -4,7 +4,7 @@ mod catalog;
 mod host;
 mod report;
 
-pub use catalog::{HttpModelCatalog, ModelCatalog};
+pub use catalog::{HttpModelCatalog, HttpProviderCatalog, ModelCatalog, ProviderCatalog};
 pub use host::{HostCommands, PathHost};
 pub use report::{write_report, Check, DoctorReport};
 
@@ -12,16 +12,21 @@ use crate::domain::rolegraph::config::{NightshiftConfig, ProviderSpec};
 use crate::error::Error;
 #[cfg(test)]
 use crate::error::ProviderError;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-/// Run readiness checks against the role graph, an injected catalog, and host.
-pub async fn run_doctor<C, H>(
+/// Run readiness checks against the role graph, injected catalogs, and host.
+///
+/// `catalog` lists Ollama models; `providers` probes every other (OpenAI-
+/// compatible) provider a role uses.
+pub async fn run_doctor<C, P, H>(
     config: &NightshiftConfig,
     catalog: &C,
+    providers: &P,
     host: &H,
 ) -> Result<DoctorReport, Error>
 where
     C: ModelCatalog,
+    P: ProviderCatalog,
     H: HostCommands,
 {
     let mut checks = Vec::new();
@@ -96,34 +101,18 @@ where
         }
     }
 
-    // API-key checks for remote providers (one check per provider).
-    let mut seen = BTreeSet::new();
-    for role in &config.roles {
-        if role.provider == "ollama" || !seen.insert(role.provider.clone()) {
-            continue;
-        }
-        let spec = config.providers.get(&role.provider);
-        match api_key_env_for(&role.provider, spec) {
-            Some(env) => {
-                let set = std::env::var(&env).is_ok();
-                checks.push(Check {
-                    name: format!("provider:{}", role.provider),
-                    passed: set,
-                    required: true,
-                    detail: if set {
-                        format!("{env} is set")
-                    } else {
-                        format!("missing {env}")
-                    },
-                });
-            }
-            None => checks.push(Check {
-                name: format!("provider:{}", role.provider),
-                passed: false,
-                required: true,
-                detail: format!("define api_key_env for provider {:?}", role.provider),
-            }),
-        }
+    // OpenAI-compatible providers: API key (when one is configured), then
+    // reachability and per-model presence via `GET {base_url}/models`.
+    let mut remote: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for role in config.roles.iter().filter(|role| role.provider != "ollama") {
+        remote
+            .entry(role.provider.as_str())
+            .or_default()
+            .insert(role.model.as_str());
+    }
+    for (provider, models) in remote {
+        let spec = config.providers.get(provider);
+        push_provider_checks(&mut checks, provider, spec, &models, providers).await;
     }
 
     Ok(DoctorReport { checks })
@@ -155,9 +144,86 @@ fn push_toolchain_checks(checks: &mut Vec<Check>, host: &impl HostCommands) {
     });
 }
 
+/// Push `provider:<name>` plus one `model:<model>` check per model the roles
+/// use. Every check is required: a role cannot run without its server.
+async fn push_provider_checks<P: ProviderCatalog>(
+    checks: &mut Vec<Check>,
+    provider: &str,
+    spec: Option<&ProviderSpec>,
+    models: &BTreeSet<&str>,
+    catalog: &P,
+) {
+    let check = |name: String, passed: bool, detail: String| Check {
+        name,
+        passed,
+        required: true,
+        detail,
+    };
+    let fail = |checks: &mut Vec<Check>, detail: String| {
+        checks.push(check(format!("provider:{provider}"), false, detail));
+        for model in models {
+            checks.push(check(
+                format!("model:{model}"),
+                false,
+                format!("skipped; provider {provider:?} is not ready"),
+            ));
+        }
+    };
+    let api_key = match api_key_env_for(provider, spec) {
+        Some(env) => match std::env::var(&env) {
+            Ok(key) => Some(key),
+            Err(_) => return fail(checks, format!("missing {env}")),
+        },
+        // Custom provider without api_key_env: a keyless local server.
+        None => None,
+    };
+    let Some(base_url) = base_url_for(provider, spec) else {
+        return fail(
+            checks,
+            format!("define base_url for provider {provider:?} in [providers.{provider}]"),
+        );
+    };
+    let origin = crate::adapters::ollama::redact_ollama_url(&base_url);
+    match catalog.list_models(&base_url, api_key.as_deref()).await {
+        Ok(served) => {
+            checks.push(check(
+                format!("provider:{provider}"),
+                true,
+                format!("reachable at {origin} ({} models)", served.len()),
+            ));
+            for model in models {
+                let present = served.iter().any(|m| model_matches(m, model));
+                let detail = if present {
+                    format!("{model} is served by {provider}")
+                } else {
+                    format!(
+                        "{model} is not served by {provider}; available: {}",
+                        served.join(", ")
+                    )
+                };
+                checks.push(check(format!("model:{model}"), present, detail));
+            }
+        }
+        Err(error) => fail(checks, format!("not reachable at {origin}: {error}")),
+    }
+}
+
+/// Base URL for an OpenAI-compatible provider: the spec override, then the
+/// built-in `deepseek` / `kimi` defaults.
+fn base_url_for(provider: &str, spec: Option<&ProviderSpec>) -> Option<String> {
+    if let Some(url) = spec.and_then(|s| s.base_url.clone()) {
+        return Some(url);
+    }
+    match provider {
+        "deepseek" => Some(crate::adapters::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
+        "kimi" => Some(crate::adapters::DEFAULT_KIMI_BASE_URL.to_string()),
+        _ => None,
+    }
+}
+
 /// Resolve the API-key env var for a provider: an explicit spec override wins,
-/// then the built-in defaults for `deepseek` and `kimi`, then `None` for custom
-/// providers that must declare `api_key_env`.
+/// then the built-in defaults for `deepseek` and `kimi`, then `None` (a keyless
+/// custom provider).
 fn api_key_env_for(provider: &str, spec: Option<&ProviderSpec>) -> Option<String> {
     if let Some(env) = spec.and_then(|s| s.api_key_env.clone()) {
         return Some(env);
@@ -201,7 +267,7 @@ model = "phi4"
                 "connection refused".into(),
             ))),
         };
-        let report = run_doctor(&config(OLLAMA_QA), &catalog, &healthy_host())
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &catalog, &healthy_host())
             .await
             .expect("report");
         let ollama = report
@@ -220,7 +286,7 @@ model = "phi4"
         let catalog = FakeCatalog {
             result: Ok(vec!["llama3.2:3b".into()]),
         };
-        let report = run_doctor(&config(OLLAMA_QA), &catalog, &healthy_host())
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &catalog, &healthy_host())
             .await
             .expect("report");
         let missing = report
@@ -243,7 +309,7 @@ model = "phi4"
             mise: false,
             commands: vec!["codegraph", "graphify"],
         };
-        let report = run_doctor(&config(OLLAMA_QA), &catalog, &host)
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &catalog, &host)
             .await
             .expect("report");
         assert!(
@@ -268,7 +334,7 @@ model = "phi4"
             commands: vec!["graphify"],
         };
         // No gather-context → codegraph is not required.
-        let report = run_doctor(&config(OLLAMA_QA), &catalog, &host)
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &catalog, &host)
             .await
             .expect("report");
         let codegraph = report
@@ -291,7 +357,9 @@ model = "phi4"
 tools = ["gather-context"]
 "#,
         );
-        let report = run_doctor(&cfg, &catalog, &host).await.expect("report");
+        let report = run_doctor(&cfg, &catalog, &catalog, &host)
+            .await
+            .expect("report");
         let codegraph = report
             .checks
             .iter()
@@ -318,7 +386,7 @@ provider = "deepseek"
 model = "deepseek-v4-pro"
 "#,
         );
-        let report = run_doctor(&cfg, &catalog, &healthy_host())
+        let report = run_doctor(&cfg, &catalog, &catalog, &healthy_host())
             .await
             .expect("report");
         let check = report
@@ -330,12 +398,116 @@ model = "deepseek-v4-pro"
         assert!(!report.is_ready());
     }
 
+    const MLX_DEV: &str = r#"
+[run]
+start = "dev"
+[providers.mlx]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+[[roles]]
+id = "dev"
+provider = "mlx"
+model = "qwen3.6-35b-4bit"
+"#;
+
+    #[tokio::test]
+    async fn keyless_local_provider_serving_the_model_is_ready() {
+        let catalog = FakeCatalog {
+            result: Ok(vec!["qwen3.6-35b-4bit".into(), "gemma-4-31b-4bit".into()]),
+        };
+        let report = run_doctor(&config(MLX_DEV), &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        let provider = report
+            .checks
+            .iter()
+            .find(|c| c.name == "provider:mlx")
+            .expect("provider check");
+        assert!(provider.passed, "{provider:?}");
+        assert!(provider.detail.contains("127.0.0.1:8000"), "{provider:?}");
+        assert!(report.is_ready(), "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn local_provider_missing_model_lists_served_models() {
+        let catalog = FakeCatalog {
+            result: Ok(vec!["gemma-4-31b-4bit".into()]),
+        };
+        let report = run_doctor(&config(MLX_DEV), &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        let model = report
+            .checks
+            .iter()
+            .find(|c| c.name == "model:qwen3.6-35b-4bit")
+            .expect("model check");
+        assert!(!model.passed);
+        assert!(model.detail.contains("gemma-4-31b-4bit"), "{model:?}");
+        assert!(!report.is_ready());
+    }
+
+    #[tokio::test]
+    async fn unreachable_local_provider_is_not_ready() {
+        let catalog = FakeCatalog {
+            result: Err(Error::from(ProviderError::Ollama(
+                "connection refused".into(),
+            ))),
+        };
+        let report = run_doctor(&config(MLX_DEV), &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        let provider = report
+            .checks
+            .iter()
+            .find(|c| c.name == "provider:mlx")
+            .expect("provider check");
+        assert!(!provider.passed);
+        assert!(
+            provider.detail.contains("connection refused"),
+            "{provider:?}"
+        );
+        let model = report
+            .checks
+            .iter()
+            .find(|c| c.name == "model:qwen3.6-35b-4bit")
+            .expect("model check");
+        assert!(model.detail.starts_with("skipped"), "{model:?}");
+        assert_eq!(report.exit_code(), 2);
+    }
+
+    #[tokio::test]
+    async fn custom_provider_without_base_url_is_not_ready() {
+        let cfg = config(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "mlx"
+model = "qwen3.6-35b-4bit"
+"#,
+        );
+        let catalog = FakeCatalog {
+            result: Ok(Vec::new()),
+        };
+        let report = run_doctor(&cfg, &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        let provider = report
+            .checks
+            .iter()
+            .find(|c| c.name == "provider:mlx")
+            .expect("provider check");
+        assert!(!provider.passed);
+        assert!(provider.detail.contains("base_url"), "{provider:?}");
+    }
+
     #[tokio::test]
     async fn healthy_environment_is_ready() {
         let catalog = FakeCatalog {
             result: Ok(vec!["phi4".into()]),
         };
-        let report = run_doctor(&config(OLLAMA_QA), &catalog, &healthy_host())
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &catalog, &healthy_host())
             .await
             .expect("report");
         assert!(report.is_ready(), "{report:?}");

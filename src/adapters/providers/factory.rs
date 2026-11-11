@@ -25,6 +25,12 @@ pub const DEFAULT_DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 /// Default env var holding the Kimi/Moonshot API key.
 pub const DEFAULT_KIMI_API_KEY_ENV: &str = "MOONSHOT_API_KEY";
 
+/// Bearer token sent to a custom provider that declares no `api_key_env`
+/// (keyless local servers such as rapid-mlx, llama.cpp or LM Studio, which
+/// ignore it). shortcut: llm-kernel always sends an `Authorization` header;
+/// drop the placeholder if it ever makes auth optional.
+pub const NO_API_KEY: &str = "local";
+
 /// Build a [`ModelClient`] for `provider` from its [`ProviderSpec`] and role
 /// options.
 ///
@@ -111,7 +117,8 @@ fn build_ollama(
 ///
 /// `default_base_url` / `default_api_key_env` supply the built-in values for
 /// `deepseek` / `kimi`; a `ProviderSpec` override wins when present. Custom
-/// providers must supply both via their spec.
+/// providers must supply `base_url`; without `api_key_env` they are treated as
+/// keyless local servers and get [`NO_API_KEY`].
 fn build_openai_compatible(
     provider: &str,
     default_base_url: Option<&str>,
@@ -128,21 +135,18 @@ fn build_openai_compatible(
                 message: "no base_url configured and no built-in default".into(),
             })
         })?;
-    let api_key_env = spec
+    let api_key = match spec
         .and_then(|s| s.api_key_env.clone())
         .or_else(|| default_api_key_env.map(str::to_owned))
-        .ok_or_else(|| {
+    {
+        Some(api_key_env) => std::env::var(&api_key_env).map_err(|_| {
             Error::from(ConfigError {
-                path: format!("provider {provider:?}"),
-                message: "no api_key_env configured and no built-in default".into(),
+                path: api_key_env.clone(),
+                message: "environment variable not set".into(),
             })
-        })?;
-    let api_key = std::env::var(&api_key_env).map_err(|_| {
-        Error::from(ConfigError {
-            path: api_key_env.clone(),
-            message: "environment variable not set".into(),
-        })
-    })?;
+        })?,
+        None => NO_API_KEY.to_owned(),
+    };
     let client = OpenAICompatibleAdapter::with_timeout(
         base_url,
         api_key,
@@ -310,6 +314,32 @@ mod tests {
             .await
             .expect("reply");
         assert_eq!(text, "acme answer");
+    }
+
+    #[tokio::test]
+    async fn factory_custom_provider_without_api_key_env_is_keyless() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("Authorization", "Bearer local"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(chat_response("mlx answer"), "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let spec = ProviderSpec {
+            backend: Some("openai-compatible".into()),
+            base_url: Some(format!("{}/v1", server.uri())),
+            api_key_env: None,
+        };
+        let client = build_model_client("mlx", Some(&spec), &options(&[])).expect("client");
+        let text = client
+            .generate(&request("qwen3.6-35b-4bit"))
+            .await
+            .expect("reply");
+        assert_eq!(text, "mlx answer");
     }
 
     #[test]
