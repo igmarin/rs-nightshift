@@ -1,12 +1,17 @@
 name: ocr PR Review
 
-# Replaces rs-guard-review.yml. Posts as the nebula-rs-guard bot via GH_PAT.
+# Same setup as Ludavela: OpenAI gpt-6-luna over the Responses API, posting with
+# the workflow's own token. One review per PR, not one per push: `synchronize`
+# fires on every commit and burns Actions minutes and API spend. The pre-commit
+# hook covers the commits in between; re-run the job by hand when needed.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, ready_for_review]
 
 permissions:
   contents: read
+  # The summary is an issue comment on the PR; the findings are review comments.
+  issues: write
   pull-requests: write
 
 concurrency:
@@ -15,10 +20,19 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # Fork PRs are skipped: GitHub gives them no secrets (no OPENAI_API_KEY) and a
+    # read-only token, so the review could neither run nor post. Never switch this
+    # to pull_request_target.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    # effort high allows up to 45 min per review group, plus setup and posting.
-    timeout-minutes: 60
+    timeout-minutes: 20
+    env:
+      # The pinned CLI is older than npm latest, so `ocr config` starts a detached
+      # npm self-update that removes the binary before `ocr review` runs: exit 127
+      # (alibaba/open-code-review#703). Keep the pinned version for the whole job.
+      OCR_NO_UPDATE: '1'
     steps:
       # The prompt comes from the base branch, not the PR head: a PR author
       # must not be able to edit the review instructions in their own PR.
@@ -44,10 +58,13 @@ jobs:
         with:
           # Pinned to the release verified on the runner. Bump deliberately.
           ocr_version: '1.12.13'
-          llm_url: https://api.anthropic.com
-          llm_auth_token: ${{ secrets.CLAUDE_API_KEY }}
-          llm_model: claude-haiku-5-5
-          llm_use_anthropic: 'true'
-          github_token: ${{ secrets.GH_PAT || github.token }}
-          effort: high
+          llm_url: https://api.openai.com/v1/responses
+          llm_auth_token: ${{ secrets.OPENAI_API_KEY }}
+          llm_model: gpt-6-luna
+          # Responses API: gpt-6-luna rejects function tools on /v1/chat/completions.
+          llm_protocol: openai-responses
+          llm_use_anthropic: 'false'
+          llm_extra_body: '{}'
+          github_token: ${{ github.token }}
+          effort: medium
           background: ${{ steps.prompt.outputs.text }}

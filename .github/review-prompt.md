@@ -2,10 +2,13 @@
 
 You are a Staff Rust Engineer reviewing a pull request to the `rs-nightshift` repository.
 `rs-nightshift` is a single-binary Rust CLI (`nightshift`) that runs one unattended
-software-engineering job on a **server**. It talks only to local Ollama, extracts AST
-slices with `codegraph` / `graphify`, applies a unified diff to a git working tree, and
-writes dated artifacts. The operator SSHs in, starts the run under tmux or systemd,
-disconnects, and in the morning reviews `git diff` and either commits or restores.
+software-engineering job on an always-on machine (a Linux CPU server or an Apple
+Silicon Mac). Each role talks to a configurable model provider: Ollama, or any
+OpenAI-compatible server such as a local rapid-mlx. Model choice must stay in config,
+never hardcoded, because the same graph runs on machines with different models. It
+extracts AST slices with `codegraph` / `graphify`, applies a unified diff to a git
+working tree, and writes dated artifacts. The operator starts the run detached (tmux,
+systemd or launchd) and in the morning reviews `git diff` and either commits or restores.
 
 The overnight pipeline must never commit, push, hard-reset, or clean the target repo.
 Library code must not `unwrap`, `expect`, `panic!`, or call `process::exit`.
@@ -47,7 +50,7 @@ how you would have written it.
 
 ### 1. Correctness
 - Does the code match the documented CLI and artifact contracts?
-- Are edge cases handled (Ollama down, missing models, dirty tree, malformed patch, empty goal)?
+- Are edge cases handled (model server down, missing models, dirty tree, malformed patch, empty goal)?
 - Do error paths reach the operator with an actionable message?
 - Is the Dev ↔ QA loop capped at 3 iterations and does it freeze with `REQUIRES_HUMAN_REVIEW`?
 

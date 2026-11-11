@@ -74,19 +74,21 @@ The full local gate (including coverage) is in the [Local gates](#local-gates) s
 ## ocr review
 
 Pull requests are reviewed by
-[ocr](https://github.com/alibaba/open-code-review) (Claude Haiku, high effort)
-using [`.github/review-prompt.md`](../.github/review-prompt.md) as background.
-Findings post inline (as `github-actions[bot]`, or as the `nebula-rs-guard` bot
-when `GH_PAT` is set). The workflow needs the `CLAUDE_API_KEY` repository secret.
-Pull requests from forks get no secrets, so they are not reviewed by this
-workflow; review those by hand. Resolve any `critical` or `high` finding, push,
-and the review reruns.
+[ocr](https://github.com/alibaba/open-code-review) (OpenAI `gpt-6-luna`,
+medium effort, the same setup as Ludavela) using
+[`.github/review-prompt.md`](../.github/review-prompt.md) from the base branch as
+background. Findings post inline as `github-actions[bot]`. The workflow needs the
+`OPENAI_API_KEY` repository secret. It runs once per PR (on open and on
+ready-for-review), not on every push; after fixing a `critical` or `high`
+finding, re-run the job from the Actions tab. Pull requests from forks get no
+secrets, so they are not reviewed by this workflow; review those by hand.
 
 Locally, `git config core.hooksPath .githooks` enables a pre-commit hook that
 runs `ocr review` on staged changes and blocks on critical/high findings
-(needs `CLAUDE_API_KEY` in your shell and
+(needs `OPENAI_API_KEY` in your shell and
 `npm i -g @alibaba-group/open-code-review`; without them it skips;
-`git commit --no-verify` skips it too).
+`git commit --no-verify` skips it too). The same setting also enables a pre-push
+hook that runs `scripts/pre-push-gate.sh` (`git push --no-verify` skips it).
 
 ## CI gates
 
