@@ -59,7 +59,7 @@ pub fn read_queue_file(path: &Path) -> Result<QueueFile, Error> {
     let location = path.display().to_string();
     let raw = std::fs::read_to_string(path)
         .map_err(|error| ConfigError::new(location.clone(), error.to_string()))?;
-    let queue: QueueFile = toml::from_str(&raw)
+    let mut queue: QueueFile = toml::from_str(&raw)
         .map_err(|error| ConfigError::new(location.clone(), error.to_string()))?;
     if queue.jobs.is_empty() {
         return Err(ConfigError::new(location, "no [[jobs]] defined").into());
@@ -68,6 +68,19 @@ pub fn read_queue_file(path: &Path) -> Result<QueueFile, Error> {
         return Err(
             ConfigError::new(location, format!("job {} has an empty goal", index + 1)).into(),
         );
+    }
+    // Store absolute paths, so a restart from another directory cannot take a
+    // different checkout for the one that already finished.
+    let absolute = |path: &Path| {
+        std::path::absolute(path).map_err(|error| {
+            ConfigError::new(location.clone(), format!("{}: {error}", path.display()))
+        })
+    };
+    for job in &mut queue.jobs {
+        job.repo = absolute(&job.repo)?;
+        if let Some(config) = &job.config {
+            job.config = Some(absolute(config)?);
+        }
     }
     Ok(queue)
 }
@@ -168,7 +181,8 @@ pub async fn run_queue<H: JobHost>(
 ) -> Result<QueueState, Error> {
     std::fs::create_dir_all(out).map_err(|error| io_error("create", out, &error))?;
     // Held until this function returns; the OS drops it if the process dies.
-    let _lock = lock(out)?;
+    let _lock = lock(out).await?;
+    let out_absolute = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
     let previous = load_state(out)?;
     let mut state = QueueState {
         jobs: jobs
@@ -196,7 +210,15 @@ pub async fn run_queue<H: JobHost>(
         let outcome = match host.is_dirty(&job.repo) {
             Ok(true) => JobOutcome {
                 status: JobStatus::Blocked,
-                reason: Some(DIRTY_TREE.into()),
+                // The queue's own files dirty a repo that contains `--out`.
+                reason: Some(if out_absolute.starts_with(&job.repo) {
+                    format!(
+                        "{DIRTY_TREE} (--out is inside this repo: add it to the repo's \
+                         .gitignore or use another --out)"
+                    )
+                } else {
+                    DIRTY_TREE.into()
+                }),
                 run_dir: None,
             },
             Err(error) => JobOutcome {
@@ -292,7 +314,7 @@ fn cell(text: &str) -> String {
 /// A lock that was just released can still look held for a moment (a queue
 /// that is exiting, or a child process between fork and exec that still has
 /// the descriptor), so a busy lock is retried for a quarter of a second.
-fn lock(out: &Path) -> Result<std::fs::File, Error> {
+async fn lock(out: &Path) -> Result<std::fs::File, Error> {
     const ATTEMPTS: u32 = 5;
     const PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
     let path = out.join(QUEUE_LOCK_FILE);
@@ -301,7 +323,7 @@ fn lock(out: &Path) -> Result<std::fs::File, Error> {
         match file.try_lock() {
             Ok(()) => return Ok(file),
             Err(std::fs::TryLockError::WouldBlock) if attempt < ATTEMPTS => {
-                std::thread::sleep(PAUSE);
+                tokio::time::sleep(PAUSE).await;
             }
             Err(std::fs::TryLockError::WouldBlock) => break,
             Err(std::fs::TryLockError::Error(error)) => {
@@ -329,17 +351,21 @@ fn load_state(out: &Path) -> Result<QueueState, Error> {
     })
 }
 
-/// Write the state file (temp file, then rename) and the report.
+/// Write the state file and the report.
 fn save(out: &Path, state: &QueueState) -> Result<(), Error> {
     let json = serde_json::to_string_pretty(state)
         .map_err(|error| Error::from(ArtifactError::artifact(error.to_string())))?;
-    let path = out.join(QUEUE_STATE_FILE);
-    let tmp = out.join(format!("{QUEUE_STATE_FILE}.tmp"));
-    std::fs::write(&tmp, json).map_err(|error| io_error("write", &tmp, &error))?;
-    std::fs::rename(&tmp, &path).map_err(|error| io_error("rename", &path, &error))?;
-    let report = out.join(QUEUE_REPORT_FILE);
-    std::fs::write(&report, render_report(state))
-        .map_err(|error| io_error("write", &report, &error))
+    replace_file(&out.join(QUEUE_STATE_FILE), &json)?;
+    replace_file(&out.join(QUEUE_REPORT_FILE), &render_report(state))
+}
+
+/// Write to a temp file, then rename, so a reader never sees a partial file.
+fn replace_file(path: &Path, content: &str) -> Result<(), Error> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, content).map_err(|error| io_error("write", &tmp, &error))?;
+    std::fs::rename(&tmp, path).map_err(|error| io_error("rename", path, &error))
 }
 
 fn io_error(action: &str, path: &Path, error: &std::io::Error) -> Error {
@@ -530,7 +556,7 @@ mod tests {
     #[tokio::test]
     async fn a_second_queue_on_the_same_out_is_refused() {
         let out = tempfile::tempdir().expect("tempdir");
-        let held = lock(out.path()).expect("first lock");
+        let held = lock(out.path()).await.expect("first lock");
         let host = host(out.path(), &[]);
         let err = run_queue(&host, &[job("one", "/a")], out.path(), false)
             .await
@@ -557,6 +583,20 @@ mod tests {
         );
         assert_eq!(state.jobs[1].reason.as_deref(), Some(DIRTY_TREE));
         assert_eq!(*host.ran.borrow(), ["one", "three"]);
+    }
+
+    #[tokio::test]
+    async fn dirty_repo_that_contains_out_says_so() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let out = repo.path().join("artifacts");
+        let host = host(&out, &[]);
+        host.dirty.borrow_mut().insert(repo.path().to_path_buf());
+        let jobs = [job("one", &repo.path().display().to_string())];
+        let state = run_queue(&host, &jobs, &out, false).await.expect("queue");
+        let reason = state.jobs[0].reason.as_deref().expect("reason");
+        assert!(reason.starts_with(DIRTY_TREE), "{reason}");
+        assert!(reason.contains("--out is inside this repo"), "{reason}");
+        assert!(host.ran.borrow().is_empty());
     }
 
     #[tokio::test]
@@ -588,7 +628,10 @@ mod tests {
         assert_eq!(queue.jobs.len(), 2);
         assert_eq!(queue.jobs[0], job("one", "/a"));
         assert_eq!(queue.jobs[1].name.as_deref(), Some("second"));
-        assert_eq!(queue.jobs[1].config, Some(PathBuf::from("mac.toml")));
+        // Relative paths are stored absolute (against the working directory).
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(queue.jobs[1].repo, cwd.join("b"));
+        assert_eq!(queue.jobs[1].config, Some(cwd.join("mac.toml")));
         assert_eq!(queue.jobs[1].profile.as_deref(), Some("mac"));
 
         for (body, want) in [
