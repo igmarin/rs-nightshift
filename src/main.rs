@@ -217,7 +217,7 @@ async fn real_main() -> anyhow::Result<()> {
             };
             let state = run_queue(&host, &queue.jobs, &out, stop_on_failure).await?;
             writeln!(io::stdout(), "{}", render_queue_report(&state))?;
-            process::exit(i32::from(!state.all_done()));
+            process::exit(if state.all_done() { 0 } else { 1 });
         }
         Command::Plan {
             goal,

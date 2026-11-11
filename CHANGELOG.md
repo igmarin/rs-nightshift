@@ -38,6 +38,8 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- A run never reuses another run's directory: when `{date}_{slug}` already
+  exists (two runs started in the same second), `-2`, `-3`, … is appended.
 - CI and release checks now run `cargo doc --no-deps`, and broken or
   private doc links fail the build. Removed the stale `docs/plan-0.1.0.md`
   handoff note. The crate description now names OpenAI-compatible servers.

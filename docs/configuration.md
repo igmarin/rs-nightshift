@@ -239,13 +239,15 @@ exactly like `harness`.
 | One job at a time | Jobs never run in parallel. |
 | A job fails | The queue moves on to the next job. `--stop-on-failure` stops instead. |
 | The job's repo has uncommitted changes | The job is skipped as `blocked: dirty_tree`. The harness never commits, so a second job on the same checkout is always blocked. Give each job its own checkout. |
-| The process is killed or the machine reboots | Run the same command again. Jobs already `done` are skipped; every other job runs again. |
+| The process is killed or the machine reboots | Run the same command again. Jobs already `done` are skipped; every other job runs again. A `done` job is skipped only while its entry in the queue file is unchanged (same position, goal, repo, name, config and profile). |
+| Two queues use the same `--out` | The second one stops with an error. A lock file (`queue.lock`) allows one queue per `--out`; the lock is released when the process ends, even after a crash. |
 
 Two files under `--out` track the queue:
 
 - `queue_state.json`: each job's status (`pending`, `running`, `done`,
   `blocked`, `failed`), the reason, and its run directory. Delete it to run
   every job again. Use one `--out` per queue file.
+- `queue.lock`: the lock described above. It is safe to leave in place.
 - `queue_report.md`: the same as a table, rewritten after every job.
 
 The command prints the report at the end and exits 0 only when every job is

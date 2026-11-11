@@ -14,6 +14,9 @@ use crate::error::{ArtifactError, ConfigError, Error};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Lock file under the artifact root: one queue per `--out` at a time.
+pub const QUEUE_LOCK_FILE: &str = "queue.lock";
+
 /// Progress file under the artifact root.
 pub const QUEUE_STATE_FILE: &str = "queue_state.json";
 
@@ -24,7 +27,7 @@ pub const QUEUE_REPORT_FILE: &str = "queue_report.md";
 pub const DIRTY_TREE: &str = "dirty_tree";
 
 /// One `[[jobs]]` entry of the queue file.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
     /// Business goal for the run.
@@ -32,13 +35,13 @@ pub struct Job {
     /// Target repo (relative paths resolve against the working directory).
     pub repo: PathBuf,
     /// Directory slug (default: slugified goal).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Role-graph config for this job (default: the queue's `--config`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<PathBuf>,
     /// Profile for this job (default: the queue's `--profile`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 }
 
@@ -100,10 +103,10 @@ impl JobStatus {
 /// One job's record in `queue_state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobState {
-    /// The job's goal (with `repo`, it identifies the job across restarts).
-    pub goal: String,
-    /// The job's target repo.
-    pub repo: PathBuf,
+    /// The job as the queue file defined it. A restart skips a `done` job
+    /// only while its whole definition is unchanged.
+    #[serde(flatten)]
+    pub job: Job,
     /// Where the job stands.
     pub status: JobStatus,
     /// Why the job is `blocked` or `failed`.
@@ -153,9 +156,10 @@ pub trait JobHost {
 
 /// Run `jobs` one at a time, saving progress under `out` after each.
 ///
-/// Jobs already `done` in `out/queue_state.json` (same position, goal and
-/// repo) are skipped. A job whose repo is dirty is `blocked: dirty_tree`. A
-/// failed job does not stop the queue unless `stop_on_failure` is set.
+/// Jobs already `done` in `out/queue_state.json` (same position, same
+/// definition) are skipped. A job whose repo is dirty is `blocked:
+/// dirty_tree`. A failed job does not stop the queue unless `stop_on_failure`
+/// is set. Only one queue may use `out` at a time.
 pub async fn run_queue<H: JobHost>(
     host: &H,
     jobs: &[Job],
@@ -163,22 +167,17 @@ pub async fn run_queue<H: JobHost>(
     stop_on_failure: bool,
 ) -> Result<QueueState, Error> {
     std::fs::create_dir_all(out).map_err(|error| io_error("create", out, &error))?;
+    // Held until this function returns; the OS drops it if the process dies.
+    let _lock = lock(out)?;
     let previous = load_state(out)?;
     let mut state = QueueState {
         jobs: jobs
             .iter()
             .enumerate()
             .map(|(index, job)| match previous.jobs.get(index) {
-                Some(done)
-                    if done.status == JobStatus::Done
-                        && done.goal == job.goal
-                        && done.repo == job.repo =>
-                {
-                    done.clone()
-                }
+                Some(done) if done.status == JobStatus::Done && done.job == *job => done.clone(),
                 _ => JobState {
-                    goal: job.goal.clone(),
-                    repo: job.repo.clone(),
+                    job: job.clone(),
                     status: JobStatus::Pending,
                     reason: None,
                     run_dir: None,
@@ -271,8 +270,8 @@ pub fn render_report(state: &QueueState) -> String {
             "| {} | {} | {} | {} | {} |",
             index + 1,
             cell(&status),
-            cell(&job.goal),
-            cell(&job.repo.display().to_string()),
+            cell(&job.job.goal),
+            cell(&job.job.repo.display().to_string()),
             cell(&artifacts),
         ));
     }
@@ -286,6 +285,34 @@ fn cell(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .replace('|', "\\|")
+}
+
+/// Take the exclusive queue lock for `out`, or say why not.
+///
+/// A lock that was just released can still look held for a moment (a queue
+/// that is exiting, or a child process between fork and exec that still has
+/// the descriptor), so a busy lock is retried for a quarter of a second.
+fn lock(out: &Path) -> Result<std::fs::File, Error> {
+    const ATTEMPTS: u32 = 5;
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+    let path = out.join(QUEUE_LOCK_FILE);
+    let file = std::fs::File::create(&path).map_err(|error| io_error("create", &path, &error))?;
+    for attempt in 1..=ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if attempt < ATTEMPTS => {
+                std::thread::sleep(PAUSE);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => break,
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(io_error("lock", &path, &error))
+            }
+        }
+    }
+    Err(Error::from(ArtifactError::artifact(format!(
+        "another nightshift queue is already using {}; wait for it or use another --out",
+        out.display()
+    ))))
 }
 
 fn load_state(out: &Path) -> Result<QueueState, Error> {
@@ -439,15 +466,13 @@ mod tests {
         let killed = QueueState {
             jobs: vec![
                 JobState {
-                    goal: "one".into(),
-                    repo: "/a".into(),
+                    job: job("one", "/a"),
                     status: JobStatus::Done,
                     reason: None,
                     run_dir: Some("/runs/one".into()),
                 },
                 JobState {
-                    goal: "two".into(),
-                    repo: "/b".into(),
+                    job: job("two", "/b"),
                     status: JobStatus::Running,
                     reason: None,
                     run_dir: None,
@@ -478,11 +503,44 @@ mod tests {
             .expect("queue");
         // Same position, different goal: it must run.
         let second = host(out.path(), &[]);
-        let state = run_queue(&second, &[job("other", "/a")], out.path(), false)
+        let state = run_queue(&second, &[job("other", "/b")], out.path(), false)
             .await
             .expect("queue");
         assert_eq!(*second.ran.borrow(), ["other"]);
         assert!(state.all_done());
+        // Same goal and repo, different profile: it must run too.
+        let mut changed = job("other", "/c");
+        let third = host(out.path(), &[]);
+        run_queue(&third, std::slice::from_ref(&changed), out.path(), false)
+            .await
+            .expect("queue");
+        changed.profile = Some("linux".into());
+        third.dirty.borrow_mut().clear();
+        run_queue(&third, std::slice::from_ref(&changed), out.path(), false)
+            .await
+            .expect("queue");
+        assert_eq!(*third.ran.borrow(), ["other", "other"]);
+        // Unchanged: skipped.
+        run_queue(&third, std::slice::from_ref(&changed), out.path(), false)
+            .await
+            .expect("queue");
+        assert_eq!(third.ran.borrow().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_second_queue_on_the_same_out_is_refused() {
+        let out = tempfile::tempdir().expect("tempdir");
+        let held = lock(out.path()).expect("first lock");
+        let host = host(out.path(), &[]);
+        let err = run_queue(&host, &[job("one", "/a")], out.path(), false)
+            .await
+            .expect_err("locked");
+        assert!(err.to_string().contains("already using"), "{err}");
+        assert!(host.ran.borrow().is_empty());
+        drop(held);
+        run_queue(&host, &[job("one", "/a")], out.path(), false)
+            .await
+            .expect("lock released");
     }
 
     #[tokio::test]
@@ -557,8 +615,7 @@ mod tests {
     fn report_keeps_each_job_on_one_row() {
         let state = QueueState {
             jobs: vec![JobState {
-                goal: "fix a | b\nand c".into(),
-                repo: "/a".into(),
+                job: job("fix a | b\nand c", "/a"),
                 status: JobStatus::Blocked,
                 reason: Some(DIRTY_TREE.into()),
                 run_dir: None,
