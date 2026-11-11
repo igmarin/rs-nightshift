@@ -95,6 +95,26 @@ pub enum Command {
         #[arg(long)]
         repo: PathBuf,
     },
+    /// Run a list of jobs back to back from a queue file (unattended).
+    ///
+    /// Jobs run one at a time. A failed job does not stop the queue, a job
+    /// whose repo has uncommitted changes is skipped, and a restart skips the
+    /// jobs that already finished.
+    Queue {
+        /// Queue file: ordered `[[jobs]]` with `goal`, `repo`, and optional
+        /// `name`, `config`, `profile`.
+        #[arg(long)]
+        file: PathBuf,
+        /// Role-graph config for jobs that do not set their own.
+        #[arg(long, default_value = "nightshift.toml")]
+        config: PathBuf,
+        /// Artifact root; also holds `queue_state.json` and `queue_report.md`.
+        #[arg(long, default_value = crate::artifacts::DEFAULT_OUT_DIR)]
+        out: PathBuf,
+        /// Stop at the first failed job (default: keep going).
+        #[arg(long)]
+        stop_on_failure: bool,
+    },
     /// Check a model works with the harness: three short tasks, repeated.
     ///
     /// Builds the client the way a run does, so `--provider` can be `ollama`
@@ -376,6 +396,49 @@ mod tests {
         let cli =
             Cli::try_parse_from(["nightshift", "--profile", "linux", "doctor"]).expect("parse");
         assert_eq!(cli.profile.as_deref(), Some("linux"));
+    }
+
+    #[test]
+    fn parses_queue_with_defaults_and_flags() {
+        let cli =
+            Cli::try_parse_from(["nightshift", "queue", "--file", "goals.toml"]).expect("parse");
+        match cli.command {
+            Command::Queue {
+                file,
+                config,
+                out,
+                stop_on_failure,
+            } => {
+                assert_eq!(file, PathBuf::from("goals.toml"));
+                assert_eq!(config, PathBuf::from("nightshift.toml"));
+                assert_eq!(out, PathBuf::from(crate::artifacts::DEFAULT_OUT_DIR));
+                assert!(!stop_on_failure);
+            }
+            other => panic!("expected Queue, got {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "queue",
+            "--file",
+            "goals.toml",
+            "--config",
+            "mac.toml",
+            "--out",
+            "night",
+            "--stop-on-failure",
+            "--profile",
+            "mac",
+        ])
+        .expect("parse");
+        assert_eq!(cli.profile.as_deref(), Some("mac"));
+        assert!(matches!(
+            cli.command,
+            Command::Queue {
+                stop_on_failure: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["nightshift", "queue"]).is_err());
     }
 
     #[test]

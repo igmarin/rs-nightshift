@@ -200,7 +200,13 @@ nightshift status [--out DIR]
 nightshift run --goal TEXT --repo PATH [options]
 nightshift harness --goal TEXT --repo PATH [--config PATH] [--out DIR] [--name SLUG]
 nightshift plan --goal TEXT --repo PATH [--config PATH] [--out DIR] [--name SLUG]
+nightshift queue --file PATH [--config PATH] [--out DIR] [--stop-on-failure]
+nightshift bench --model TAG [--provider NAME] [--config PATH] [--runs N] [--timeout S]
 ```
+
+`queue` runs many `harness` jobs back to back from a queue file, for
+overnight or weekend runs. See
+[`docs/configuration.md`](docs/configuration.md#goal-queue-nightshift-queue).
 
 `harness` is the new config-driven role-graph engine (beta): it reads a
 role-graph `nightshift.toml`, walks the roles, routing on each role's verdict,

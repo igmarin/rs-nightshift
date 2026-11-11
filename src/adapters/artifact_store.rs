@@ -24,15 +24,30 @@ impl FsArtifactStore {
 }
 
 impl ArtifactStore for FsArtifactStore {
+    /// Create `{date}_{slug}` under the root. A run never reuses another
+    /// run's directory: when the name is taken, `-2`, `-3`, … is appended.
     fn create_run(&self, date: &str, slug: &str) -> Result<PathBuf, Error> {
-        let dir = self.root.join(format!("{date}_{slug}"));
-        std::fs::create_dir_all(&dir).map_err(|error| {
+        let failed = |dir: &Path, error: std::io::Error| {
             Error::from(ArtifactError::artifact(format!(
                 "create {}: {error}",
                 dir.display()
             )))
-        })?;
-        Ok(dir)
+        };
+        std::fs::create_dir_all(&self.root).map_err(|error| failed(&self.root, error))?;
+        let mut dir = self.root.join(format!("{date}_{slug}"));
+        let mut copy = 2u32;
+        loop {
+            // `create_dir` fails when the directory exists, so two runs
+            // started in the same second cannot share one.
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    dir = self.root.join(format!("{date}_{slug}-{copy}"));
+                    copy += 1;
+                }
+                Err(error) => return Err(failed(&dir, error)),
+            }
+        }
     }
 
     fn read_artifact(&self, run: &Path, name: &str) -> Result<String, Error> {
@@ -75,6 +90,19 @@ mod tests {
             store.read_artifact(&run, "01_brief.md").expect("read"),
             "the brief"
         );
+    }
+
+    #[test]
+    fn create_run_never_reuses_a_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsArtifactStore::new(tmp.path().join("nested/out"));
+        let first = store.create_run("2026-08-20", "same").expect("create");
+        let second = store.create_run("2026-08-20", "same").expect("create");
+        let third = store.create_run("2026-08-20", "same").expect("create");
+        assert!(first.ends_with("2026-08-20_same"));
+        assert!(second.ends_with("2026-08-20_same-2"));
+        assert!(third.ends_with("2026-08-20_same-3"));
+        assert!(first.is_dir() && second.is_dir() && third.is_dir());
     }
 
     #[test]
