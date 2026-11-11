@@ -33,6 +33,10 @@ All notable changes to this project are documented in this file.
 - CI and release checks now run `cargo doc --no-deps`, and broken or
   private doc links fail the build. Removed the stale `docs/plan-0.1.0.md`
   handoff note. The crate description now names OpenAI-compatible servers.
+- Provider error messages no longer say "Ollama" for every provider: they
+  now read `provider request failed: …`, `provider request timed out` and
+  `model not found: …`, since the same errors come from rapid-mlx and other
+  OpenAI-compatible servers.
 - OpenAI-compatible `base_url` values with a query string or fragment are
   rejected: endpoints are appended to the base URL, so they would hit the
   wrong path.

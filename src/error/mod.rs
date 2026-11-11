@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn provider_variant_preserves_inner_message() {
         let top = Error::from(ProviderError::Ollama("boom".into()));
-        assert_eq!(top.to_string(), "Ollama request failed: boom");
+        assert_eq!(top.to_string(), "provider request failed: boom");
     }
 
     #[test]
