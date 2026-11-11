@@ -50,8 +50,8 @@ pub use factory::{
     DEFAULT_KIMI_API_KEY_ENV, DEFAULT_KIMI_BASE_URL, DEFAULT_OLLAMA_BASE_URL,
 };
 pub use ollama::OllamaAdapter;
+pub(crate) use openai::validate_chat_base_url;
 pub use openai::OpenAICompatibleAdapter;
-pub(crate) use openai::{is_loopback_base_url, validate_chat_base_url};
 #[cfg(test)]
 pub use scripted::{GenerateCall, ScriptedGenerator};
 

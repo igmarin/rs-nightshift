@@ -169,6 +169,13 @@ async fn push_provider_checks<P: ProviderCatalog>(
             ));
         }
     };
+    // Build the client exactly as a run would, so doctor never passes a
+    // provider the factory rejects (backend, base_url, http/keyless rules, key).
+    if let Err(error) =
+        crate::adapters::providers::build_model_client(provider, spec, &BTreeMap::new())
+    {
+        return fail(checks, error.to_string());
+    }
     let api_key = match api_key_env_for(provider, spec) {
         Some(env) => match std::env::var(&env) {
             Ok(key) => Some(key),
@@ -182,15 +189,6 @@ async fn push_provider_checks<P: ProviderCatalog>(
             format!("define base_url for provider {provider:?} in [providers.{provider}]"),
         );
     };
-    // Same rule as the client factory: only a loopback server may be keyless.
-    if api_key.is_none() && !crate::adapters::providers::is_loopback_base_url(&base_url) {
-        return fail(
-            checks,
-            format!(
-                "define api_key_env for provider {provider:?}; only a loopback base_url may omit it"
-            ),
-        );
-    }
     // Scheme, host and port only: a path segment could carry a token.
     let origin = reqwest::Url::parse(&base_url)
         .map(|url| url.origin().ascii_serialization())
@@ -492,6 +490,8 @@ model = "qwen3.6-35b-4bit"
             r#"
 [run]
 start = "dev"
+[providers.mlx]
+backend = "openai-compatible"
 [[roles]]
 id = "dev"
 provider = "mlx"
@@ -511,6 +511,29 @@ model = "qwen3.6-35b-4bit"
             .expect("provider check");
         assert!(!provider.passed);
         assert!(provider.detail.contains("base_url"), "{provider:?}");
+    }
+
+    #[tokio::test]
+    async fn custom_provider_with_unsupported_backend_is_not_ready() {
+        let catalog = FakeCatalog {
+            result: Ok(vec!["qwen3.6-35b-4bit".into()]),
+        };
+        for cfg in [
+            MLX_DEV.replace("backend = \"openai-compatible\"\n", ""),
+            MLX_DEV.replace("openai-compatible", "anthropic"),
+        ] {
+            let report = run_doctor(&config(&cfg), &catalog, &catalog, &healthy_host())
+                .await
+                .expect("report");
+            let provider = report
+                .checks
+                .iter()
+                .find(|c| c.name == "provider:mlx")
+                .expect("provider check");
+            assert!(!provider.passed, "{cfg}");
+            assert!(provider.detail.contains("backend"), "{provider:?}");
+            assert!(!report.is_ready());
+        }
     }
 
     #[tokio::test]
