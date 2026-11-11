@@ -32,7 +32,7 @@ pub const DIRTY_TREE: &str = "dirty_tree";
 pub struct Job {
     /// Business goal for the run.
     pub goal: String,
-    /// Target repo (relative paths resolve against the working directory).
+    /// Target repo (a relative path resolves against the queue file's directory).
     pub repo: PathBuf,
     /// Directory slug (default: slugified goal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,11 +69,22 @@ pub fn read_queue_file(path: &Path) -> Result<QueueFile, Error> {
             ConfigError::new(location, format!("job {} has an empty goal", index + 1)).into(),
         );
     }
-    // Store absolute paths, so a restart from another directory cannot take a
-    // different checkout for the one that already finished.
-    let absolute = |path: &Path| {
-        std::path::absolute(path).map_err(|error| {
-            ConfigError::new(location.clone(), format!("{}: {error}", path.display()))
+    if let Some(index) = queue
+        .jobs
+        .iter()
+        .position(|job| job.repo.as_os_str().is_empty())
+    {
+        return Err(
+            ConfigError::new(location, format!("job {} has an empty repo", index + 1)).into(),
+        );
+    }
+    // Relative paths resolve against the queue file's directory and are
+    // stored absolute, so the same file names the same checkouts from any
+    // working directory (launchd starts in `/`).
+    let base = path.parent().unwrap_or_else(|| Path::new(""));
+    let absolute = |relative: &Path| {
+        std::path::absolute(base.join(relative)).map_err(|error| {
+            ConfigError::new(location.clone(), format!("{}: {error}", relative.display()))
         })
     };
     for job in &mut queue.jobs {
@@ -628,10 +639,9 @@ mod tests {
         assert_eq!(queue.jobs.len(), 2);
         assert_eq!(queue.jobs[0], job("one", "/a"));
         assert_eq!(queue.jobs[1].name.as_deref(), Some("second"));
-        // Relative paths are stored absolute (against the working directory).
-        let cwd = std::env::current_dir().expect("cwd");
-        assert_eq!(queue.jobs[1].repo, cwd.join("b"));
-        assert_eq!(queue.jobs[1].config, Some(cwd.join("mac.toml")));
+        // Relative paths are stored absolute, against the queue file's directory.
+        assert_eq!(queue.jobs[1].repo, dir.path().join("b"));
+        assert_eq!(queue.jobs[1].config, Some(dir.path().join("mac.toml")));
         assert_eq!(queue.jobs[1].profile.as_deref(), Some("mac"));
 
         for (body, want) in [
@@ -641,6 +651,10 @@ mod tests {
                 "job 1 has an empty goal",
             ),
             ("[[jobs]]\ngoal = \"one\"\n", "repo"),
+            (
+                "[[jobs]]\ngoal = \"one\"\nrepo = \"\"\n",
+                "job 1 has an empty repo",
+            ),
             (
                 "[[jobs]]\ngoal = \"one\"\nrepo = \"/a\"\ntypo = 1\n",
                 "typo",

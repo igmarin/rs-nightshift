@@ -230,8 +230,10 @@ config = "review-only.toml" # optional; default is the queue's --config
 profile = "mac"             # optional; default is --profile / NIGHTSHIFT_PROFILE
 ```
 
-Relative `repo` and `config` paths resolve against the directory you start
-`nightshift` in, and are stored as absolute paths. Each job writes its own
+Relative `repo` and `config` paths in the queue file resolve against the
+queue file's own directory (not the directory you start `nightshift` in), and
+are stored as absolute paths. The queue's `--config` flag is a normal
+command-line path. Each job writes its own
 dated run directory under `--out`, exactly like `harness`.
 
 Keep `--out` outside the job repos, or add it to their `.gitignore`.
