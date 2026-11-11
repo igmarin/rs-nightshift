@@ -21,7 +21,7 @@ pub trait ContextProbe: Send + Sync {
     fn codegraph_available(&self) -> bool;
     /// `graphify` is on PATH.
     fn graphify_available(&self) -> bool;
-    /// Target repo already has `.codegraph/`.
+    /// Target repo already has a codegraph index (`.codegraph/codegraph.db`).
     fn has_codegraph_index(&self, repo: &Path) -> bool;
     /// Target repo already has `graphify-out/graph.json`.
     fn has_graphify_graph(&self, repo: &Path) -> bool;
@@ -44,7 +44,8 @@ impl ContextProbe for PathProbe {
     }
 
     fn has_codegraph_index(&self, repo: &Path) -> bool {
-        repo.join(".codegraph").is_dir()
+        // `.codegraph/` alone may be just a committed `.gitignore` (#119).
+        repo.join(".codegraph").join("codegraph.db").is_file()
     }
 
     fn has_graphify_graph(&self, repo: &Path) -> bool {
@@ -220,6 +221,17 @@ mod tests {
         );
         assert!(!files.iter().any(|p| p.to_string_lossy().contains("passwd")));
         assert!(!files.iter().any(|p| p.to_string_lossy().contains("escape")));
+    }
+
+    #[test]
+    fn path_probe_needs_the_index_database_not_just_the_dir() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let dir = repo.path().join(".codegraph");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::write(dir.join(".gitignore"), "*\n").expect("write");
+        assert!(!PathProbe.has_codegraph_index(repo.path()));
+        std::fs::write(dir.join("codegraph.db"), b"").expect("write");
+        assert!(PathProbe.has_codegraph_index(repo.path()));
     }
 
     #[test]
