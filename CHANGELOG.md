@@ -12,6 +12,10 @@ All notable changes to this project are documented in this file.
   reachable (`GET {base_url}/models`) and serves every model a role names
   (`model:<provider>:<model>`), listing the served models when one is
   missing (#109).
+- `nightshift bench --model <tag> [--provider <name>] [--runs N] [--timeout S]`
+  checks a model against the harness: role-envelope JSON, exact quoting, and
+  a search-replace block, each repeated with a pass rate and latency. Works
+  with any provider (Ollama, rapid-mlx, any `[providers.*]`) (#100).
 
 ### Changed
 

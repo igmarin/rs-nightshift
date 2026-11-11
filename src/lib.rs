@@ -7,6 +7,7 @@
 pub mod adapters;
 pub mod application;
 pub mod artifacts;
+pub mod bench;
 pub mod cli;
 pub mod dev;
 pub mod doctor;

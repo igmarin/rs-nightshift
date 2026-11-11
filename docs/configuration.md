@@ -121,6 +121,46 @@ role uses: `provider:<name>` fails when the server is down, and
 `model:<name>:<model>` fails, listing the served models, when a role names a model the
 server does not have.
 
+## Benchmark a model (`nightshift bench`)
+
+Before a long run, check that a model works with the harness:
+
+```bash
+nightshift bench --model llama3.1:8b                       # built-in ollama
+nightshift bench --provider mlx --model gemma-4-31b-4bit   # [providers.mlx] from nightshift.toml
+nightshift bench --provider mlx --model qwen3.8-27b-4bit --config mac.toml --runs 5 --timeout 300
+```
+
+The client is built the same way a run builds it, so `--provider` takes
+`ollama` (default), `deepseek`, `kimi`, or any `[providers.*]` name from the
+config (`--config`, default `nightshift.toml` when it exists). That lets you
+compare models on each machine without editing roles.
+
+Three tasks run `--runs` times each (default 3), with a `--timeout` per call
+(default 120 s):
+
+| Task | Passes when the reply… |
+| :--- | :--- |
+| `json-validity` | parses as a role envelope with the same parser a run uses |
+| `text-quoting` | is the two requested lines, exact (the first line may drop some of its leading spaces), with no fences or prose |
+| `search-replace` | is one `file:`/`old:`/`new:` block that, applied to the sample file, gives the expected file (nothing is written to disk) |
+
+Output shows the pass rate and the average and max latency per task. The
+first call can be slow while the server loads the model. The command exits
+0 only when every run of every task passes:
+
+```text
+$ nightshift bench --provider mlx --model gemma-4-31b-4bit --runs 2
+model: gemma-4-31b-4bit at http://127.0.0.1:8000/v1
+[PASS] json-validity   2/2 passed  avg 12.5s  max 20.4s
+[PASS] text-quoting    2/2 passed  avg 5.2s  max 6.2s
+[PASS] search-replace  2/2 passed  avg 5.8s  max 6.9s
+harness compatibility: pass
+```
+
+A `json-validity` failure usually means a thinking model spent `max_tokens`
+on reasoning: raise `max_tokens` or use a non-thinking variant.
+
 ## Per-role generate timeout
 
 Each `[[roles]]` block may set `timeout_secs` for that role's LLM completion.

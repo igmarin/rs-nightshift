@@ -255,7 +255,7 @@ fn user_prompt(context: &RoleContext, artifacts: &[(String, String)], tool_outpu
 /// Parse a model reply into a [`RoleOutput`], tolerating markdown fences,
 /// surrounding prose, and common model JSON mistakes (literal newlines in
 /// strings, non-string `content` fields, trailing commas).
-fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
+pub(crate) fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
     let json = extract_json_object(text)?;
     // Fast path: strict parse.
     match serde_json::from_str::<RoleOutput>(&json) {

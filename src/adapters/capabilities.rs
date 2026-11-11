@@ -152,10 +152,10 @@ impl CapabilityRunner {
 
 /// One exact-text replacement against a repo-relative path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SearchReplaceBlock {
-    path: String,
-    old: String,
-    new: String,
+pub(crate) struct SearchReplaceBlock {
+    pub(crate) path: String,
+    pub(crate) old: String,
+    pub(crate) new: String,
 }
 
 #[derive(Clone, Copy)]
@@ -172,7 +172,7 @@ enum BodyField {
 }
 
 /// Parse `file:` / `old:` / `new:` blocks from a role's `content` payload.
-fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock>, Error> {
+pub(crate) fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock>, Error> {
     let mut replacements = Vec::new();
     let mut file: Option<String> = None;
     let mut old: Option<String> = None;

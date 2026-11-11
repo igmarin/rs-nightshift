@@ -131,6 +131,22 @@ integrated GPUs that share system RAM because it cannot reserve the contiguous
 VRAM block it expects. A discrete AMD GPU with dedicated VRAM is required for
 GPU offload.
 
+## Probe a model before a full run
+
+Picking a model by running the harness is expensive on CPU (30–60 minutes per
+failed attempt). Run `nightshift bench --model <tag>` first; it takes minutes.
+See [Benchmark a model](configuration.md#benchmark-a-model-nightshift-bench)
+for the tasks, flags, and output.
+
+Results from the no-ai-slop copy rewrite run
+([learning notes](learning-no-ai-slop-copy-rewrite.md)):
+
+| Model | JSON | Quote | Format | Notes |
+| :---- | :--- | :---- | :----- | :---- |
+| `llama3.2:3b` | maybe | fail (placeholders) | fail | too small |
+| `qwen3:4b` | fail (think-only) | — | — | thinking model |
+| `llama3.1:8b` | pass | pass | pass | sweet spot |
+
 ## Running the demo
 
 The repo includes a minimal harness demo config at
