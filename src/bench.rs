@@ -6,7 +6,7 @@
 //! 1. `json-validity`: the reply must parse as a role envelope
 //!    ([`parse_role_output`], with its fence/think/repair handling).
 //! 2. `text-quoting`: the reply must be two lines from a snippet, exact except
-//!    for the first line's indentation (the same leeway `search-replace` gives,
+//!    that the first line may drop leading spaces (the same leeway `search-replace` gives,
 //!    since `old:` is matched as a substring), because `old:` text must match
 //!    exactly.
 //! 3. `search-replace`: the reply must parse as one `file:`/`old:`/`new:` block
@@ -241,8 +241,14 @@ fn score_json(text: &str) -> Result<(), String> {
 }
 
 fn score_quote(text: &str) -> Result<(), String> {
-    let got = text.trim_end_matches(['\r', '\n']);
-    if got.trim_start() == QUOTE_LINES.trim_start() {
+    // One trailing newline is allowed; otherwise the reply must be a substring
+    // of the snippet that ends the second line, which leaves only some of the
+    // first line's leading spaces optional.
+    let got = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
+    if got.trim_start() == QUOTE_LINES.trim_start() && QUOTE_LINES.ends_with(got) {
         Ok(())
     } else {
         Err(format!("not the exact lines (reply {})", preview(text)))
@@ -376,6 +382,12 @@ mod tests {
         assert!(score_quote(&format!("`{QUOTE_LINES}`")).is_err());
         assert!(score_quote(&format!("```rust\n{QUOTE_LINES}\n```")).is_err());
         assert!(score_quote(&format!("Here it is:\n{QUOTE_LINES}")).is_err());
+        assert!(score_quote(&format!("\n{QUOTE_LINES}")).is_err());
+        assert!(score_quote(&format!("\t{}", QUOTE_LINES.trim_start())).is_err());
+        assert!(score_quote(&format!("  {QUOTE_LINES}")).is_err());
+        assert!(score_quote(&format!("{QUOTE_LINES}\n\n")).is_err());
+        assert!(score_quote(&format!("{QUOTE_LINES}\r\n")).is_ok());
+        assert!(score_quote(&QUOTE_LINES[2..]).is_ok());
     }
 
     #[test]

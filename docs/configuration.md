@@ -142,7 +142,7 @@ Three tasks run `--runs` times each (default 3), with a `--timeout` per call
 | Task | Passes when the reply… |
 | :--- | :--- |
 | `json-validity` | parses as a role envelope with the same parser a run uses |
-| `text-quoting` | is the two requested lines, exact (only the first line's indentation may differ), with no fences or prose |
+| `text-quoting` | is the two requested lines, exact (the first line may drop some of its leading spaces), with no fences or prose |
 | `search-replace` | is one `file:`/`old:`/`new:` block that, applied to the sample file, gives the expected file (nothing is written to disk) |
 
 Output shows the pass rate and the average and max latency per task. The
