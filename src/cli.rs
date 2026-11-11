@@ -15,6 +15,10 @@ pub struct Cli {
         global = true
     )]
     pub ollama_url: String,
+    /// `[profiles.<name>]` that `@slot` models resolve against (overrides
+    /// `[run] profile`).
+    #[arg(long, env = "NIGHTSHIFT_PROFILE", global = true)]
+    pub profile: Option<String>,
     /// Subcommand to run.
     #[command(subcommand)]
     pub command: Command,
@@ -97,12 +101,14 @@ pub enum Command {
     /// or any `[providers.*]` entry in the config (rapid-mlx, llama.cpp, LM
     /// Studio). Exits 0 only when every run of every task passes.
     Bench {
-        /// Model tag to probe (for example `qwen3.6-35b-4bit`).
+        /// Model tag to probe (for example `qwen3.6-35b-4bit`), or `@slot` to
+        /// probe what the selected profile maps that slot to.
         #[arg(long)]
         model: String,
-        /// Provider: `ollama`, `deepseek`, `kimi`, or a `[providers.*]` name.
-        #[arg(long, default_value = "ollama")]
-        provider: String,
+        /// Provider: `ollama` (default), `deepseek`, `kimi`, or a
+        /// `[providers.*]` name. Not allowed with an `@slot` model.
+        #[arg(long)]
+        provider: Option<String>,
         /// Config holding `[providers.*]` (default: `nightshift.toml` if it exists).
         #[arg(long)]
         config: Option<PathBuf>,
@@ -364,6 +370,15 @@ mod tests {
     }
 
     #[test]
+    fn profile_is_a_global_flag() {
+        let cli = Cli::try_parse_from(["nightshift", "doctor", "--profile", "mac"]).expect("parse");
+        assert_eq!(cli.profile.as_deref(), Some("mac"));
+        let cli =
+            Cli::try_parse_from(["nightshift", "--profile", "linux", "doctor"]).expect("parse");
+        assert_eq!(cli.profile.as_deref(), Some("linux"));
+    }
+
+    #[test]
     fn parses_bench_with_defaults() {
         let cli =
             Cli::try_parse_from(["nightshift", "bench", "--model", "llama3.1:8b"]).expect("parse");
@@ -376,7 +391,7 @@ mod tests {
                 timeout,
             } => {
                 assert_eq!(model, "llama3.1:8b");
-                assert_eq!(provider, "ollama");
+                assert_eq!(provider, None);
                 assert_eq!(config, None);
                 assert_eq!(runs, 3);
                 assert_eq!(timeout, 120);
@@ -410,7 +425,7 @@ mod tests {
                 timeout,
                 ..
             } => {
-                assert_eq!(provider, "mlx");
+                assert_eq!(provider.as_deref(), Some("mlx"));
                 assert_eq!(config, Some(PathBuf::from("mac.toml")));
                 assert_eq!((runs, timeout), (5, 300));
             }

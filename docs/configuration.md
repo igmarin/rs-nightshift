@@ -121,6 +121,51 @@ role uses: `provider:<name>` fails when the server is down, and
 `model:<name>:<model>` fails, listing the served models, when a role names a model the
 server does not have.
 
+## Machine profiles (`@slot` models)
+
+To run the same roles on different machines (a Mac with rapid-mlx, a Linux
+box with Ollama), give roles a **model slot** instead of a model, and map
+slots to models once per machine:
+
+```toml
+[run]
+start = "po"
+profile = "mac"            # default; --profile / NIGHTSHIFT_PROFILE override it
+
+[providers.mlx]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+
+[profiles.mac]
+planner = { provider = "mlx", model = "qwen3.8-27b-4bit", options = { max_tokens = 4096 } }
+coder   = { provider = "mlx", model = "gemma-4-31b-4bit" }
+
+[profiles.linux]
+planner = { provider = "ollama", model = "llama3.1:8b" }
+coder   = { provider = "ollama", model = "qwen2.5-coder:7b" }
+
+[[roles]]
+id = "po"
+model = "@planner"         # no provider: the profile supplies it
+options = { temperature = 0.1 }
+prompt = "..."
+```
+
+- Select the profile with `--profile NAME` > `NIGHTSHIFT_PROFILE` >
+  `[run] profile`. Setting `NIGHTSHIFT_PROFILE` in each machine's shell
+  profile means the repo config never changes.
+- A role's own `options` override the slot's options key by key.
+- Roles with a literal `model` (and a `provider`) work as before. Configs
+  without `@slot` models need no profile and ignore the selected one, so a
+  machine-wide `NIGHTSHIFT_PROFILE` never breaks them.
+- Errors at load time: an unknown profile (lists the defined ones), a slot
+  the profile does not define, a slot with no profile selected, or a role
+  that sets both `provider` and an `@slot` model.
+- `nightshift doctor` shows the resolved models (`[ok] roles - profile mac:
+  po: mlx/qwen3.8-27b-4bit, …`) and checks them. `harness` and `plan` print
+  the same line before the run starts. `nightshift bench --model @coder`
+  benchmarks whatever the selected profile maps `coder` to.
+
 ## Benchmark a model (`nightshift bench`)
 
 Before a long run, check that a model works with the harness:

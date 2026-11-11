@@ -18,6 +18,14 @@ start = "product-owner"
 # backend = "openai-compatible"
 # base_url = "http://127.0.0.1:8000/v1"
 
+# Machine profiles: roles say `model = "@slot"` (no provider) and each
+# machine picks a profile with --profile, NIGHTSHIFT_PROFILE, or
+# [run] profile. See docs/configuration.md.
+# [profiles.mac]
+# coder = { provider = "mlx", model = "gemma-4-31b-4bit" }
+# [profiles.linux]
+# coder = { provider = "ollama", model = "qwen2.5-coder:7b", options = { think = false } }
+
 [providers.deepseek]
 backend = "openai-compatible"
 base_url = "https://api.deepseek.com"
