@@ -26,6 +26,7 @@ const REQUIRED_GATES: &[(&str, &str)] = &[
     ),
     ("test", "cargo test"),
     ("doc-test", "cargo test --doc"),
+    ("doc-build", "cargo doc --no-deps"),
     (
         "coverage",
         "cargo llvm-cov --workspace --fail-under-lines 85",
