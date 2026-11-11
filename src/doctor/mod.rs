@@ -193,7 +193,11 @@ async fn push_provider_checks<P: ProviderCatalog>(
     let origin = reqwest::Url::parse(&base_url)
         .map(|url| url.origin().ascii_serialization())
         .unwrap_or_else(|_| "<invalid base_url>".into());
-    match catalog.list_models(&base_url, api_key.as_deref()).await {
+    // Probe with the same bearer token the run client sends.
+    let token = api_key
+        .as_deref()
+        .unwrap_or(crate::adapters::providers::NO_API_KEY);
+    match catalog.list_models(&base_url, Some(token)).await {
         Ok(served) => {
             checks.push(check(
                 format!("provider:{provider}"),
@@ -534,6 +538,37 @@ model = "qwen3.6-35b-4bit"
             assert!(provider.detail.contains("backend"), "{provider:?}");
             assert!(!report.is_ready());
         }
+    }
+
+    /// Records the token each probe sends.
+    struct RecordingCatalog(std::sync::Mutex<Vec<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl ProviderCatalog for RecordingCatalog {
+        async fn list_models(
+            &self,
+            _base_url: &str,
+            api_key: Option<&str>,
+        ) -> Result<Vec<String>, Error> {
+            self.0
+                .lock()
+                .expect("lock")
+                .push(api_key.map(str::to_owned));
+            Ok(vec!["qwen3.6-35b-4bit".into()])
+        }
+    }
+
+    #[tokio::test]
+    async fn keyless_probe_sends_the_run_placeholder_token() {
+        let ollama = FakeCatalog {
+            result: Ok(Vec::new()),
+        };
+        let probe = RecordingCatalog(std::sync::Mutex::new(Vec::new()));
+        run_doctor(&config(MLX_DEV), &ollama, &probe, &healthy_host())
+            .await
+            .expect("report");
+        let sent = probe.0.lock().expect("lock").clone();
+        assert_eq!(sent, vec![Some("local".to_string())]);
     }
 
     #[tokio::test]

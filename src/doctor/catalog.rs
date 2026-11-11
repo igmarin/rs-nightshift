@@ -87,8 +87,10 @@ pub struct HttpProviderCatalog {
 impl HttpProviderCatalog {
     /// Build the catalog client.
     pub fn new() -> Result<Self, Error> {
+        // No redirects, as in the chat client: the key must reach only base_url.
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| Error::from(ProviderError::Ollama(error.to_string())))?;
         Ok(Self { client })

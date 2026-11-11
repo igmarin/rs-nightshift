@@ -36,7 +36,13 @@ pub(crate) fn to_llm_request(
 /// API key is never sent in cleartext.
 pub(crate) fn validate_chat_base_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
-    let redacted = crate::adapters::ollama::redact_ollama_url(value);
+    // Scheme, host and port only: a path segment could carry a token, and these
+    // errors reach the run log and the doctor report.
+    let redacted = reqwest::Url::parse(value)
+        .ok()
+        .filter(|url| url.has_host())
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|| crate::adapters::ollama::redact_ollama_url(value));
     let parsed = reqwest::Url::parse(value).map_err(|_| {
         Error::from(ConfigError {
             path: "provider base_url".into(),
@@ -150,12 +156,17 @@ impl OpenAICompatibleAdapter {
         let redacted_base_url = crate::adapters::ollama::redact_ollama_url(&base_url);
         // The per-request model always overrides the placeholder below, so the
         // client-level model name is never sent to the provider.
-        let http_client = reqwest::Client::builder().build().map_err(|error| {
-            Error::from(ConfigError {
-                path: "provider base_url".into(),
-                message: format!("failed to build HTTP client: {error}"),
-            })
-        })?;
+        // No redirects: a redirect could move the bearer key to plain http or
+        // another host, bypassing the base URL checks above.
+        let http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                Error::from(ConfigError {
+                    path: "provider base_url".into(),
+                    message: format!("failed to build HTTP client: {error}"),
+                })
+            })?;
         let inner = OpenAIClient::from_key_with_base_url("unset", api_key, base_url, http_client);
         Ok(Self {
             inner,
@@ -401,6 +412,49 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn openai_url_errors_never_echo_the_path() {
+        let error = match OpenAICompatibleAdapter::new("https://host/v1/sk-secret?tenant=x", "k") {
+            Ok(_) => panic!("query must fail"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(!text.contains("sk-secret"), "{text}");
+        assert!(text.contains("https://host"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn openai_does_not_follow_redirects() {
+        use crate::adapters::providers::test_support::{chat_response, request};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/elsewhere", server.uri()).as_str()),
+            )
+            .mount(&server)
+            .await;
+        // If the redirect were followed, this would answer and the call would succeed.
+        wiremock::Mock::given(wiremock::matchers::path("/elsewhere"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(chat_response("leaked"), "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let client =
+            OpenAICompatibleAdapter::new(format!("{}/v1", server.uri()), "sk-x").expect("client");
+        assert!(client.generate(&request("m")).await.is_err());
+        let paths: Vec<_> = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert_eq!(paths, vec!["/v1/chat/completions".to_string()]);
     }
 
     #[test]
