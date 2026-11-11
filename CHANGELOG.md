@@ -45,6 +45,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `search-replace` restores the files it already wrote when a later write
+  fails, so a failed call leaves the repo unchanged and is safe to retry.
 - `search-replace` roles: the contract now tells the model to keep the whole
   edit inside the one `content` JSON string. Local models closed the string
   before `new:`, which ended the run with "did not return a JSON object".

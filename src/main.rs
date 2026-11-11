@@ -266,6 +266,8 @@ async fn real_main() -> anyhow::Result<()> {
                     role: entry,
                     context: &ctx,
                     artifacts: &[],
+                    // `plan` is interactive and keeps no action log, so a
+                    // retry is reported on stderr.
                     on_retry: &|attempt, error| {
                         eprintln!("attempt {attempt} rejected, retrying: {error}");
                         Ok(())

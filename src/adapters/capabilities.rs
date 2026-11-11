@@ -435,6 +435,8 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
         contents.insert(rel.clone(), body);
     }
 
+    // Kept so a failed write can put back the files already written.
+    let originals = contents.clone();
     for block in &replacements {
         let body = contents.get_mut(&block.path).ok_or_else(|| {
             ArtifactError::artifact(format!(
@@ -462,11 +464,26 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
         }
     }
 
+    // Write in path order. If one write fails, restore the files already
+    // written (best effort), so a failed call leaves the repo as it found it
+    // and the role can safely try again.
+    let mut files: Vec<(&PathBuf, &String, &String)> = Vec::new();
     for (rel, abs) in &abs_by_rel {
-        let body = contents.get(rel).ok_or_else(|| {
-            ArtifactError::artifact(format!("search-replace: missing content for {rel}"))
-        })?;
-        write_atomically(abs, body, "search-replace")?;
+        let (Some(body), Some(original)) = (contents.get(rel), originals.get(rel)) else {
+            return Err(Error::from(ArtifactError::artifact(format!(
+                "search-replace: missing content for {rel}"
+            ))));
+        };
+        files.push((abs, body, original));
+    }
+    files.sort_by_key(|(abs, _, _)| *abs);
+    for (index, (abs, body, _)) in files.iter().enumerate() {
+        if let Err(error) = write_atomically(abs, body, "search-replace") {
+            for (done, _, original) in files.iter().take(index) {
+                let _ = write_atomically(done, original, "search-replace");
+            }
+            return Err(error);
+        }
     }
 
     let n = replacements.len();
@@ -700,6 +717,36 @@ GAMMA
         );
         let body = std::fs::read_to_string(repo.path().join("hello.txt")).expect("read");
         assert_eq!(body, "hello\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_replace_restores_written_files_when_a_later_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = init_repo();
+        let locked = repo.path().join("locked");
+        std::fs::create_dir(&locked).expect("mkdir");
+        std::fs::write(locked.join("b.txt"), "keep\n").expect("write");
+        // A read-only directory: b.txt can be read but not replaced.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let input = "\
+file: hello.txt
+old: hello
+new: changed
+file: locked/b.txt
+old: keep
+new: changed
+";
+        let result = CapabilityRunner::new()
+            .run("search-replace", repo.path(), input)
+            .await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // Root ignores directory permissions, so the write cannot be made to fail there.
+        let Err(err) = result else { return };
+        assert!(err.to_string().contains("search-replace"), "{err}");
+        // hello.txt sorts first, so it was written and then restored.
+        let hello = std::fs::read_to_string(repo.path().join("hello.txt")).expect("read");
+        assert_eq!(hello, "hello\n");
     }
 
     #[tokio::test]

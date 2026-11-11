@@ -254,7 +254,8 @@ same role (a loop-back) overwrites them. When the last attempt fails, the
 run fails as before.
 
 `retries` may be at most 10. A role with two edit tools is not retried once
-the first tool has changed the repo.
+the first tool has changed the repo. `plan` keeps no action log, so it
+prints each retry to stderr.
 
 ## Role tools
 
