@@ -37,6 +37,25 @@ pub struct RunOptions {
     /// Global cap on total role executions.
     #[serde(default = "default_max_steps")]
     pub max_steps: u32,
+    /// Default `[profiles.<name>]` for `@slot` models. `--profile` and
+    /// `NIGHTSHIFT_PROFILE` override it. After
+    /// [`NightshiftConfig::resolve_profile`], holds the profile in use.
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+/// What a model slot resolves to in one profile:
+/// `coder = { provider = "mlx", model = "qwen3.6-35b-4bit" }`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSlot {
+    /// Provider name; `ollama` is built in, others must be in `providers`.
+    pub provider: String,
+    /// Model tag/variant passed through to the provider verbatim.
+    pub model: String,
+    /// Model options; a role's own `options` override these key by key.
+    #[serde(default)]
+    pub options: BTreeMap<String, toml::Value>,
 }
 
 /// One provider definition under `[providers.<name>]`.
@@ -63,8 +82,11 @@ pub struct RoleSpec {
     /// Unique role id referenced by routing targets and `start`.
     pub id: String,
     /// Provider name; `ollama` is built in, others must be in `providers`.
+    /// Omitted when `model` is an `@slot` (the profile supplies it).
+    #[serde(default)]
     pub provider: String,
-    /// Model tag/variant passed through to the provider verbatim.
+    /// Model tag/variant passed through to the provider verbatim, or
+    /// `@slot` to take provider, model and options from the selected profile.
     pub model: String,
     /// Model-specific options (temperature, think, max_tokens, …).
     #[serde(default)]
@@ -105,6 +127,10 @@ pub struct NightshiftConfig {
     /// Named providers beyond the built-in `ollama`.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderSpec>,
+    /// Named profiles mapping model slots to concrete models, one per
+    /// machine (`[profiles.mac]`, `[profiles.linux]`).
+    #[serde(default)]
+    pub profiles: BTreeMap<String, BTreeMap<String, ModelSlot>>,
     /// The ordered list of roles.
     ///
     /// Defaults to empty so a config with no roles parses and fails with a
@@ -123,6 +149,100 @@ fn default_max_loop() -> u32 {
 }
 
 impl NightshiftConfig {
+    /// Replace every `@slot` model with the provider, model and options the
+    /// selected profile maps it to.
+    ///
+    /// `selected` (from `--profile` / `NIGHTSHIFT_PROFILE`) wins over
+    /// `[run] profile`. On success `run.profile` holds the profile in use.
+    /// Configs without `@slot` models are unchanged.
+    pub fn resolve_profile(&mut self, selected: Option<&str>) -> Result<(), Error> {
+        let name = self.profile_name(selected);
+        let profile = self.selected_profile(selected)?.cloned();
+        let profile = profile.as_ref();
+        for role in &mut self.roles {
+            let Some(slot_name) = role.model.strip_prefix('@') else {
+                continue;
+            };
+            let Some(profile) = profile else {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} uses model slot \"@{slot_name}\" but no profile is selected; \
+                     pass --profile, set NIGHTSHIFT_PROFILE, or set [run] profile",
+                    role.id
+                )));
+            };
+            let Some(slot) = profile.get(slot_name) else {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} uses model slot \"@{slot_name}\", which profile {:?} does not define",
+                    role.id,
+                    name.as_deref().unwrap_or_default()
+                )));
+            };
+            if !role.provider.is_empty() {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} sets provider {:?} and model slot \"@{slot_name}\"; \
+                     remove provider, the profile supplies it",
+                    role.id, role.provider
+                )));
+            }
+            let mut options = slot.options.clone();
+            options.append(&mut role.options);
+            role.provider = slot.provider.clone();
+            role.model = slot.model.clone();
+            role.options = options;
+        }
+        self.run.profile = name;
+        Ok(())
+    }
+
+    /// The profile in use: `selected` (flag/env) over `[run] profile`.
+    #[must_use]
+    pub fn profile_name(&self, selected: Option<&str>) -> Option<String> {
+        selected
+            .map(str::to_owned)
+            .or_else(|| self.run.profile.clone())
+    }
+
+    fn selected_profile(
+        &self,
+        selected: Option<&str>,
+    ) -> Result<Option<&BTreeMap<String, ModelSlot>>, Error> {
+        let Some(name) = self.profile_name(selected) else {
+            return Ok(None);
+        };
+        self.profiles.get(&name).map(Some).ok_or_else(|| {
+            let known: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
+            Error::RoleGraph(format!(
+                "unknown profile {name:?}; defined profiles: [{}]",
+                known.join(", ")
+            ))
+        })
+    }
+
+    /// Look up one model slot (without the `@`) in the selected profile.
+    pub fn model_slot(&self, selected: Option<&str>, slot: &str) -> Result<&ModelSlot, Error> {
+        let profile = self.selected_profile(selected)?.ok_or_else(|| {
+            Error::RoleGraph(format!(
+                "model slot \"@{slot}\" needs a profile; pass --profile, set \
+                 NIGHTSHIFT_PROFILE, or set [run] profile"
+            ))
+        })?;
+        profile.get(slot).ok_or_else(|| {
+            Error::RoleGraph(format!(
+                "profile {:?} does not define model slot \"@{slot}\"",
+                self.profile_name(selected).unwrap_or_default()
+            ))
+        })
+    }
+
+    /// One line per role: `id: provider/model`, for logs and `doctor`.
+    #[must_use]
+    pub fn role_models(&self) -> Vec<String> {
+        self.roles
+            .iter()
+            .map(|role| format!("{}: {}/{}", role.id, role.provider, role.model))
+            .collect()
+    }
+
     /// Validate the graph's internal consistency.
     ///
     /// Semantic errors use [`Error::RoleGraph`] so the operator gets a clear,
@@ -153,6 +273,18 @@ impl NightshiftConfig {
             }
         }
         for role in &self.roles {
+            if role.model.starts_with('@') {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} model slot {:?} was not resolved against a profile",
+                    role.id, role.model
+                )));
+            }
+            if role.provider.is_empty() {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} has no provider; set provider or use an @slot model",
+                    role.id
+                )));
+            }
             if role.provider != "ollama" && !self.providers.contains_key(&role.provider) {
                 return Err(Error::RoleGraph(format!(
                     "role {:?} references unknown provider {:?}",
@@ -298,20 +430,30 @@ pub(crate) fn is_secret_path(file: &str) -> bool {
         || lower.ends_with(".keystore")
 }
 
-/// Load, parse, and validate the role graph from a TOML file.
-pub fn load_role_graph_config_from(path: &Path) -> Result<NightshiftConfig, Error> {
+/// Read and parse a config file without resolving profiles or validating.
+pub fn read_config(path: &Path) -> Result<NightshiftConfig, Error> {
     let content = std::fs::read_to_string(path).map_err(|error| {
         Error::from(ConfigError {
             path: path.display().to_string(),
             message: error.to_string(),
         })
     })?;
-    let config: NightshiftConfig = toml::from_str(&content).map_err(|error| {
+    toml::from_str(&content).map_err(|error| {
         Error::from(ConfigError {
             path: path.display().to_string(),
             message: error.to_string(),
         })
-    })?;
+    })
+}
+
+/// Load, parse, resolve `@slot` models against the selected profile (see
+/// [`NightshiftConfig::resolve_profile`]), and validate the role graph.
+pub fn load_role_graph_config_from(
+    path: &Path,
+    profile: Option<&str>,
+) -> Result<NightshiftConfig, Error> {
+    let mut config = read_config(path)?;
+    config.resolve_profile(profile)?;
     config.validate()?;
     Ok(config)
 }
@@ -546,7 +688,7 @@ model = "phi4"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nightshift.toml");
         std::fs::write(&path, EXAMPLE).expect("write");
-        let config = load_role_graph_config_from(&path).expect("valid config");
+        let config = load_role_graph_config_from(&path, None).expect("valid config");
         assert_eq!(config.roles.len(), 3);
     }
 
@@ -555,7 +697,7 @@ model = "phi4"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nightshift.toml");
         std::fs::write(&path, "not = valid = toml\n").expect("write");
-        let err = load_role_graph_config_from(&path).expect_err("malformed must fail");
+        let err = load_role_graph_config_from(&path, None).expect_err("malformed must fail");
         assert!(err.to_string().contains("config error"), "{err}");
     }
 
@@ -563,7 +705,8 @@ model = "phi4"
     fn shipped_example_config_parses_and_validates() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let example = Path::new(&manifest_dir).join("nightshift.toml.example");
-        let config = load_role_graph_config_from(&example).expect("example must parse + validate");
+        let config =
+            load_role_graph_config_from(&example, None).expect("example must parse + validate");
         assert_eq!(config.run.start, "product-owner");
         assert_eq!(config.roles.len(), 3);
     }
@@ -831,5 +974,193 @@ timeout_secs = 0
         .expect("parse");
         let err = config.validate().expect_err("zero timeout_secs must fail");
         assert!(err.to_string().contains("timeout_secs"), "{err}");
+    }
+
+    const PROFILES: &str = r#"
+[run]
+start = "po"
+
+[providers.mlx]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+
+[profiles.mac]
+planner = { provider = "mlx", model = "qwen3.8-27b-4bit", options = { temperature = 0.3, max_tokens = 4096 } }
+coder = { provider = "mlx", model = "gemma-4-31b-4bit" }
+
+[profiles.linux]
+planner = { provider = "ollama", model = "llama3.1:8b" }
+coder = { provider = "ollama", model = "qwen2.5-coder:7b" }
+
+[[roles]]
+id = "po"
+model = "@planner"
+options = { temperature = 0.1 }
+on = { next = "dev" }
+
+[[roles]]
+id = "dev"
+model = "@coder"
+on = { next = "qa" }
+
+[[roles]]
+id = "qa"
+provider = "ollama"
+model = "phi4"
+"#;
+
+    fn profiles(extra_run: &str) -> NightshiftConfig {
+        let text = PROFILES.replace("start = \"po\"", &format!("start = \"po\"\n{extra_run}"));
+        toml::from_str(&text).expect("parse")
+    }
+
+    fn models(config: &NightshiftConfig) -> Vec<(&str, &str)> {
+        config
+            .roles
+            .iter()
+            .map(|r| (r.provider.as_str(), r.model.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn profile_resolves_every_slot_and_leaves_literal_models() {
+        let mut config = profiles("");
+        config.resolve_profile(Some("linux")).expect("resolve");
+        config.validate().expect("valid");
+        assert_eq!(
+            models(&config),
+            [
+                ("ollama", "llama3.1:8b"),
+                ("ollama", "qwen2.5-coder:7b"),
+                ("ollama", "phi4")
+            ]
+        );
+        assert_eq!(config.run.profile.as_deref(), Some("linux"));
+        assert_eq!(
+            config.role_models(),
+            [
+                "po: ollama/llama3.1:8b",
+                "dev: ollama/qwen2.5-coder:7b",
+                "qa: ollama/phi4"
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_profile_beats_run_profile() {
+        let mut config = profiles("profile = \"mac\"");
+        config.resolve_profile(Some("linux")).expect("resolve");
+        assert_eq!(config.roles[0].model, "llama3.1:8b");
+
+        let mut config = profiles("profile = \"mac\"");
+        config.resolve_profile(None).expect("resolve");
+        assert_eq!(config.roles[0].provider, "mlx");
+        assert_eq!(config.run.profile.as_deref(), Some("mac"));
+    }
+
+    #[test]
+    fn role_options_override_slot_options_key_by_key() {
+        let mut config = profiles("");
+        config.resolve_profile(Some("mac")).expect("resolve");
+        let options = &config.roles[0].options;
+        assert_eq!(options["temperature"], toml::Value::Float(0.1));
+        assert_eq!(options["max_tokens"], toml::Value::Integer(4096));
+    }
+
+    #[test]
+    fn missing_slot_names_the_role_and_slot() {
+        let mut config = profiles("");
+        config.roles[1].model = "@missing".into();
+        let err = config
+            .resolve_profile(Some("mac"))
+            .expect_err("missing slot")
+            .to_string();
+        assert!(
+            err.contains("\"dev\"") && err.contains("@missing") && err.contains("mac"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn slot_without_a_profile_is_an_error() {
+        let err = profiles("")
+            .resolve_profile(None)
+            .expect_err("no profile")
+            .to_string();
+        assert!(err.contains("\"po\"") && err.contains("--profile"), "{err}");
+    }
+
+    #[test]
+    fn unknown_profile_lists_the_defined_ones() {
+        let err = profiles("")
+            .resolve_profile(Some("windows"))
+            .expect_err("unknown")
+            .to_string();
+        assert!(
+            err.contains("\"windows\"") && err.contains("[linux, mac]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn provider_plus_slot_is_an_error() {
+        let mut config = profiles("");
+        config.roles[1].provider = "ollama".into();
+        let err = config
+            .resolve_profile(Some("mac"))
+            .expect_err("both")
+            .to_string();
+        assert!(err.contains("remove provider"), "{err}");
+    }
+
+    #[test]
+    fn unresolved_slot_or_missing_provider_fails_validation() {
+        let config = profiles("");
+        let err = config.validate().expect_err("unresolved").to_string();
+        assert!(err.contains("not resolved"), "{err}");
+
+        let mut config = profiles("");
+        config.resolve_profile(Some("mac")).expect("resolve");
+        config.roles[2].provider = String::new();
+        let err = config.validate().expect_err("no provider").to_string();
+        assert!(err.contains("has no provider"), "{err}");
+    }
+
+    #[test]
+    fn unknown_slot_field_is_a_parse_error() {
+        let text = PROFILES.replace(
+            "coder = { provider = \"mlx\", model = \"gemma-4-31b-4bit\" }",
+            "coder = { provider = \"mlx\", modle = \"gemma-4-31b-4bit\" }",
+        );
+        assert!(toml::from_str::<NightshiftConfig>(&text).is_err());
+    }
+
+    #[test]
+    fn model_slot_looks_up_the_selected_profile() {
+        let config = profiles("profile = \"mac\"");
+        assert_eq!(
+            config.model_slot(None, "coder").expect("slot").model,
+            "gemma-4-31b-4bit"
+        );
+        assert_eq!(
+            config
+                .model_slot(Some("linux"), "coder")
+                .expect("slot")
+                .provider,
+            "ollama"
+        );
+        assert!(config.model_slot(None, "nope").is_err());
+        assert!(profiles("").model_slot(None, "coder").is_err());
+    }
+
+    #[test]
+    fn load_resolves_the_profile_from_the_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nightshift.toml");
+        std::fs::write(&path, PROFILES).expect("write");
+        let config = load_role_graph_config_from(&path, Some("mac")).expect("load");
+        assert_eq!(config.roles[1].model, "gemma-4-31b-4bit");
+        assert!(load_role_graph_config_from(&path, None).is_err());
+        assert_eq!(read_config(&path).expect("read").roles[1].model, "@coder");
     }
 }

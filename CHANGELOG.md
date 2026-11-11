@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Machine profiles: a role can use `model = "@slot"`, and `[profiles.<name>]`
+  maps slots to `{ provider, model, options }`. Select with `--profile`,
+  `NIGHTSHIFT_PROFILE`, or `[run] profile`. `doctor`, `harness`, and `plan`
+  show the resolved models; `bench --model @slot` benchmarks a slot (#108).
 - Keyless local OpenAI-compatible providers (rapid-mlx, llama.cpp, LM
   Studio): `api_key_env` is optional for custom `openai-compatible`
   providers. `nightshift doctor` now checks that each such provider is

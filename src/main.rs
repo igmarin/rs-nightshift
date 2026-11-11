@@ -18,7 +18,9 @@ use rs_nightshift::cli::{Cli, Command};
 use rs_nightshift::doctor::{
     run_doctor, write_report, Check, DoctorReport, HttpModelCatalog, HttpProviderCatalog, PathHost,
 };
-use rs_nightshift::domain::rolegraph::config::load_role_graph_config_from;
+use rs_nightshift::domain::rolegraph::config::{
+    load_role_graph_config_from, read_config, NightshiftConfig,
+};
 use rs_nightshift::domain::rolegraph::state::RunStatus;
 use rs_nightshift::domain::rolegraph::verdict::Verdict;
 use rs_nightshift::error::Error;
@@ -40,6 +42,7 @@ async fn main() {
 async fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let ollama_url = cli.ollama_url;
+    let profile = cli.profile;
     match cli.command {
         Command::Doctor { config } => {
             let validated_url = match validate_ollama_url(&ollama_url) {
@@ -57,7 +60,7 @@ async fn real_main() -> anyhow::Result<()> {
                     process::exit(report.exit_code());
                 }
             };
-            let role_graph = match load_role_graph_config_from(&config) {
+            let role_graph = match load_role_graph_config_from(&config, profile.as_deref()) {
                 Ok(config) => config,
                 Err(error) => {
                     let report = DoctorReport {
@@ -84,6 +87,15 @@ async fn real_main() -> anyhow::Result<()> {
                     detail: format!("using {}", redact_ollama_url(&validated_url)),
                 },
             );
+            report.checks.insert(
+                1,
+                Check {
+                    name: "roles".into(),
+                    passed: true,
+                    required: false,
+                    detail: describe_models(&role_graph),
+                },
+            );
             write_report(&report, io::stdout())?;
             process::exit(report.exit_code());
         }
@@ -102,15 +114,30 @@ async fn real_main() -> anyhow::Result<()> {
                 let default = std::path::PathBuf::from("nightshift.toml");
                 default.is_file().then_some(default)
             });
-            let providers = match &config {
-                Some(path) => load_role_graph_config_from(path)?.providers,
-                None => std::collections::BTreeMap::new(),
+            let cfg = config.as_deref().map(read_config).transpose()?;
+            let (provider, model, options) = match model.strip_prefix('@') {
+                Some(slot_name) => {
+                    if provider.is_some() {
+                        anyhow::bail!("--provider cannot be combined with an @slot model");
+                    }
+                    let cfg = cfg.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("an @slot model needs a config; pass --config")
+                    })?;
+                    let slot = cfg.model_slot(profile.as_deref(), slot_name)?;
+                    (
+                        slot.provider.clone(),
+                        slot.model.clone(),
+                        slot.options.clone(),
+                    )
+                }
+                None => (
+                    provider.unwrap_or_else(|| "ollama".into()),
+                    model,
+                    std::collections::BTreeMap::new(),
+                ),
             };
-            let client = ProviderFactory.build(
-                &provider,
-                providers.get(&provider),
-                &std::collections::BTreeMap::new(),
-            )?;
+            let providers = cfg.map(|cfg| cfg.providers).unwrap_or_default();
+            let client = ProviderFactory.build(&provider, providers.get(&provider), &options)?;
             let params = BenchParams {
                 model,
                 runs,
@@ -160,7 +187,8 @@ async fn real_main() -> anyhow::Result<()> {
             name,
             repo,
         } => {
-            let cfg = load_role_graph_config_from(&config)?;
+            let cfg = load_role_graph_config_from(&config, profile.as_deref())?;
+            writeln!(io::stderr(), "{}", describe_models(&cfg))?;
             let factory = ProviderFactory;
             let store = FsArtifactStore::new(&out);
             let state = FsStateStore::new();
@@ -200,7 +228,8 @@ async fn real_main() -> anyhow::Result<()> {
             name,
             repo,
         } => {
-            let cfg = load_role_graph_config_from(&config)?;
+            let cfg = load_role_graph_config_from(&config, profile.as_deref())?;
+            writeln!(io::stderr(), "{}", describe_models(&cfg))?;
             let entry = cfg
                 .roles
                 .iter()
@@ -273,6 +302,16 @@ async fn real_main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `profile mac: po: mlx/qwen3.8-27b-4bit, dev: mlx/qwen3.6-35b-4bit`.
+fn describe_models(cfg: &NightshiftConfig) -> String {
+    let profile = cfg
+        .run
+        .profile
+        .as_deref()
+        .map_or_else(|| "no profile".to_owned(), |name| format!("profile {name}"));
+    format!("{profile}: {}", cfg.role_models().join(", "))
 }
 
 /// Build a unique run-directory slug: `{name-or-goal}-{kind}-{timestamp}`.
