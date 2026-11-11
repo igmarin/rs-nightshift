@@ -8,7 +8,7 @@ name: ocr PR Review
 # Re-running a finished job does NOT help: it reviews the commit it first ran on.
 on:
   pull_request:
-    types: [opened, ready_for_review]
+    types: [opened, reopened, ready_for_review]
 
 permissions:
   contents: read
