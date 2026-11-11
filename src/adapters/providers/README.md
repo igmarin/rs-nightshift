@@ -51,7 +51,8 @@ errors (`Error::Config`).
 - `think` — boolean; honored by the Ollama adapter (`:think` tag suffix).
 - `num_ctx` — parsed and validated but deliberately **not forwarded**:
   llm-kernel's OpenAI-compatible request has no `num_ctx` field, so the value
-  cannot reach Ollama through this path.
+  cannot reach Ollama through this path. `nightshift doctor` warns when a
+  role sets it.
 
 Unknown option keys are ignored (the schema declares `options` a
 provider/model-specific passthrough); invalid option *types* are config errors

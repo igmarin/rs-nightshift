@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `nightshift doctor` warns (`num_ctx:<role>`) when a role sets the `num_ctx`
+  option: no adapter sends it, so the context size must be set in the model
+  itself (Ollama: `PARAMETER num_ctx` in a Modelfile).
 - Per-role `retries` (default 2): when a reply is not a valid envelope, an
   edit tool (`apply-patch`, `write-file`, `search-replace`) fails, or the
   provider request fails, the role tries again instead of failing the run.

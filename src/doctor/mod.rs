@@ -115,6 +115,21 @@ where
         push_provider_checks(&mut checks, provider, spec, &models, providers).await;
     }
 
+    // `num_ctx` is accepted in `options` but no adapter sends it, so a role
+    // that sets it gets the model's own context size without knowing.
+    for role in &config.roles {
+        if role.options.contains_key("num_ctx") {
+            checks.push(Check {
+                name: format!("num_ctx:{}", role.id),
+                passed: false,
+                required: false,
+                detail: "num_ctx is set but is not sent to the provider; set the context \
+                         size in the model itself (Ollama: PARAMETER num_ctx in a Modelfile)"
+                    .into(),
+            });
+        }
+    }
+
     Ok(DoctorReport { checks })
 }
 
@@ -632,6 +647,30 @@ model = "m"
             .expect("report");
         assert!(report.is_ready(), "{report:?}");
         assert_eq!(report.exit_code(), 0);
+    }
+
+    #[tokio::test]
+    async fn num_ctx_option_warns_without_blocking() {
+        let catalog = FakeCatalog {
+            result: Ok(vec!["phi4".into()]),
+        };
+        let cfg = config(&format!("{OLLAMA_QA}options = {{ num_ctx = 8192 }}\n"));
+        let report = run_doctor(&cfg, &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        let warning = report
+            .checks
+            .iter()
+            .find(|check| check.name == "num_ctx:qa")
+            .expect("num_ctx warning");
+        assert!(!warning.passed && !warning.required, "{warning:?}");
+        assert!(warning.detail.contains("not sent"), "{warning:?}");
+        assert!(report.is_ready(), "{report:?}");
+        // Without the option there is no such check.
+        let report = run_doctor(&config(OLLAMA_QA), &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        assert!(!report.checks.iter().any(|c| c.name.starts_with("num_ctx")));
     }
 
     #[test]
