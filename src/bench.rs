@@ -10,8 +10,9 @@
 //!    since `old:` is matched as a substring), because `old:` text must match
 //!    exactly. Informational: no real role replies with bare text, so a failure
 //!    shows as `WARN` and does not decide the verdict.
-//! 3. `search-replace`: sent with the system prompt a real `search-replace`
-//!    role gets (a role sentence plus [`output_contract`]). The reply must be a role envelope whose
+//! 3. `search-replace`: sent with a generic role sentence plus the contract a
+//!    `search-replace` role gets ([`output_contract`]); your own role prompt is
+//!    not part of it. The reply must be a `continue`/`done` role envelope whose
 //!    `content` is one `file:`/`old:`/`new:` block ([`parse_search_replace`])
 //!    that, applied to the sample file, gives the expected result. Nothing is
 //!    written to disk (INV-9).
@@ -21,6 +22,7 @@
 
 use crate::adapters::capabilities::parse_search_replace;
 use crate::application::executor::{output_contract, parse_role_output};
+use crate::domain::rolegraph::verdict::Verdict;
 use crate::ports::{GenerateRequest, ModelClient};
 use std::time::{Duration, Instant};
 
@@ -98,7 +100,7 @@ struct Task {
     name: &'static str,
     prompt: &'static str,
     score: Scorer,
-    /// Send the system prompt a real `search-replace` role gets.
+    /// Send a system prompt: a generic role sentence plus the search-replace contract.
     search_replace_contract: bool,
     informational: bool,
 }
@@ -268,8 +270,9 @@ fn main() {\n\
 \x20   println!(\"hello\");\n\
 }\n";
 
-/// The system prompt a real `search-replace` role gets: a role sentence, then
-/// the contract. Some models reply with nothing when the role sentence is missing.
+/// A generic role sentence, then the contract every `search-replace` role
+/// gets. A configured role's own prompt replaces the sentence in a real run.
+/// Some models reply with nothing when no role sentence comes first.
 fn search_replace_system() -> String {
     format!("You are the developer.\n\n{}", output_contract(true))
 }
@@ -296,9 +299,16 @@ fn score_quote(text: &str) -> Result<(), String> {
 }
 
 fn score_search_replace(text: &str) -> Result<(), String> {
-    // The same two steps a real role's reply goes through: envelope, then blocks.
+    // The same steps a real role's reply goes through: envelope, verdict, blocks.
     let output =
         parse_role_output(text).map_err(|error| format!("{error} (reply {})", preview(text)))?;
+    // The executor runs search-replace only for these verdicts.
+    if !matches!(output.verdict, Verdict::Continue | Verdict::Done) {
+        return Err(format!(
+            "verdict {:?} would skip the edit (need continue or done)",
+            output.verdict
+        ));
+    }
     let blocks = parse_search_replace(&output.content)
         .map_err(|error| format!("{error} (content {})", preview(&output.content)))?;
     let [block] = blocks.as_slice() else {
@@ -367,7 +377,7 @@ mod tests {
         assert!(calls
             .iter()
             .all(|c| c.model == "qwen3.6-35b-4bit" && c.timeout == Some(Duration::from_secs(7))));
-        // Only the search-replace task carries a system prompt: the real role contract.
+        // Only the search-replace task carries a system prompt, ending in the role contract.
         assert!(calls[0].system.is_none() && calls[1].system.is_none());
         let system = calls[2].system.as_deref().expect("system prompt");
         assert!(system.ends_with(&output_contract(true)), "{system}");
@@ -477,6 +487,19 @@ mod tests {
             let reply = envelope(&reply.replace("{BLOCK}", BLOCK));
             let err = score_search_replace(&reply).expect_err(&reply);
             assert!(err.contains(want), "{reply:?} -> {err}");
+        }
+    }
+
+    #[test]
+    fn search_replace_needs_a_verdict_that_runs_the_tool() {
+        let reply = |verdict: &str| {
+            serde_json::json!({"verdict": verdict, "summary": "ok", "content": BLOCK}).to_string()
+        };
+        assert!(score_search_replace(&reply("continue")).is_ok());
+        assert!(score_search_replace(&reply("done")).is_ok());
+        for verdict in ["issues", "questions", "fail"] {
+            let err = score_search_replace(&reply(verdict)).expect_err(verdict);
+            assert!(err.contains("would skip the edit"), "{verdict} -> {err}");
         }
     }
 
