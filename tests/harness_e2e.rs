@@ -15,7 +15,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Queue `content` as the next chat completion the server returns.
 ///
-/// Mocks answer once each, in the order they are mounted.
+/// Mocks answer once each, in the order they are mounted (wiremock breaks
+/// equal priority by insertion order: the first one mounted wins).
 async fn reply(server: &MockServer, content: &str) {
     let body = serde_json::json!({
         "id": "chatcmpl-x",
