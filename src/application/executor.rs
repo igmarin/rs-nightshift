@@ -37,7 +37,10 @@ const SEARCH_REPLACE_CONTRACT: &str =
 file: <repo-relative path>\n\
 old: <exact unique snippet>\n\
 new: <replacement>\n\
-Repeat old/new blocks for more edits. old_text must match exactly once.";
+Repeat old/new blocks for more edits. old_text must match exactly once. \
+Keep the whole edit (the file:, old: and new: lines) inside the one \"content\" \
+JSON string, with newlines escaped as \\n; do not close the string before new:. \
+Keep old: short: quote only the lines you change, plus enough to be unique.";
 
 /// Loop-back context carried into a role when a back-edge fires.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -199,17 +202,23 @@ where
 
 /// Assemble the system prompt: the role's job plus the output contract.
 fn system_prompt(role: &RoleSpec) -> String {
+    let contract = output_contract(role.tools.iter().any(|tool| tool == "search-replace"));
     let prompt = role.prompt.trim();
-    let mut out = if prompt.is_empty() {
-        OUTPUT_CONTRACT.to_string()
+    if prompt.is_empty() {
+        contract
     } else {
-        format!("{prompt}\n\n{OUTPUT_CONTRACT}")
-    };
-    if role.tools.iter().any(|tool| tool == "search-replace") {
-        out.push_str("\n\n");
-        out.push_str(SEARCH_REPLACE_CONTRACT);
+        format!("{prompt}\n\n{contract}")
     }
-    out
+}
+
+/// The contract every system prompt ends with, plus the search-replace format
+/// when the role declares that tool. `nightshift bench` sends the same text.
+pub(crate) fn output_contract(search_replace: bool) -> String {
+    if search_replace {
+        format!("{OUTPUT_CONTRACT}\n\n{SEARCH_REPLACE_CONTRACT}")
+    } else {
+        OUTPUT_CONTRACT.to_string()
+    }
 }
 
 /// Assemble the user prompt from the goal, pre-tool output, loop-back context,
@@ -1488,6 +1497,10 @@ mod tests {
         assert!(system.contains("search-replace"), "{system}");
         assert!(system.contains("old:"), "{system}");
         assert!(system.contains("new:"), "{system}");
+        assert!(
+            system.contains("do not close the string before new:"),
+            "{system}"
+        );
     }
 
     #[test]

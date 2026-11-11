@@ -38,6 +38,13 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `search-replace` roles: the contract now tells the model to keep the whole
+  edit inside the one `content` JSON string. Local models closed the string
+  before `new:`, which ended the run with "did not return a JSON object".
+  `nightshift bench` now tests that same path (the role contract plus the
+  envelope, with a generic role sentence), and `text-quoting` is
+  informational (`WARN`), so the bench verdict is closer to what a real role
+  does (#123).
 - Context gathering runs `codegraph init` when `.codegraph/` exists but has
   no `codegraph.db` (for example, a repo that commits `.codegraph/.gitignore`).
   See issue [#119](https://github.com/igmarin/rs-nightshift/issues/119).
