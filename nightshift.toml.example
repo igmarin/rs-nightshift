@@ -12,6 +12,12 @@ start = "product-owner"
 # [providers.ollama]
 # base_url = "http://127.0.0.1:11434"
 
+# Local OpenAI-compatible server (rapid-mlx on Apple Silicon, llama.cpp,
+# LM Studio). No api_key_env: keyless. See docs/configuration.md.
+# [providers.mlx]
+# backend = "openai-compatible"
+# base_url = "http://127.0.0.1:8000/v1"
+
 [providers.deepseek]
 backend = "openai-compatible"
 base_url = "https://api.deepseek.com"

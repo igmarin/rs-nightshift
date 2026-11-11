@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "nightshift", version, about)]
 pub struct Cli {
-    /// Ollama HTTP origin used by `doctor`, `run`, and `bench`.
+    /// Ollama HTTP origin used by `doctor` and `run`.
     #[arg(
         long,
         env = "NIGHTSHIFT_OLLAMA_URL",
@@ -91,15 +91,29 @@ pub enum Command {
         #[arg(long)]
         repo: PathBuf,
     },
-    /// Probe a model with three fast harness-compatibility micro-tasks.
+    /// Check a model works with the harness: three short tasks, repeated.
     ///
-    /// Each task waits up to 120 seconds (CPU models are slow). Use this
-    /// before a full run so a thinking or too-small model fails in minutes
-    /// instead of 30–60 minutes.
+    /// Builds the client the way a run does, so `--provider` can be `ollama`
+    /// or any `[providers.*]` entry in the config (rapid-mlx, llama.cpp, LM
+    /// Studio). Exits 0 only when every run of every task passes.
     Bench {
-        /// Model tag to probe (for example `llama3.1:8b`).
+        /// Model tag to probe (for example `qwen3.6-35b-4bit`).
         #[arg(long)]
         model: String,
+        /// Provider: `ollama`, `deepseek`, `kimi`, or a `[providers.*]` name.
+        #[arg(long, default_value = "ollama")]
+        provider: String,
+        /// Config holding `[providers.*]` (default: `nightshift.toml` if it exists).
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Times each task runs.
+        #[arg(long, default_value_t = crate::bench::DEFAULT_BENCH_RUNS,
+              value_parser = clap::value_parser!(u32).range(1..))]
+        runs: u32,
+        /// Per-call timeout in seconds.
+        #[arg(long, default_value_t = crate::bench::DEFAULT_BENCH_TIMEOUT_SECS,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
     },
     /// Pre-flight: run the entry role and resolve its questions interactively.
     Plan {
@@ -350,23 +364,69 @@ mod tests {
     }
 
     #[test]
-    fn parses_bench_model() {
+    fn parses_bench_with_defaults() {
         let cli =
             Cli::try_parse_from(["nightshift", "bench", "--model", "llama3.1:8b"]).expect("parse");
         match cli.command {
-            Command::Bench { model } => assert_eq!(model, "llama3.1:8b"),
+            Command::Bench {
+                model,
+                provider,
+                config,
+                runs,
+                timeout,
+            } => {
+                assert_eq!(model, "llama3.1:8b");
+                assert_eq!(provider, "ollama");
+                assert_eq!(config, None);
+                assert_eq!(runs, 3);
+                assert_eq!(timeout, 120);
+            }
             other => panic!("expected Bench, got {other:?}"),
         }
     }
 
     #[test]
-    fn bench_requires_model() {
-        let err = Cli::try_parse_from(["nightshift", "bench"]).expect_err("required");
-        let text = err.to_string();
-        assert!(
-            text.contains("required") || text.contains("--model"),
-            "{text}"
-        );
+    fn parses_bench_provider_runs_and_timeout() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "bench",
+            "--model",
+            "gemma-4-31b-4bit",
+            "--provider",
+            "mlx",
+            "--config",
+            "mac.toml",
+            "--runs",
+            "5",
+            "--timeout",
+            "300",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Bench {
+                provider,
+                config,
+                runs,
+                timeout,
+                ..
+            } => {
+                assert_eq!(provider, "mlx");
+                assert_eq!(config, Some(PathBuf::from("mac.toml")));
+                assert_eq!((runs, timeout), (5, 300));
+            }
+            other => panic!("expected Bench, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bench_rejects_missing_model_and_zero_runs_or_timeout() {
+        assert!(Cli::try_parse_from(["nightshift", "bench"]).is_err());
+        for flag in ["--runs", "--timeout"] {
+            assert!(
+                Cli::try_parse_from(["nightshift", "bench", "--model", "m", flag, "0"]).is_err(),
+                "{flag} 0 must be rejected"
+            );
+        }
     }
 
     #[test]

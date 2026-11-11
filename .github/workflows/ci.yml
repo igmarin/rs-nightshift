@@ -23,7 +23,7 @@ jobs:
       # Keep this in sync with rust-toolchain.toml; #22's drift guard enforces both declarations.
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
           components: rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - run: cargo fmt --all -- --check
@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - run: cargo test
 
@@ -64,7 +64,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - run: cargo test --doc
 
@@ -77,7 +77,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       # Pinned from taiki-e/install-action@v2.85.13.
@@ -95,7 +95,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - run: cargo build --release
 
@@ -108,7 +108,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
       # Pinned from taiki-e/install-action@v2.85.13.
       - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1
         with:
@@ -124,7 +124,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: 1.92.0
+          toolchain: 1.99.1
       # Pinned from taiki-e/install-action@v2.85.13.
       - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1
         with:

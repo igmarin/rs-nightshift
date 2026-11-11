@@ -1,5 +1,0 @@
-provider = "deepseek"
-model = "deepseek-v4-pro"
-max_tokens = 32768
-temperature = 0.1
-llm_timeout_secs = 900

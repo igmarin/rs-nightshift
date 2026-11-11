@@ -6,11 +6,24 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- `nightshift bench --model <tag>`: three fast harness-compatibility
-  micro-tasks (JSON validity, text quoting, instruction-following format)
-  so operators can reject a thinking or too-small model in minutes instead
-  of a 30–60 minute CPU run. See issue
-  [#100](https://github.com/igmarin/rs-nightshift/issues/100).
+- Keyless local OpenAI-compatible providers (rapid-mlx, llama.cpp, LM
+  Studio): `api_key_env` is optional for custom `openai-compatible`
+  providers. `nightshift doctor` now checks that each such provider is
+  reachable (`GET {base_url}/models`) and serves every model a role names
+  (`model:<provider>:<model>`), listing the served models when one is
+  missing (#109).
+- `nightshift bench --model <tag> [--provider <name>] [--runs N] [--timeout S]`
+  checks a model against the harness: role-envelope JSON, exact quoting, and
+  a search-replace block, each repeated with a pass rate and latency. Works
+  with any provider (Ollama, rapid-mlx, any `[providers.*]`) (#100).
+
+### Changed
+
+- OpenAI-compatible `base_url` values with a query string or fragment are
+  rejected: endpoints are appended to the base URL, so they would hit the
+  wrong path.
+- OpenAI-compatible providers may use plain `http://` only on a loopback host,
+  and may omit `api_key_env` only on a loopback host.
 - Per-role `timeout_secs` in `nightshift.toml`. Omitted roles use the 3600s
   generate default; `timeout_secs = 0` is a config error. See issue
   [#101](https://github.com/igmarin/rs-nightshift/issues/101).

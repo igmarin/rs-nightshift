@@ -45,12 +45,13 @@ fn help_lists_commands() {
 }
 
 #[test]
-fn bench_help_documents_timeout_and_model() {
+fn bench_help_documents_provider_runs_and_timeout() {
     let output = nightshift(&["bench", "--help"]);
     assert!(output.status.success(), "exit: {:?}", output.status);
     let text = stdout(&output);
-    assert!(text.contains("--model"), "missing --model: {text}");
-    assert!(text.contains("120"), "missing 120s timeout in help: {text}");
+    for flag in ["--model", "--provider", "--config", "--runs", "--timeout"] {
+        assert!(text.contains(flag), "missing {flag}: {text}");
+    }
 }
 
 #[test]

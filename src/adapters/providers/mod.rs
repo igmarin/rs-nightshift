@@ -25,6 +25,9 @@
 //!   from `DEFAULT_KIMI_API_KEY_ENV`.
 //! - any other provider name — resolved through `ProviderSpec.backend`;
 //!   `openai-compatible` is honored, anything else is a config error.
+//!   Without `api_key_env` it is a keyless local server (rapid-mlx,
+//!   llama.cpp, LM Studio) and gets the `NO_API_KEY` placeholder token;
+//!   that is only allowed when `base_url` is a loopback host.
 //!
 //! # Options (`RoleSpec.options`)
 //!
@@ -44,9 +47,10 @@ mod scripted;
 
 pub use factory::{
     build_model_client, ProviderFactory, DEFAULT_DEEPSEEK_API_KEY_ENV, DEFAULT_DEEPSEEK_BASE_URL,
-    DEFAULT_KIMI_API_KEY_ENV, DEFAULT_KIMI_BASE_URL, DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_KIMI_API_KEY_ENV, DEFAULT_KIMI_BASE_URL, DEFAULT_OLLAMA_BASE_URL, NO_API_KEY,
 };
 pub use ollama::OllamaAdapter;
+pub(crate) use openai::validate_chat_base_url;
 pub use openai::OpenAICompatibleAdapter;
 #[cfg(test)]
 pub use scripted::{GenerateCall, ScriptedGenerator};

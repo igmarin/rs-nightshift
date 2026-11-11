@@ -27,14 +27,22 @@ pub(crate) fn to_llm_request(
 ///
 /// Accepts `http://` / `https://` URLs with a host (a path such as `/v1` is
 /// allowed) and rejects userinfo so credentials can never be embedded in the
-/// URL. Rejected values are reported redacted.
+/// URL, a query or fragment (they would break the appended endpoint paths), and
+/// plain `http://` to a non-loopback host (the API key would travel in
+/// cleartext). Rejected values are reported redacted.
 ///
 /// `http://` is allowed for local OpenAI-compatible proxies (vLLM, Ollama);
 /// for remote keyed providers (Deepseek/Kimi/custom) prefer `https://` so the
 /// API key is never sent in cleartext.
-fn validate_chat_base_url(value: &str) -> Result<String, Error> {
+pub(crate) fn validate_chat_base_url(value: &str) -> Result<String, Error> {
     let value = value.trim();
-    let redacted = crate::adapters::ollama::redact_ollama_url(value);
+    // Scheme, host and port only: a path segment could carry a token, and these
+    // errors reach the run log and the doctor report.
+    let redacted = reqwest::Url::parse(value)
+        .ok()
+        .filter(|url| url.has_host())
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|| crate::adapters::ollama::redact_ollama_url(value));
     let parsed = reqwest::Url::parse(value).map_err(|_| {
         Error::from(ConfigError {
             path: "provider base_url".into(),
@@ -59,7 +67,43 @@ fn validate_chat_base_url(value: &str) -> Result<String, Error> {
             ),
         }));
     }
+    // Plain http is only for this machine, so an API key never crosses a network
+    // in cleartext.
+    if parsed.scheme() == "http" && !is_loopback(&parsed) {
+        return Err(Error::from(ConfigError {
+            path: "provider base_url".into(),
+            message: format!(
+                "base URL {redacted:?} uses http:// on a non-loopback host; use https://"
+            ),
+        }));
+    }
+    // Endpoints are built by appending (`/chat/completions`, `/models`), which a
+    // query or fragment would swallow, so the request would go to the wrong path.
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(Error::from(ConfigError {
+            path: "provider base_url".into(),
+            message: format!("base URL {redacted:?} must not have a query string or fragment"),
+        }));
+    }
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
+}
+
+/// `localhost`, `127.0.0.0/8` or `::1`.
+fn is_loopback(url: &reqwest::Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => false,
+    }
+}
+
+/// True when `value` parses as a URL whose host is this machine.
+pub(crate) fn is_loopback_base_url(value: &str) -> bool {
+    reqwest::Url::parse(value.trim()).is_ok_and(|url| is_loopback(&url))
 }
 
 /// OpenAI-compatible [`ModelClient`] used for Deepseek, Kimi, and any custom
@@ -112,12 +156,17 @@ impl OpenAICompatibleAdapter {
         let redacted_base_url = crate::adapters::ollama::redact_ollama_url(&base_url);
         // The per-request model always overrides the placeholder below, so the
         // client-level model name is never sent to the provider.
-        let http_client = reqwest::Client::builder().build().map_err(|error| {
-            Error::from(ConfigError {
-                path: "provider base_url".into(),
-                message: format!("failed to build HTTP client: {error}"),
-            })
-        })?;
+        // No redirects: a redirect could move the bearer key to plain http or
+        // another host, bypassing the base URL checks above.
+        let http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                Error::from(ConfigError {
+                    path: "provider base_url".into(),
+                    message: format!("failed to build HTTP client: {error}"),
+                })
+            })?;
         let inner = OpenAIClient::from_key_with_base_url("unset", api_key, base_url, http_client);
         Ok(Self {
             inner,
@@ -349,11 +398,91 @@ mod tests {
     }
 
     #[test]
+    fn openai_new_rejects_query_and_fragment() {
+        for url in [
+            "http://127.0.0.1:8000/v1?tenant=x",
+            "http://127.0.0.1:8000/v1#frag",
+        ] {
+            let error = match OpenAICompatibleAdapter::new(url, "k") {
+                Ok(_) => panic!("{url} must fail"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("query string or fragment"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_url_errors_never_echo_the_path() {
+        let error = match OpenAICompatibleAdapter::new("https://host/v1/sk-secret?tenant=x", "k") {
+            Ok(_) => panic!("query must fail"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(!text.contains("sk-secret"), "{text}");
+        assert!(text.contains("https://host"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn openai_does_not_follow_redirects() {
+        use crate::adapters::providers::test_support::{chat_response, request};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/elsewhere", server.uri()).as_str()),
+            )
+            .mount(&server)
+            .await;
+        // If the redirect were followed, this would answer and the call would succeed.
+        wiremock::Mock::given(wiremock::matchers::path("/elsewhere"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(chat_response("leaked"), "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let client =
+            OpenAICompatibleAdapter::new(format!("{}/v1", server.uri()), "sk-x").expect("client");
+        assert!(client.generate(&request("m")).await.is_err());
+        let paths: Vec<_> = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert_eq!(paths, vec!["/v1/chat/completions".to_string()]);
+    }
+
+    #[test]
+    fn openai_new_allows_http_only_on_loopback() {
+        for url in [
+            "http://127.0.0.1:8000/v1",
+            "http://localhost:8000/v1",
+            "http://[::1]:8000/v1",
+            "https://api.example.test/v1",
+        ] {
+            assert!(
+                OpenAICompatibleAdapter::new(url, "k").is_ok(),
+                "{url} must pass"
+            );
+        }
+        let error = match OpenAICompatibleAdapter::new("http://10.0.0.5:8000/v1", "k") {
+            Ok(_) => panic!("plain http to a LAN host must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("https://"), "{error}");
+    }
+
+    #[test]
     fn openai_redacted_origin_reports_base_url() {
-        let client = OpenAICompatibleAdapter::new("http://host:8080/v1/", "k").expect("client");
+        let client = OpenAICompatibleAdapter::new("https://host:8080/v1/", "k").expect("client");
         assert_eq!(
             client.redacted_origin().as_deref(),
-            Some("http://host:8080/v1")
+            Some("https://host:8080/v1")
         );
     }
 }

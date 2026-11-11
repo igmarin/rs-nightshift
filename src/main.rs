@@ -8,17 +8,15 @@ use rs_nightshift::adapters::context::PathProbe;
 use rs_nightshift::adapters::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
 use rs_nightshift::adapters::state::FsStateStore;
 use rs_nightshift::adapters::test::ProcessTestRunner;
-use rs_nightshift::adapters::{OllamaAdapter, ProviderFactory};
+use rs_nightshift::adapters::ProviderFactory;
 use rs_nightshift::application::executor::{execute, ExecuteParams, RoleContext};
 use rs_nightshift::application::orchestrator::{run_graph, RunRequest};
 use rs_nightshift::application::report::render_report;
 use rs_nightshift::artifacts::{slugify, write_status, ArtifactStore};
-use rs_nightshift::bench::{
-    render_report as render_bench_report, run_bench, BENCH_TEMPERATURE, BENCH_TIMEOUT_SECS,
-};
+use rs_nightshift::bench::{render_report as render_bench_report, run_bench, BenchParams};
 use rs_nightshift::cli::{Cli, Command};
 use rs_nightshift::doctor::{
-    run_doctor, write_report, Check, DoctorReport, HttpModelCatalog, PathHost,
+    run_doctor, write_report, Check, DoctorReport, HttpModelCatalog, HttpProviderCatalog, PathHost,
 };
 use rs_nightshift::domain::rolegraph::config::load_role_graph_config_from;
 use rs_nightshift::domain::rolegraph::state::RunStatus;
@@ -75,7 +73,8 @@ async fn real_main() -> anyhow::Result<()> {
                 }
             };
             let catalog = HttpModelCatalog::new(validated_url.as_str())?;
-            let mut report = run_doctor(&role_graph, &catalog, &PathHost).await?;
+            let providers = HttpProviderCatalog::new()?;
+            let mut report = run_doctor(&role_graph, &catalog, &providers, &PathHost).await?;
             report.checks.insert(
                 0,
                 Check {
@@ -92,15 +91,38 @@ async fn real_main() -> anyhow::Result<()> {
             let code = write_status(&ArtifactStore::new(out), io::stdout())?;
             process::exit(code);
         }
-        Command::Bench { model } => {
-            let inner = OllamaClient::with_timeout(
-                ollama_url.as_str(),
-                std::time::Duration::from_secs(BENCH_TIMEOUT_SECS),
+        Command::Bench {
+            model,
+            provider,
+            config,
+            runs,
+            timeout,
+        } => {
+            let config = config.or_else(|| {
+                let default = std::path::PathBuf::from("nightshift.toml");
+                default.is_file().then_some(default)
+            });
+            let providers = match &config {
+                Some(path) => load_role_graph_config_from(path)?.providers,
+                None => std::collections::BTreeMap::new(),
+            };
+            let client = ProviderFactory.build(
+                &provider,
+                providers.get(&provider),
+                &std::collections::BTreeMap::new(),
             )?;
-            let client =
-                OllamaAdapter::with_options(inner, false, Some(BENCH_TEMPERATURE), Some(512));
-            let report = run_bench(&client, &model).await?;
-            writeln!(io::stdout(), "{}", render_bench_report(&report))?;
+            let params = BenchParams {
+                model,
+                runs,
+                timeout: std::time::Duration::from_secs(timeout),
+            };
+            let report = run_bench(client.as_ref(), &params).await;
+            let origin = client.redacted_origin();
+            writeln!(
+                io::stdout(),
+                "{}",
+                render_bench_report(&report, origin.as_deref())
+            )?;
             process::exit(if report.all_passed() { 0 } else { 1 });
         }
         Command::Run {

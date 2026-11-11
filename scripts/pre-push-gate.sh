@@ -6,7 +6,7 @@ set -euo pipefail
 #   cargo clippy --all-targets --all-features -- -D warnings,
 #   cargo test, cargo test --doc, cargo audit, cargo deny check
 #
-# This intentionally does NOT run rs-guard; that is a maintainer workflow.
+# This intentionally does NOT run the AI review; ocr runs in CI and the pre-commit hook.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

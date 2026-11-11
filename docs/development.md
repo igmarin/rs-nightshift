@@ -65,31 +65,33 @@ The full local gate (including coverage) is in the [Local gates](#local-gates) s
 
 1. Open the PR as a **draft**. CI runs on draft PRs — let all gates go green
    while it's still draft.
-2. Do **not** mark "Ready for review" until CI is fully green. Marking ready is
-   what triggers rs-guard (the review workflow runs only on `ready_for_review`).
-3. Merge only when CI is green **and** the rs-guard verdict is **POSITIVE**
-   (0 Critical, 0 Security, Important < 3).
+2. Do **not** mark "Ready for review" until CI is fully green. The ocr review
+   runs on non-draft PRs, so marking ready is what starts it.
+3. Merge only when CI is green **and** every `critical` or `high` ocr finding
+   is fixed or answered. This is a manual rule: the review job posts findings
+   but does not fail, so the maintainer checks them.
 
-## rs-guard review
+## ocr review
 
 Pull requests are reviewed by
-[rs-guard](https://github.com/nebulaideas/rs-guard) using
-[`.github/review-prompt.md`](../.github/review-prompt.md). Set the
-`DEEPSEEK_API_KEY` repository secret so the review workflow can post.
+[ocr](https://github.com/alibaba/open-code-review) (OpenAI `gpt-6-luna`,
+medium effort, the same setup as Ludavela) using
+[`.github/review-prompt.md`](../.github/review-prompt.md) from the base branch as
+background. Findings post inline as `github-actions[bot]`. The workflow needs the
+`OPENAI_API_KEY` repository secret. It runs once per PR (on open, reopen and
+ready-for-review), not on every push. After pushing fixes, review the new head
+by toggling the PR to draft and back: `gh pr ready --undo && gh pr ready`.
+Re-running the old job from the Actions tab reviews the old commit, so it does
+not count. Before merging, the latest ocr run must be on the PR's current head.
+Pull requests from forks get no
+secrets, so they are not reviewed by this workflow; review those by hand.
 
-rs-guard posts a structured verdict:
-
-```text
-[RS_GUARD_VERDICT_METADATA]
-Verdict: POSITIVE | NEGATIVE
-CriticalIssues: N
-SecurityIssues: N
-ImportantIssues: N
-Suggestions: N
-```
-
-Any `[Critical]` or `[Security]` finding blocks merge. A `NEGATIVE` verdict
-blocks merge. Resolve the findings, push, and re-request review.
+Locally, `git config core.hooksPath .githooks` enables a pre-commit hook that
+runs `ocr review` on staged changes and blocks on critical/high findings
+(needs `OPENAI_API_KEY` in your shell and
+`npm i -g @alibaba-group/open-code-review`; without them it skips;
+`git commit --no-verify` skips it too). The same setting also enables a pre-push
+hook that runs `scripts/pre-push-gate.sh` (`git push --no-verify` skips it).
 
 ## CI gates
 

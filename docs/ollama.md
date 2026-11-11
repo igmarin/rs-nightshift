@@ -134,37 +134,11 @@ GPU offload.
 ## Probe a model before a full run
 
 Picking a model by running the harness is expensive on CPU (30–60 minutes per
-failed attempt). `nightshift bench --model <tag>` runs three short
-harness-compatibility micro-tasks against a live Ollama origin instead:
+failed attempt). Run `nightshift bench --model <tag>` first; it takes minutes.
+See [Benchmark a model](configuration.md#benchmark-a-model-nightshift-bench)
+for the tasks, flags, and output.
 
-1. **JSON validity** — ask for a simple role-envelope JSON object and check
-   that a `{…}` object parses. This is a simpler check than the role
-   executor: it strips a markdown fence and extracts the first balanced
-   object, without the executor's YAML / backtick / truncation repairs.
-2. **Text quoting** — give a short file snippet and ask the model to quote a
-   unique line; the reply must match that line exactly.
-3. **Instruction following** — ask for a `file:` / `old:` / `new:`
-   search-replace pair and check the *format* (no file is written).
-
-Each task waits up to **120 seconds** (CPU models are slow). The command
-prints pass/fail per task plus recommended `max_tokens` and `temperature`.
-A JSON failure raises the recommended `max_tokens` (4096 instead of 2048)
-and notes that thinking models (for example `qwen3:4b`) often spend the
-token budget on reasoning and never emit JSON.
-
-```bash
-nightshift bench --model llama3.1:8b
-nightshift bench --model llama3.1:8b --ollama-url http://127.0.0.1:11434
-```
-
-The Ollama origin is the same `--ollama-url` / `NIGHTSHIFT_OLLAMA_URL`
-default used by `doctor` and `run`. Invalid URLs are rejected by
-`validate_ollama_url`. If the server is down, the command fails with the
-provider error (no live Ollama is required for unit tests — they inject a
-scripted client). Completions stay sequential with `keep_alive: 0` unload
-after each call.
-
-Typical outcomes from the no-ai-slop copy rewrite run
+Results from the no-ai-slop copy rewrite run
 ([learning notes](learning-no-ai-slop-copy-rewrite.md)):
 
 | Model | JSON | Quote | Format | Notes |
