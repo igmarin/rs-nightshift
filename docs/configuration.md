@@ -249,8 +249,12 @@ retries = 3
 A retry is part of the same step, so it does not count against `max_steps`
 or `max_loop`. Each one adds a `retry` event to `actions.jsonl` with the
 attempt number and the reason. Each rejected reply is kept in the run
-directory as `raw_response_<role>_<attempt>.txt`. When the last attempt
-fails, the run fails as before.
+directory as `raw_response_<role>_<attempt>.txt`; a later pass through the
+same role (a loop-back) overwrites them. When the last attempt fails, the
+run fails as before.
+
+`retries` may be at most 10. A role with two edit tools is not retried once
+the first tool has changed the repo.
 
 ## Role tools
 

@@ -15,6 +15,9 @@ pub const DEFAULT_MAX_LOOP: u32 = 3;
 /// Default per-role generate timeout in seconds when `timeout_secs` is omitted.
 pub const DEFAULT_GENERATE_TIMEOUT_SECS: u64 = 3600;
 
+/// Largest `retries` a role may set: each retry is a full model call.
+pub const MAX_RETRIES: u32 = 10;
+
 /// How the harness treats clarifying questions it cannot resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,7 +114,8 @@ pub struct RoleSpec {
     #[serde(default = "default_max_loop")]
     pub max_loop: u32,
     /// Extra attempts when the reply is rejected (invalid envelope, failed
-    /// edit tool) or the provider request fails. `0` fails on the first slip.
+    /// edit tool) or the provider request fails. `0` fails on the first slip;
+    /// more than [`MAX_RETRIES`] is rejected at validation.
     #[serde(default = "default_retries")]
     pub retries: u32,
     /// Per-role generate timeout in seconds.
@@ -283,6 +287,12 @@ impl NightshiftConfig {
             if role.timeout_secs == Some(0) {
                 return Err(Error::RoleGraph(format!(
                     "role {:?} timeout_secs must be at least 1",
+                    role.id
+                )));
+            }
+            if role.retries > MAX_RETRIES {
+                return Err(Error::RoleGraph(format!(
+                    "role {:?} retries must be at most {MAX_RETRIES}",
                     role.id
                 )));
             }
@@ -1212,5 +1222,13 @@ model = "phi4"
         let cfg: NightshiftConfig =
             toml::from_str(&format!("{base}retries = 0\n")).expect("parses");
         assert_eq!(cfg.roles[0].retries, 0);
+        cfg.validate().expect("0 is valid");
+        let cfg: NightshiftConfig =
+            toml::from_str(&format!("{base}retries = 11\n")).expect("parses");
+        let err = cfg.validate().expect_err("above the cap");
+        assert!(
+            err.to_string().contains("retries must be at most 10"),
+            "{err}"
+        );
     }
 }

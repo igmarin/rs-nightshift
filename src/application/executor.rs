@@ -188,6 +188,7 @@ where
             Ok(outcome) => return Ok(outcome),
             Err(failure) => failure,
         };
+        // `retries` is capped at validation (`MAX_RETRIES`), so `attempt` cannot overflow.
         if failure.retry == Retry::No || attempt > params.role.retries {
             return Err(failure.error);
         }
@@ -272,6 +273,9 @@ where
     // Post-tools: apply the patch, write the file, or search-replace only for
     // verdicts that carry a deliverable.
     if matches!(output.verdict, Verdict::Continue | Verdict::Done) {
+        // Once one edit tool has changed the repo, a later failure is not
+        // retried: the retry would run the first tool again on changed files.
+        let mut edited = false;
         for tool in &params.role.tools {
             if matches!(
                 tool.as_str(),
@@ -282,11 +286,14 @@ where
                     .await
                     .map_err(|error| {
                         keep_rejected();
-                        Failure {
-                            error,
-                            retry: Retry::WithFeedback,
-                        }
+                        let retry = if edited {
+                            Retry::No
+                        } else {
+                            Retry::WithFeedback
+                        };
+                        Failure { error, retry }
                     })?;
+                edited = true;
             }
         }
     }
@@ -1586,6 +1593,39 @@ mod tests {
         assert!(store
             .read_artifact(Path::new("/tmp/run/x"), "raw_response_developer_1.txt")
             .is_ok());
+    }
+
+    /// Fails every `write-file` call; other tools succeed.
+    struct WriteFileFails;
+
+    #[async_trait::async_trait]
+    impl ToolRunner for WriteFileFails {
+        async fn run(&self, tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+            if tool == "write-file" {
+                return Err(Error::from(ArtifactError::artifact("write-file: boom")));
+            }
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_after_an_edit_already_applied_is_not_retried() {
+        let client = ScriptedModelClient::new();
+        client.push_text(GOOD);
+        client.push_text(GOOD);
+        let mut role = role_with_tools(None, &["search-replace", "write-file"]);
+        role.retries = 2;
+        let (result, seen) = execute_recording_retries(
+            &client,
+            &MemoryArtifactStore::default(),
+            &WriteFileFails,
+            &role,
+        )
+        .await;
+        let error = result.expect_err("second tool fails");
+        assert!(error.to_string().contains("write-file: boom"), "{error}");
+        assert!(seen.is_empty());
+        assert_eq!(client.calls().len(), 1);
     }
 
     #[tokio::test]
