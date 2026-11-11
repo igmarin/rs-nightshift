@@ -31,7 +31,7 @@ fn help_lists_commands() {
     let output = nightshift(&["--help"]);
     assert!(output.status.success(), "exit: {:?}", output.status);
     let text = stdout(&output);
-    for command in ["doctor", "status", "run", "bench"] {
+    for command in ["doctor", "status", "run", "bench", "queue"] {
         assert!(text.contains(command), "missing {command} in: {text}");
     }
     assert!(

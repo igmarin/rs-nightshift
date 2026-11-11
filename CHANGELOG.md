@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `nightshift queue --file goals.toml [--config PATH] [--out DIR]
+  [--stop-on-failure]` runs many harness jobs back to back. A failed job does
+  not stop the queue, a job whose repo has uncommitted changes is skipped as
+  `blocked: dirty_tree`, and a restart skips the jobs already done. Progress
+  is kept in `queue_state.json` and `queue_report.md` under `--out` (#110).
 - `nightshift doctor` warns (`num_ctx:<role>`) when a role sets the `num_ctx`
   option: no adapter sends it, so the context size must be set in the model
   itself (Ollama: `PARAMETER num_ctx` in a Modelfile).

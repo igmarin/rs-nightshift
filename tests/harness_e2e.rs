@@ -327,3 +327,120 @@ async fn bench_passes_against_a_provider_from_the_config() {
         "{stdout}"
     );
 }
+
+const ONE_EDIT_ROLE: &str = r#"
+[run]
+start = "dev"
+
+[[roles]]
+id = "dev"
+provider = "fake"
+model = "fake-coder"
+prompt = "You are the Developer."
+tools = ["search-replace"]
+retries = 0
+"#;
+
+const EDIT_HELLO: &str = "file: hello.txt\nold: hello\nnew: hello world";
+
+/// `(status, reason)` per job from `queue_state.json`.
+fn queue_statuses(out: &Path) -> Vec<(String, Option<String>)> {
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("queue_state.json")).expect("state"))
+            .expect("state JSON");
+    state["jobs"]
+        .as_array()
+        .expect("jobs")
+        .iter()
+        .map(|job| {
+            (
+                job["status"].as_str().expect("status").to_string(),
+                job["reason"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_keeps_going_blocks_dirty_repos_and_skips_done_jobs_on_restart() {
+    let server = MockServer::start().await;
+    // First pass: job 1 edits repo A, job 2 gets a bad reply, job 3 is never
+    // sent (repo A is dirty), job 4 edits repo C.
+    reply(&server, &envelope("done", EDIT_HELLO)).await;
+    reply(&server, "BANANA").await;
+    reply(&server, &envelope("done", EDIT_HELLO)).await;
+
+    let work = tempdir().expect("tempdir");
+    let (repo_a, repo_b, repo_c) = (repo_with_hello(), repo_with_hello(), repo_with_hello());
+    let out = work.path().join("artifacts");
+    let config = write_config(work.path(), &server, ONE_EDIT_ROLE);
+    let queue_file = work.path().join("goals.toml");
+    let job = |goal: &str, repo: &TempDir| {
+        format!(
+            "[[jobs]]\ngoal = \"{goal}\"\nrepo = \"{}\"\n\n",
+            repo.path().display()
+        )
+    };
+    fs::write(
+        &queue_file,
+        [
+            job("one", &repo_a),
+            job("two", &repo_b),
+            job("three", &repo_a),
+            job("four", &repo_c),
+        ]
+        .concat(),
+    )
+    .expect("write queue");
+    let args = || {
+        vec![
+            "queue".to_string(),
+            "--file".into(),
+            queue_file.display().to_string(),
+            "--config".into(),
+            config.display().to_string(),
+            "--out".into(),
+            out.display().to_string(),
+        ]
+    };
+
+    let first = nightshift(args()).await;
+    assert_eq!(first.status.code(), Some(1), "{}", text(&first.stderr));
+    let statuses = queue_statuses(&out);
+    let labels: Vec<&str> = statuses.iter().map(|(status, _)| status.as_str()).collect();
+    assert_eq!(labels, ["done", "failed", "blocked", "done"]);
+    assert_eq!(statuses[2].1.as_deref(), Some("dirty_tree"));
+    assert!(
+        statuses[1].1.as_deref().is_some_and(|r| r.contains("JSON")),
+        "{statuses:?}"
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 3);
+    for (repo, want) in [
+        (&repo_a, "hello world\n"),
+        (&repo_b, "hello\n"),
+        (&repo_c, "hello world\n"),
+    ] {
+        assert_eq!(
+            fs::read_to_string(repo.path().join("hello.txt")).expect("read"),
+            want
+        );
+    }
+    let report = fs::read_to_string(out.join("queue_report.md")).expect("report");
+    assert!(report.contains("2 of 4 jobs done."), "{report}");
+    assert!(text(&first.stdout).contains("| 3 | blocked: dirty_tree | three |"));
+
+    // Restart: only job 2 calls the model (repo B is still clean). Job 3 is
+    // still blocked, and jobs 1 and 4 are not run again.
+    reply(&server, &envelope("done", EDIT_HELLO)).await;
+    let second = nightshift(args()).await;
+    assert_eq!(second.status.code(), Some(1), "{}", text(&second.stderr));
+    let statuses = queue_statuses(&out);
+    let labels: Vec<&str> = statuses.iter().map(|(status, _)| status.as_str()).collect();
+    assert_eq!(labels, ["done", "done", "blocked", "done"]);
+    assert_eq!(server.received_requests().await.expect("requests").len(), 4);
+    assert!(
+        text(&second.stderr).contains("[1/4] already done, skipping: one"),
+        "{}",
+        text(&second.stderr)
+    );
+}

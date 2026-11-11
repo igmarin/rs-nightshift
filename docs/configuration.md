@@ -206,6 +206,51 @@ harness compatibility: pass
 A `json-validity` failure usually means a thinking model spent `max_tokens`
 on reasoning: raise `max_tokens` or use a non-thinking variant.
 
+## Goal queue (`nightshift queue`)
+
+`nightshift harness` runs one goal and exits. `nightshift queue` runs a list
+of goals back to back, so the machine keeps working overnight:
+
+```text
+nightshift queue --file goals.toml --config mac.toml --out night-1
+```
+
+The queue file is an ordered list of jobs:
+
+```toml
+[[jobs]]
+goal = "Add a --json flag to the status command"
+repo = "/Users/me/checkouts/app-a"
+
+[[jobs]]
+goal = "Fix the flaky date parser test"
+repo = "/Users/me/checkouts/app-b"
+name = "date-parser"        # optional run-directory slug
+config = "review-only.toml" # optional; default is the queue's --config
+profile = "mac"             # optional; default is --profile / NIGHTSHIFT_PROFILE
+```
+
+Relative `repo` and `config` paths resolve against the directory you start
+`nightshift` in. Each job writes its own dated run directory under `--out`,
+exactly like `harness`.
+
+| Rule | What happens |
+| :--- | :--- |
+| One job at a time | Jobs never run in parallel. |
+| A job fails | The queue moves on to the next job. `--stop-on-failure` stops instead. |
+| The job's repo has uncommitted changes | The job is skipped as `blocked: dirty_tree`. The harness never commits, so a second job on the same checkout is always blocked. Give each job its own checkout. |
+| The process is killed or the machine reboots | Run the same command again. Jobs already `done` are skipped; every other job runs again. |
+
+Two files under `--out` track the queue:
+
+- `queue_state.json`: each job's status (`pending`, `running`, `done`,
+  `blocked`, `failed`), the reason, and its run directory. Delete it to run
+  every job again. Use one `--out` per queue file.
+- `queue_report.md`: the same as a table, rewritten after every job.
+
+The command prints the report at the end and exits 0 only when every job is
+`done`; otherwise it exits 1.
+
 ## Per-role generate timeout
 
 Each `[[roles]]` block may set `timeout_secs` for that role's LLM completion.
