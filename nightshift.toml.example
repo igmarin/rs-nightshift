@@ -87,6 +87,7 @@ output = "03_qa_report.json"
 tools = ["run-tests"]
 on = { issues = "developer" }
 max_loop = 3
+# retries = 2                    # extra attempts when a reply is rejected (default 2); 0 fails on the first slip
 
 # --- Domain-neutral roles prove the graph is generic (not engineering-only).
 # Swap the `[run]` start and `[[roles]]` blocks above for a

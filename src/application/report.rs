@@ -108,6 +108,7 @@ mod tests {
                 verdict: Some(Verdict::Continue),
                 artifact: None,
                 block_reason: BlockReason::None,
+                detail: None,
             },
             ActionEvent {
                 ts: "t".into(),
@@ -118,6 +119,7 @@ mod tests {
                 verdict: Some(Verdict::Done),
                 artifact: None,
                 block_reason: BlockReason::None,
+                detail: None,
             },
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);

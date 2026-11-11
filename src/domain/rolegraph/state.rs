@@ -31,6 +31,8 @@ pub enum EventKind {
     LlmCall,
     /// A declared capability ran.
     ToolCall,
+    /// A role's reply was rejected and the role is trying again.
+    Retry,
     /// A role ended.
     RoleEnd,
     /// A loop back-edge was taken.
@@ -65,6 +67,9 @@ pub struct ActionEvent {
     /// Why the run halted/failed, when relevant.
     #[serde(default)]
     pub block_reason: BlockReason,
+    /// Free-text detail (a `retry` event's attempt number and reason).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Resumable snapshot of where a run stands.
@@ -102,6 +107,7 @@ mod tests {
             verdict: Some(Verdict::Issues),
             artifact: Some("03_qa_report.json".into()),
             block_reason: BlockReason::None,
+            detail: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"event\":\"role_end\""), "{json}");
@@ -121,6 +127,7 @@ mod tests {
             verdict: None,
             artifact: None,
             block_reason: BlockReason::None,
+            detail: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(!json.contains("verdict"), "{json}");

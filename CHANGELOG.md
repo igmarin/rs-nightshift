@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Per-role `retries` (default 2): when a reply is not a valid envelope, an
+  edit tool (`apply-patch`, `write-file`, `search-replace`) fails, or the
+  provider request fails, the role tries again instead of failing the run.
+  Rejected replies get the error as feedback, each retry adds a `retry`
+  event to `actions.jsonl`, and every rejected reply is kept as
+  `raw_response_<role>_<attempt>.txt` (was `raw_response_<role>.txt`).
+  Timeouts are not retried. `retries = 0` keeps the old behavior (#124).
 - Machine profiles: a role can use `model = "@slot"`, and `[profiles.<name>]`
   maps slots to `{ provider, model, options }`. Select with `--profile`,
   `NIGHTSHIFT_PROFILE`, or `[run] profile`. `doctor`, `harness`, and `plan`
@@ -38,6 +45,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `search-replace` restores the files it already wrote when a later write
+  fails, so a failed call leaves the repo unchanged and is safe to retry.
 - `search-replace` roles: the contract now tells the model to keep the whole
   edit inside the one `content` JSON string. Local models closed the string
   before `new:`, which ended the run with "did not return a JSON object".

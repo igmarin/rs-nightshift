@@ -2,7 +2,7 @@
 
 use crate::domain::rolegraph::config::{is_secret_path, RoleSpec, DEFAULT_GENERATE_TIMEOUT_SECS};
 use crate::domain::rolegraph::verdict::{RoleOutput, Verdict};
-use crate::error::{ArtifactError, Error};
+use crate::error::{ArtifactError, Error, ProviderError};
 use crate::ports::{ArtifactStore, ContextProvider, GenerateRequest, ModelClient, ToolRunner};
 use std::path::Path;
 use std::time::Duration;
@@ -76,6 +76,31 @@ pub struct ExecuteParams<'a> {
     pub context: &'a RoleContext,
     /// Names of prior artifacts to inject into the prompt.
     pub artifacts: &'a [String],
+    /// Called before each retry with the rejected attempt number and its
+    /// error, so the caller can log it. An `Err` ends the role.
+    pub on_retry: &'a dyn Fn(u32, &Error) -> Result<(), Error>,
+}
+
+/// An [`ExecuteParams::on_retry`] that logs nothing.
+pub fn ignore_retry(_attempt: u32, _error: &Error) -> Result<(), Error> {
+    Ok(())
+}
+
+/// Whether another attempt could fix a failed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// Not the model's doing (config, missing model, disk): fail now.
+    No,
+    /// The provider request failed: send the same prompt again.
+    Same,
+    /// The reply was rejected: send the prompt again with the error.
+    WithFeedback,
+}
+
+/// A failed attempt and whether to retry it.
+struct Failure {
+    error: Error,
+    retry: Retry,
 }
 
 /// Execute one role: run pre-tools, render the prompt, call the client, parse
@@ -148,11 +173,52 @@ where
         let content = store.read_artifact(params.run, name)?;
         contents.push((name.clone(), content));
     }
+    let prompt = user_prompt(params.context, &contents, &tool_output);
+    let mut rejection: Option<String> = None;
+    let mut attempt: u32 = 1;
+    loop {
+        let prompt = match &rejection {
+            Some(reason) => format!(
+                "{prompt}\n\nYour previous reply was rejected: {reason}\n\
+                 Reply again with the full JSON object, corrected."
+            ),
+            None => prompt.clone(),
+        };
+        let failure = match attempt_role(client, store, tools, params, prompt, attempt).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(failure) => failure,
+        };
+        // `retries` is capped at validation (`MAX_RETRIES`), so `attempt` cannot overflow.
+        if failure.retry == Retry::No || attempt > params.role.retries {
+            return Err(failure.error);
+        }
+        (params.on_retry)(attempt, &failure.error)?;
+        if failure.retry == Retry::WithFeedback {
+            rejection = Some(failure.error.to_string());
+        }
+        attempt += 1;
+    }
+}
+
+/// One generate → parse → write → post-tools pass for a role.
+async fn attempt_role<C, A, T>(
+    client: &C,
+    store: &A,
+    tools: &T,
+    params: &ExecuteParams<'_>,
+    prompt: String,
+    attempt: u32,
+) -> Result<ExecuteOutcome, Failure>
+where
+    C: ModelClient + ?Sized,
+    A: ArtifactStore,
+    T: ToolRunner,
+{
     let text = client
         .generate(&GenerateRequest {
             model: params.role.model.clone(),
             system: Some(system_prompt(params.role)),
-            prompt: user_prompt(params.context, &contents, &tool_output),
+            prompt,
             temperature: DEFAULT_TEMPERATURE,
             timeout: Some(Duration::from_secs(
                 params
@@ -161,16 +227,31 @@ where
                     .unwrap_or(DEFAULT_GENERATE_TIMEOUT_SECS),
             )),
         })
-        .await?;
-    let output = parse_role_output(&text).inspect_err(|_error| {
-        // Write the raw model response to a debug artifact so the operator can
-        // inspect what the model actually returned when parsing fails. Include
-        // the role id in the filename so multiple failing roles don't overwrite
-        // each other's evidence. Sanitize the role id to prevent path traversal.
+        .await
+        .map_err(|error| {
+            // A timeout is not retried: on a slow machine the same prompt
+            // times out again and doubles the wait.
+            let retry = if matches!(error, Error::Provider(ProviderError::Ollama(_))) {
+                Retry::Same
+            } else {
+                Retry::No
+            };
+            Failure { error, retry }
+        })?;
+    // Keep every rejected reply so the operator can see what the model
+    // returned. The role id is sanitized to prevent path traversal.
+    let keep_rejected = || {
         let safe_id = sanitize_filename(&params.role.id);
-        let debug_name = format!("raw_response_{safe_id}.txt");
+        let debug_name = format!("raw_response_{safe_id}_{attempt}.txt");
         if let Err(write_err) = store.write_artifact(params.run, &debug_name, &text) {
             eprintln!("warning: failed to write debug artifact {debug_name}: {write_err}");
+        }
+    };
+    let output = parse_role_output(&text).map_err(|error| {
+        keep_rejected();
+        Failure {
+            error,
+            retry: Retry::WithFeedback,
         }
     })?;
 
@@ -178,7 +259,12 @@ where
     // leaves the deliverable on disk for inspection, and propagate write errors.
     let artifact = match params.role.output.as_deref() {
         Some(name) => {
-            store.write_artifact(params.run, name, &output.content)?;
+            store
+                .write_artifact(params.run, name, &output.content)
+                .map_err(|error| Failure {
+                    error,
+                    retry: Retry::No,
+                })?;
             Some(name.to_string())
         }
         None => None,
@@ -187,12 +273,27 @@ where
     // Post-tools: apply the patch, write the file, or search-replace only for
     // verdicts that carry a deliverable.
     if matches!(output.verdict, Verdict::Continue | Verdict::Done) {
+        // Once one edit tool has changed the repo, a later failure is not
+        // retried: the retry would run the first tool again on changed files.
+        let mut edited = false;
         for tool in &params.role.tools {
             if matches!(
                 tool.as_str(),
                 "apply-patch" | "write-file" | "search-replace"
             ) {
-                tools.run(tool, params.repo, &output.content).await?;
+                tools
+                    .run(tool, params.repo, &output.content)
+                    .await
+                    .map_err(|error| {
+                        keep_rejected();
+                        let retry = if edited {
+                            Retry::No
+                        } else {
+                            Retry::WithFeedback
+                        };
+                        Failure { error, retry }
+                    })?;
+                edited = true;
             }
         }
     }
@@ -1103,6 +1204,7 @@ mod tests {
             context_files: Vec::new(),
             on: Routing::default(),
             max_loop: 3,
+            retries: 0,
             timeout_secs: None,
         }
     }
@@ -1133,6 +1235,7 @@ mod tests {
             role,
             context,
             artifacts: &[],
+            on_retry: &ignore_retry,
         }
     }
 
@@ -1185,6 +1288,7 @@ mod tests {
                 role: &role,
                 context: &ctx,
                 artifacts: &["01_brief.md".into()],
+                on_retry: &ignore_retry,
             },
         )
         .await
@@ -1375,6 +1479,218 @@ mod tests {
         .await
         .expect_err("invalid output");
         assert!(err.to_string().contains("JSON"), "{err}");
+    }
+
+    const GOOD: &str = r#"{"verdict":"continue","content":"file: a.rs\nold: x\nnew: y"}"#;
+
+    /// Fails the first `failures` post-tool calls, then succeeds.
+    struct FlakyTools {
+        failures: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolRunner for FlakyTools {
+        async fn run(&self, _tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+            use std::sync::atomic::Ordering;
+            if self.failures.load(Ordering::SeqCst) == 0 {
+                return Ok(String::new());
+            }
+            self.failures.fetch_sub(1, Ordering::SeqCst);
+            Err(Error::from(ArtifactError::artifact(
+                "search-replace: old_text not found in a.rs",
+            )))
+        }
+    }
+
+    /// Run `role` with `client`/`tools`, returning the result and the
+    /// `(attempt, error text)` pairs `on_retry` saw.
+    async fn execute_recording_retries<T: ToolRunner>(
+        client: &ScriptedModelClient,
+        store: &MemoryArtifactStore,
+        tools: &T,
+        role: &RoleSpec,
+    ) -> (Result<ExecuteOutcome, Error>, Vec<(u32, String)>) {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let on_retry = |attempt: u32, error: &Error| {
+            seen.lock()
+                .expect("seen")
+                .push((attempt, error.to_string()));
+            Ok(())
+        };
+        let ctx = context();
+        let result = execute(
+            client,
+            store,
+            tools,
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                run: Path::new("/tmp/run/x"),
+                repo: Path::new("/repo"),
+                role,
+                context: &ctx,
+                artifacts: &[],
+                on_retry: &on_retry,
+            },
+        )
+        .await;
+        (result, seen.into_inner().expect("seen"))
+    }
+
+    #[tokio::test]
+    async fn invalid_reply_is_retried_with_the_parse_error() {
+        let client = ScriptedModelClient::new();
+        client.push_text("no json here");
+        client.push_text(GOOD);
+        let store = MemoryArtifactStore::default();
+        let mut role = role(Some("out.txt"));
+        role.retries = 1;
+        let (result, seen) =
+            execute_recording_retries(&client, &store, &StubToolRunner::default(), &role).await;
+        assert_eq!(
+            result.expect("second attempt").output.verdict,
+            Verdict::Continue
+        );
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, 1);
+        let calls = client.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(!calls[0].prompt.contains("rejected"), "{}", calls[0].prompt);
+        assert!(
+            calls[1]
+                .prompt
+                .contains(&format!("Your previous reply was rejected: {}", seen[0].1)),
+            "{}",
+            calls[1].prompt
+        );
+        assert!(calls[1].prompt.starts_with(&calls[0].prompt));
+        let kept = store
+            .read_artifact(Path::new("/tmp/run/x"), "raw_response_developer_1.txt")
+            .expect("rejected reply kept");
+        assert_eq!(kept, "no json here");
+    }
+
+    #[tokio::test]
+    async fn failed_edit_tool_is_retried_with_the_tool_error() {
+        let client = ScriptedModelClient::new();
+        client.push_text(GOOD);
+        client.push_text(GOOD);
+        let store = MemoryArtifactStore::default();
+        let mut role = role_with_tools(None, &["search-replace"]);
+        role.retries = 1;
+        let tools = FlakyTools { failures: 1.into() };
+        let (result, seen) = execute_recording_retries(&client, &store, &tools, &role).await;
+        result.expect("second attempt applies");
+        assert_eq!(
+            seen,
+            vec![(
+                1,
+                "artifact error: search-replace: old_text not found in a.rs".to_string()
+            )]
+        );
+        assert!(client.calls()[1]
+            .prompt
+            .contains("old_text not found in a.rs"));
+        assert!(store
+            .read_artifact(Path::new("/tmp/run/x"), "raw_response_developer_1.txt")
+            .is_ok());
+    }
+
+    /// Fails every `write-file` call; other tools succeed.
+    struct WriteFileFails;
+
+    #[async_trait::async_trait]
+    impl ToolRunner for WriteFileFails {
+        async fn run(&self, tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+            if tool == "write-file" {
+                return Err(Error::from(ArtifactError::artifact("write-file: boom")));
+            }
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_after_an_edit_already_applied_is_not_retried() {
+        let client = ScriptedModelClient::new();
+        client.push_text(GOOD);
+        client.push_text(GOOD);
+        let mut role = role_with_tools(None, &["search-replace", "write-file"]);
+        role.retries = 2;
+        let (result, seen) = execute_recording_retries(
+            &client,
+            &MemoryArtifactStore::default(),
+            &WriteFileFails,
+            &role,
+        )
+        .await;
+        let error = result.expect_err("second tool fails");
+        assert!(error.to_string().contains("write-file: boom"), "{error}");
+        assert!(seen.is_empty());
+        assert_eq!(client.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_return_the_last_error() {
+        let client = ScriptedModelClient::new();
+        for _ in 0..3 {
+            client.push_text(GOOD);
+        }
+        let store = MemoryArtifactStore::default();
+        let mut role = role_with_tools(None, &["search-replace"]);
+        role.retries = 2;
+        let tools = FlakyTools { failures: 9.into() };
+        let (result, seen) = execute_recording_retries(&client, &store, &tools, &role).await;
+        let error = result.expect_err("every attempt fails");
+        assert!(error.to_string().contains("old_text not found"), "{error}");
+        assert_eq!(client.calls().len(), 3);
+        assert_eq!(seen.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn provider_request_failure_retries_the_same_prompt() {
+        let client = ScriptedModelClient::new();
+        client.push_err(Error::from(ProviderError::Ollama(
+            "connection reset".into(),
+        )));
+        client.push_text(GOOD);
+        let mut role = role(None);
+        role.retries = 1;
+        let (result, seen) = execute_recording_retries(
+            &client,
+            &MemoryArtifactStore::default(),
+            &StubToolRunner::default(),
+            &role,
+        )
+        .await;
+        result.expect("second attempt");
+        assert_eq!(seen.len(), 1);
+        let calls = client.calls();
+        assert_eq!(calls[0].prompt, calls[1].prompt);
+    }
+
+    #[tokio::test]
+    async fn timeout_and_missing_model_are_not_retried() {
+        for error in [
+            ProviderError::Timeout,
+            ProviderError::ModelNotFound {
+                model: "kimi3".into(),
+            },
+        ] {
+            let client = ScriptedModelClient::new();
+            client.push_err(Error::from(error));
+            client.push_text(GOOD);
+            let mut role = role(None);
+            role.retries = 3;
+            let (result, seen) = execute_recording_retries(
+                &client,
+                &MemoryArtifactStore::default(),
+                &StubToolRunner::default(),
+                &role,
+            )
+            .await;
+            assert!(result.is_err());
+            assert!(seen.is_empty());
+            assert_eq!(client.calls().len(), 1);
+        }
     }
 
     #[tokio::test]
@@ -1612,7 +1928,7 @@ mod tests {
         assert!(err.to_string().contains("role output"), "{err}");
         // The raw response should be written for inspection, named with the role id.
         let raw = store
-            .read_artifact(run, "raw_response_developer.txt")
+            .read_artifact(run, "raw_response_developer_1.txt")
             .expect("raw response written");
         assert!(raw.contains("totally not json"), "{raw}");
     }
@@ -1638,7 +1954,7 @@ mod tests {
         .expect_err("parse failure");
         assert!(err.to_string().contains("role output"), "{err}");
         let raw = store
-            .read_artifact(run, "raw_response_developer.txt")
+            .read_artifact(run, "raw_response_developer_1.txt")
             .expect("raw response written even without output");
         assert!(raw.contains("not json"), "{raw}");
     }
@@ -1841,6 +2157,7 @@ mod tests {
                 role: &role,
                 context: &ctx,
                 artifacts: &[],
+                on_retry: &ignore_retry,
             },
         )
         .await
@@ -1884,6 +2201,7 @@ mod tests {
                 role: &role,
                 context: &ctx,
                 artifacts: &[],
+                on_retry: &ignore_retry,
             },
         )
         .await
@@ -1926,6 +2244,7 @@ mod tests {
                 role: &role,
                 context: &ctx,
                 artifacts: &[],
+                on_retry: &ignore_retry,
             },
         )
         .await
@@ -1968,6 +2287,7 @@ mod tests {
                 role: &role,
                 context: &ctx,
                 artifacts: &[],
+                on_retry: &ignore_retry,
             },
         )
         .await
@@ -2021,6 +2341,7 @@ mod tests {
                 role: &role,
                 context: &ctx,
                 artifacts: &[],
+                on_retry: &ignore_retry,
             },
         )
         .await
@@ -2093,6 +2414,7 @@ mod tests {
                 role: &role,
                 context: &ctx,
                 artifacts: &[],
+                on_retry: &ignore_retry,
             },
         )
         .await

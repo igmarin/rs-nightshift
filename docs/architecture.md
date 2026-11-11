@@ -149,9 +149,10 @@ the capability adapters (`src/adapters/capabilities.rs`), declared per role via
 Each run persists, under its run directory:
 
 - `actions.jsonl` — the append-only action log, one JSON object per event:
-  `role_start`, `role_end`, `loop`, and the terminal `done` / `fail` / `halt`,
-  carrying timestamp, role, provider/model, verdict, artifact, and block
-  reason.
+  `role_start`, `retry`, `role_end`, `loop`, and the terminal `done` /
+  `fail` / `halt`, carrying timestamp, role, provider/model, verdict,
+  artifact, and block reason. A `retry` event also carries `detail` (the
+  attempt number and why the reply was rejected).
 - `state.json` — the status snapshot: current role, step count, last verdict,
   status (`running` / `done` / `blocked` / `failed`), block reason, and
   per-edge loop counters. Written via temp-file + rename so an interruption
