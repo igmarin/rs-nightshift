@@ -154,12 +154,18 @@ impl NightshiftConfig {
     ///
     /// `selected` (from `--profile` / `NIGHTSHIFT_PROFILE`) wins over
     /// `[run] profile`. On success `run.profile` holds the profile in use.
-    /// Configs without `@slot` models are unchanged.
+    /// Configs without `@slot` models are unchanged and ignore the selection
+    /// (a machine-wide `NIGHTSHIFT_PROFILE` must not break them). On error
+    /// `self` is left untouched.
     pub fn resolve_profile(&mut self, selected: Option<&str>) -> Result<(), Error> {
+        if !self.roles.iter().any(|role| role.model.starts_with('@')) {
+            self.run.profile = None;
+            return Ok(());
+        }
         let name = self.profile_name(selected);
-        let profile = self.selected_profile(selected)?.cloned();
-        let profile = profile.as_ref();
-        for role in &mut self.roles {
+        let profile = self.selected_profile(selected)?;
+        let mut roles = self.roles.clone();
+        for role in &mut roles {
             let Some(slot_name) = role.model.strip_prefix('@') else {
                 continue;
             };
@@ -190,6 +196,7 @@ impl NightshiftConfig {
             role.model = slot.model.clone();
             role.options = options;
         }
+        self.roles = roles;
         self.run.profile = name;
         Ok(())
     }
@@ -1065,6 +1072,32 @@ model = "phi4"
         let options = &config.roles[0].options;
         assert_eq!(options["temperature"], toml::Value::Float(0.1));
         assert_eq!(options["max_tokens"], toml::Value::Integer(4096));
+    }
+
+    #[test]
+    fn literal_config_ignores_an_undefined_selected_profile() {
+        let mut config = profiles("profile = \"mac\"");
+        for role in &mut config.roles {
+            role.provider = "ollama".into();
+            role.model = "phi4".into();
+        }
+        config
+            .resolve_profile(Some("not-defined"))
+            .expect("no slots");
+        assert_eq!(config.run.profile, None);
+        assert_eq!(config.roles[0].model, "phi4");
+    }
+
+    #[test]
+    fn failed_resolution_leaves_roles_untouched() {
+        let mut config = profiles("");
+        config.roles[1].model = "@missing".into();
+        config
+            .resolve_profile(Some("mac"))
+            .expect_err("missing slot");
+        assert_eq!(config.roles[0].model, "@planner");
+        assert!(config.roles[0].provider.is_empty());
+        assert_eq!(config.run.profile, None);
     }
 
     #[test]

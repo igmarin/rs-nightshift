@@ -155,8 +155,9 @@ prompt = "..."
   `[run] profile`. Setting `NIGHTSHIFT_PROFILE` in each machine's shell
   profile means the repo config never changes.
 - A role's own `options` override the slot's options key by key.
-- Roles with a literal `model` (and a `provider`) work as before; configs
-  without `@slot` models need no profile.
+- Roles with a literal `model` (and a `provider`) work as before. Configs
+  without `@slot` models need no profile and ignore the selected one, so a
+  machine-wide `NIGHTSHIFT_PROFILE` never breaks them.
 - Errors at load time: an unknown profile (lists the defined ones), a slot
   the profile does not define, a slot with no profile selected, or a role
   that sets both `provider` and an `@slot` model.
