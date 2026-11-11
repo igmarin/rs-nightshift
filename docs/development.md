@@ -40,6 +40,15 @@ cargo llvm-cov --workspace --fail-under-lines 85
 All gates must pass before a PR is marked ready for review. CI runs the same set
 plus the release build smoke test and `actionlint`.
 
+### End-to-end tests
+
+`tests/harness_e2e.rs` runs the real `nightshift` binary against a local mock
+of an OpenAI-compatible server (`wiremock`) and a temp git repo. It covers the
+wiring in `main.rs` for `harness` and `bench`: config and profiles, the
+provider factory, retries, the edit landing in the repo, the run directory,
+and the exit code. It needs only `git`; no model server, `codegraph`, or
+`graphify`. It runs as part of `cargo test`.
+
 ## Pre-push gate
 
 For a quick pre-push check, run the gate subset:
