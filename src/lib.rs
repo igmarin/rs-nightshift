@@ -22,5 +22,6 @@ pub mod pipeline;
 pub mod pm;
 pub mod ports;
 pub mod qa;
+pub mod queue;
 pub mod techlead;
 pub mod writer;

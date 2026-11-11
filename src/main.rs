@@ -5,13 +5,14 @@ use rs_nightshift::adapters::artifact_store::FsArtifactStore;
 use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
 use rs_nightshift::adapters::context::PathProbe;
+use rs_nightshift::adapters::git::working_tree_dirty;
 use rs_nightshift::adapters::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
 use rs_nightshift::adapters::state::FsStateStore;
 use rs_nightshift::adapters::test::ProcessTestRunner;
 use rs_nightshift::adapters::ProviderFactory;
 use rs_nightshift::application::executor::{execute, ExecuteParams, RoleContext};
-use rs_nightshift::application::orchestrator::{run_graph, RunRequest};
-use rs_nightshift::application::report::render_report;
+use rs_nightshift::application::orchestrator::{run_graph, RunRequest, RunResult};
+use rs_nightshift::application::report::{block_reason_description, render_report};
 use rs_nightshift::artifacts::{slugify, write_status, ArtifactStore};
 use rs_nightshift::bench::{render_report as render_bench_report, run_bench, BenchParams};
 use rs_nightshift::cli::{Cli, Command};
@@ -28,7 +29,12 @@ use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest}
 use rs_nightshift::ports::{
     ArtifactStore as ArtifactStorePort, Clock, ModelClientFactory, StateStore,
 };
+use rs_nightshift::queue::{
+    read_queue_file, render_report as render_queue_report, run_queue, Job, JobHost, JobOutcome,
+    JobStatus,
+};
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 #[tokio::main]
@@ -187,39 +193,31 @@ async fn real_main() -> anyhow::Result<()> {
             name,
             repo,
         } => {
-            let cfg = load_role_graph_config_from(&config, profile.as_deref())?;
-            writeln!(io::stderr(), "{}", describe_models(&cfg))?;
-            let factory = ProviderFactory;
-            let store = FsArtifactStore::new(&out);
-            let state = FsStateStore::new();
-            let clock = SystemClock;
-            let tools = CapabilityRunner::new();
-            let context_provider = GraphContextProvider;
-            let slug = run_slug(&clock, name.as_deref(), &goal, "run");
-            let run_dir = store.create_run(&clock.today(), &slug)?;
-            let result = run_graph(
-                &factory,
-                &store,
-                &state,
-                &clock,
-                &tools,
-                &context_provider,
-                &RunRequest {
-                    run: &run_dir,
-                    repo: &repo,
-                    config: &cfg,
-                    goal: &goal,
-                },
-            )
-            .await?;
-            let snapshot = state.read_snapshot(&run_dir)?;
-            let events = state.read_actions(&run_dir)?;
-            writeln!(io::stdout(), "{}", render_report(&snapshot, &events))?;
+            let (cfg, run_dir) =
+                prepare_run(&config, profile.as_deref(), &goal, &out, name.as_deref())?;
+            let (result, report) = execute_run(&cfg, &run_dir, &repo, &goal, &out).await?;
+            writeln!(io::stdout(), "{report}")?;
             process::exit(match result.status {
                 RunStatus::Done => 0,
                 RunStatus::Failed => 1,
                 RunStatus::Blocked | RunStatus::Running => 2,
             });
+        }
+        Command::Queue {
+            file,
+            config,
+            out,
+            stop_on_failure,
+        } => {
+            let queue = read_queue_file(&file)?;
+            let host = HarnessHost {
+                config,
+                profile,
+                out: out.clone(),
+            };
+            let state = run_queue(&host, &queue.jobs, &out, stop_on_failure).await?;
+            writeln!(io::stdout(), "{}", render_queue_report(&state))?;
+            process::exit(i32::from(!state.all_done()));
         }
         Command::Plan {
             goal,
@@ -308,6 +306,100 @@ async fn real_main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Load the config and create the run directory for one harness job.
+fn prepare_run(
+    config: &Path,
+    profile: Option<&str>,
+    goal: &str,
+    out: &Path,
+    name: Option<&str>,
+) -> Result<(NightshiftConfig, PathBuf), Error> {
+    let cfg = load_role_graph_config_from(config, profile)?;
+    writeln!(io::stderr(), "{}", describe_models(&cfg))?;
+    let clock = SystemClock;
+    let slug = run_slug(&clock, name, goal, "run");
+    let run_dir = FsArtifactStore::new(out).create_run(&clock.today(), &slug)?;
+    Ok((cfg, run_dir))
+}
+
+/// Walk the role graph in `run_dir`; returns the result and the morning report.
+async fn execute_run(
+    cfg: &NightshiftConfig,
+    run_dir: &Path,
+    repo: &Path,
+    goal: &str,
+    out: &Path,
+) -> Result<(RunResult, String), Error> {
+    let state = FsStateStore::new();
+    let result = run_graph(
+        &ProviderFactory,
+        &FsArtifactStore::new(out),
+        &state,
+        &SystemClock,
+        &CapabilityRunner::new(),
+        &GraphContextProvider,
+        &RunRequest {
+            run: run_dir,
+            repo,
+            config: cfg,
+            goal,
+        },
+    )
+    .await?;
+    let snapshot = state.read_snapshot(run_dir)?;
+    let events = state.read_actions(run_dir)?;
+    Ok((result, render_report(&snapshot, &events)))
+}
+
+/// Runs each queue job through the harness, exactly like `nightshift harness`.
+struct HarnessHost {
+    /// Config for jobs that do not set their own.
+    config: PathBuf,
+    /// Profile for jobs that do not set their own.
+    profile: Option<String>,
+    /// Artifact root.
+    out: PathBuf,
+}
+
+#[async_trait::async_trait(?Send)]
+impl JobHost for HarnessHost {
+    fn is_dirty(&self, repo: &Path) -> Result<bool, Error> {
+        working_tree_dirty(repo)
+    }
+
+    async fn run(&self, job: &Job) -> JobOutcome {
+        let failed = |error: Error, run_dir: Option<PathBuf>| JobOutcome {
+            status: JobStatus::Failed,
+            reason: Some(error.to_string()),
+            run_dir,
+        };
+        let config = job.config.as_deref().unwrap_or(&self.config);
+        let profile = job.profile.as_deref().or(self.profile.as_deref());
+        let (cfg, run_dir) =
+            match prepare_run(config, profile, &job.goal, &self.out, job.name.as_deref()) {
+                Ok(prepared) => prepared,
+                Err(error) => return failed(error, None),
+            };
+        match execute_run(&cfg, &run_dir, &job.repo, &job.goal, &self.out).await {
+            Ok((result, _report)) => {
+                let status = match result.status {
+                    RunStatus::Done => JobStatus::Done,
+                    RunStatus::Blocked => JobStatus::Blocked,
+                    RunStatus::Failed | RunStatus::Running => JobStatus::Failed,
+                };
+                let reason = (status != JobStatus::Done)
+                    .then(|| block_reason_description(result.block_reason).to_string());
+                JobOutcome {
+                    status,
+                    reason,
+                    run_dir: Some(run_dir),
+                }
+            }
+            Err(error) => failed(error, Some(run_dir)),
+        }
+    }
 }
 
 /// `profile mac: po: mlx/qwen3.8-27b-4bit, dev: mlx/qwen3.6-35b-4bit`.
