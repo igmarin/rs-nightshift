@@ -6,8 +6,8 @@
 //!
 //! The top-level [`enum@crate::error::Error`] wraps this type via `#[from]`, so
 //! `Result<T, Error>` call sites lift a `ProviderError` automatically with `?`.
-//! [`thiserror::Error`] display attributes are preserved verbatim from the
-//! original enum, keeping operator-facing messages stable.
+//! Messages name no provider: the same variants serve Ollama and every
+//! OpenAI-compatible server (the `Ollama` variant name is historical).
 
 use thiserror::Error;
 
@@ -24,18 +24,18 @@ pub enum ProviderError {
     },
 
     /// An HTTP call to the model provider failed.
-    #[error("Ollama request failed: {0}")]
+    #[error("provider request failed: {0}")]
     Ollama(String),
 
     /// The provider has no such model installed.
-    #[error("Ollama model not found: {model}")]
+    #[error("model not found: {model}")]
     ModelNotFound {
         /// Model tag that was requested.
         model: String,
     },
 
     /// The provider request exceeded the client timeout.
-    #[error("Ollama request timed out")]
+    #[error("provider request timed out")]
     Timeout,
 }
 
@@ -48,7 +48,7 @@ mod tests {
         let error = ProviderError::Ollama("connection refused".into());
         assert_eq!(
             error.to_string(),
-            "Ollama request failed: connection refused"
+            "provider request failed: connection refused"
         );
     }
 
@@ -57,10 +57,10 @@ mod tests {
         let missing = ProviderError::ModelNotFound {
             model: "nope".into(),
         };
-        assert_eq!(missing.to_string(), "Ollama model not found: nope");
+        assert_eq!(missing.to_string(), "model not found: nope");
         assert_eq!(
             ProviderError::Timeout.to_string(),
-            "Ollama request timed out"
+            "provider request timed out"
         );
     }
 
@@ -76,6 +76,6 @@ mod tests {
     #[test]
     fn provider_error_lifts_into_top_level_error() {
         let top: crate::error::Error = ProviderError::Timeout.into();
-        assert_eq!(top.to_string(), "Ollama request timed out");
+        assert_eq!(top.to_string(), "provider request timed out");
     }
 }
