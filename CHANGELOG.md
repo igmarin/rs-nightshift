@@ -30,6 +30,9 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Context gathering runs `codegraph init` when `.codegraph/` exists but has
+  no `codegraph.db` (for example, a repo that commits `.codegraph/.gitignore`).
+  See issue [#119](https://github.com/igmarin/rs-nightshift/issues/119).
 - Role JSON parsing strips `<think>…</think>` reasoning from thinking models
   (`qwen3`, `deepseek-r1`) before extracting the envelope. See issue
   [#98](https://github.com/igmarin/rs-nightshift/issues/98).
