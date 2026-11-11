@@ -23,7 +23,7 @@ use rs_nightshift::domain::rolegraph::config::{
     load_role_graph_config_from, read_config, NightshiftConfig,
 };
 use rs_nightshift::domain::rolegraph::state::RunStatus;
-use rs_nightshift::domain::rolegraph::verdict::Verdict;
+use rs_nightshift::domain::rolegraph::verdict::{BlockReason, Verdict};
 use rs_nightshift::error::Error;
 use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest};
 use rs_nightshift::ports::{
@@ -389,8 +389,11 @@ impl JobHost for HarnessHost {
                     RunStatus::Blocked => JobStatus::Blocked,
                     RunStatus::Failed | RunStatus::Running => JobStatus::Failed,
                 };
-                let reason = (status != JobStatus::Done)
-                    .then(|| block_reason_description(result.block_reason).to_string());
+                let reason = (status != JobStatus::Done).then(|| match result.block_reason {
+                    // A halt with no stated reason (for example blocking questions).
+                    BlockReason::None => "halted for review; see the run directory".to_string(),
+                    reason => block_reason_description(reason).to_string(),
+                });
                 JobOutcome {
                     status,
                     reason,

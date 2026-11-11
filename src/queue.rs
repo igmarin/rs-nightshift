@@ -149,10 +149,10 @@ pub struct QueueState {
 }
 
 impl QueueState {
-    /// Every job finished `done`.
+    /// There is at least one job and every job finished `done`.
     #[must_use]
     pub fn all_done(&self) -> bool {
-        self.jobs.iter().all(|job| job.status == JobStatus::Done)
+        !self.jobs.is_empty() && self.jobs.iter().all(|job| job.status == JobStatus::Done)
     }
 }
 
@@ -329,7 +329,14 @@ async fn lock(out: &Path) -> Result<std::fs::File, Error> {
     const ATTEMPTS: u32 = 5;
     const PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
     let path = out.join(QUEUE_LOCK_FILE);
-    let file = std::fs::File::create(&path).map_err(|error| io_error("create", &path, &error))?;
+    // Never truncate: the lock file holds nothing, and an existing path is
+    // left exactly as it is.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| io_error("open", &path, &error))?;
     for attempt in 1..=ATTEMPTS {
         match file.try_lock() {
             Ok(()) => return Ok(file),
@@ -370,13 +377,18 @@ fn save(out: &Path, state: &QueueState) -> Result<(), Error> {
     replace_file(&out.join(QUEUE_REPORT_FILE), &render_report(state))
 }
 
-/// Write to a temp file, then rename, so a reader never sees a partial file.
+/// Write to a new, uniquely named temp file, then rename, so a reader never
+/// sees a partial file and no existing path is written through.
 fn replace_file(path: &Path, content: &str) -> Result<(), Error> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, content).map_err(|error| io_error("write", &tmp, &error))?;
-    std::fs::rename(&tmp, path).map_err(|error| io_error("rename", path, &error))
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp =
+        tempfile::NamedTempFile::new_in(dir).map_err(|error| io_error("create in", dir, &error))?;
+    tmp.write_all(content.as_bytes())
+        .map_err(|error| io_error("write", tmp.path(), &error))?;
+    tmp.persist(path)
+        .map_err(|error| io_error("rename", path, &error.error))?;
+    Ok(())
 }
 
 fn io_error(action: &str, path: &Path, error: &std::io::Error) -> Error {
@@ -684,6 +696,16 @@ mod tests {
             report.contains("| 1 | blocked: dirty_tree | fix a \\| b and c | /a |  |"),
             "{report}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_queue_is_not_all_done() {
+        let out = tempfile::tempdir().expect("tempdir");
+        let state = run_queue(&host(out.path(), &[]), &[], out.path(), false)
+            .await
+            .expect("queue");
+        assert!(state.jobs.is_empty());
+        assert!(!state.all_done());
     }
 
     #[test]
