@@ -86,6 +86,41 @@ export NIGHTSHIFT_CONFIG=/etc/nightshift/production.toml
 nightshift run --goal "…" --repo ~/projects/my-app
 ```
 
+## Local OpenAI-compatible servers (rapid-mlx, llama.cpp, LM Studio)
+
+Any server that speaks the OpenAI chat API can back a role. On an Apple
+Silicon Mac, rapid-mlx serves MLX
+models on `http://127.0.0.1:8000/v1`:
+
+```text
+rapid-mlx serve qwen3.6-35b-4bit      # or several models; see `rapid-mlx models`
+```
+
+```toml
+[providers.mlx]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+# no api_key_env: a keyless local server
+
+[[roles]]
+id = "developer"
+provider = "mlx"
+model = "qwen3.6-35b-4bit"   # an id from GET /v1/models
+timeout_secs = 1800
+```
+
+Omit `api_key_env` for a server that needs no key. Nightshift then sends a
+placeholder bearer token (`local`), which local servers ignore. This is only
+allowed when `base_url` is this machine (`127.0.0.1`, `localhost`, `::1`); a
+remote provider without `api_key_env` is a config error. Plain `http://` is
+also loopback-only: use `https://` for any other host, so a key never crosses
+the network in cleartext.
+
+`nightshift doctor` calls `GET {base_url}/models` for every such provider a
+role uses: `provider:<name>` fails when the server is down, and
+`model:<name>:<model>` fails, listing the served models, when a role names a model the
+server does not have.
+
 ## Per-role generate timeout
 
 Each `[[roles]]` block may set `timeout_secs` for that role's LLM completion.

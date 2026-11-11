@@ -15,7 +15,7 @@ use rs_nightshift::application::report::render_report;
 use rs_nightshift::artifacts::{slugify, write_status, ArtifactStore};
 use rs_nightshift::cli::{Cli, Command};
 use rs_nightshift::doctor::{
-    run_doctor, write_report, Check, DoctorReport, HttpModelCatalog, PathHost,
+    run_doctor, write_report, Check, DoctorReport, HttpModelCatalog, HttpProviderCatalog, PathHost,
 };
 use rs_nightshift::domain::rolegraph::config::load_role_graph_config_from;
 use rs_nightshift::domain::rolegraph::state::RunStatus;
@@ -72,7 +72,8 @@ async fn real_main() -> anyhow::Result<()> {
                 }
             };
             let catalog = HttpModelCatalog::new(validated_url.as_str())?;
-            let mut report = run_doctor(&role_graph, &catalog, &PathHost).await?;
+            let providers = HttpProviderCatalog::new()?;
+            let mut report = run_doctor(&role_graph, &catalog, &providers, &PathHost).await?;
             report.checks.insert(
                 0,
                 Check {

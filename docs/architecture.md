@@ -105,7 +105,7 @@ Roles select a provider by name; the client factory (`build_model_client`,
 | `ollama`  | built-in          | `http://127.0.0.1:11434`       | none (local)        |
 | `deepseek`| OpenAI-compatible | `https://api.deepseek.com`     | `DEEPSEEK_API_KEY`  |
 | `kimi`    | OpenAI-compatible | `https://api.moonshot.cn/v1`   | `MOONSHOT_API_KEY`  |
-| custom    | `openai-compatible` | from `[providers.<name>]`    | `api_key_env`       |
+| custom    | `openai-compatible` | from `[providers.<name>]`    | `api_key_env`, or none for a keyless local server (rapid-mlx) |
 
 - Ollama keeps its `keep_alive: 0` VRAM unload after each call; with
   `options.think = true` the `:think` model-tag suffix is applied
