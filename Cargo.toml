@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Ismael Marín"]
 license = "MIT"
-description = "Autonomous local multi-agent software development pipeline harness around Ollama"
+description = "Autonomous local multi-agent software development harness for local models (Ollama or any OpenAI-compatible server)"
 repository = "https://github.com/igmarin/rs-nightshift"
 readme = "README.md"
 rust-version = "1.99"
-keywords = ["ollama", "agents", "cli"]
+keywords = ["ollama", "mlx", "agents", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]

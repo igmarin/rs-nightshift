@@ -4,16 +4,16 @@
 //! a real run uses:
 //!
 //! 1. `json-validity`: the reply must parse as a role envelope
-//!    ([`parse_role_output`], with its fence/think/repair handling).
+//!    (`parse_role_output`, with its fence/think/repair handling).
 //! 2. `text-quoting`: the reply must be two lines from a snippet, exact except
 //!    that the first line may drop leading spaces (the same leeway `search-replace` gives,
 //!    since `old:` is matched as a substring), because `old:` text must match
 //!    exactly. Informational: no real role replies with bare text, so a failure
 //!    shows as `WARN` and does not decide the verdict.
 //! 3. `search-replace`: sent with a generic role sentence plus the contract a
-//!    `search-replace` role gets ([`output_contract`]); your own role prompt is
+//!    `search-replace` role gets (`output_contract`); your own role prompt is
 //!    not part of it. The reply must be a `continue`/`done` role envelope whose
-//!    `content` is one `file:`/`old:`/`new:` block ([`parse_search_replace`])
+//!    `content` is one `file:`/`old:`/`new:` block (`parse_search_replace`)
 //!    that, applied to the sample file, gives the expected result. Nothing is
 //!    written to disk (INV-9).
 //!

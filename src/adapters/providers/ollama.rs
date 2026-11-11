@@ -15,7 +15,7 @@ use super::openai::to_llm_request;
 /// `keep_alive: 0` VRAM-unload behavior.
 ///
 /// Each [`generate`](ModelClient::generate) call delegates to
-/// [`OllamaClient::complete`], which sends the completion through Ollama's
+/// [`OllamaClient`]'s `complete`, which sends the completion through Ollama's
 /// OpenAI-compatible endpoint and then posts a best-effort `keep_alive: 0`
 /// unload to the native `/api/generate` endpoint so the model is released from
 /// VRAM between stages. When `think` is set, the `:think` tag suffix is
