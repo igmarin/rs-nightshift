@@ -18,6 +18,8 @@ All notable changes to this project are documented in this file.
 - OpenAI-compatible `base_url` values with a query string or fragment are
   rejected: endpoints are appended to the base URL, so they would hit the
   wrong path.
+- OpenAI-compatible providers may use plain `http://` only on a loopback host,
+  and may omit `api_key_env` only on a loopback host.
 - Per-role `timeout_secs` in `nightshift.toml`. Omitted roles use the 3600s
   generate default; `timeout_secs = 0` is a config error. See issue
   [#101](https://github.com/igmarin/rs-nightshift/issues/101).

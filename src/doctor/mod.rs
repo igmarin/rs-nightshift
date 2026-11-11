@@ -174,7 +174,6 @@ async fn push_provider_checks<P: ProviderCatalog>(
             Ok(key) => Some(key),
             Err(_) => return fail(checks, format!("missing {env}")),
         },
-        // Custom provider without api_key_env: a keyless local server.
         None => None,
     };
     let Some(base_url) = base_url_for(provider, spec) else {
@@ -183,7 +182,19 @@ async fn push_provider_checks<P: ProviderCatalog>(
             format!("define base_url for provider {provider:?} in [providers.{provider}]"),
         );
     };
-    let origin = crate::adapters::ollama::redact_ollama_url(&base_url);
+    // Same rule as the client factory: only a loopback server may be keyless.
+    if api_key.is_none() && !crate::adapters::providers::is_loopback_base_url(&base_url) {
+        return fail(
+            checks,
+            format!(
+                "define api_key_env for provider {provider:?}; only a loopback base_url may omit it"
+            ),
+        );
+    }
+    // Scheme, host and port only: a path segment could carry a token.
+    let origin = reqwest::Url::parse(&base_url)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "<invalid base_url>".into());
     match catalog.list_models(&base_url, api_key.as_deref()).await {
         Ok(served) => {
             checks.push(check(
@@ -500,6 +511,57 @@ model = "qwen3.6-35b-4bit"
             .expect("provider check");
         assert!(!provider.passed);
         assert!(provider.detail.contains("base_url"), "{provider:?}");
+    }
+
+    #[tokio::test]
+    async fn keyless_remote_provider_is_not_ready() {
+        let cfg = config(
+            r#"
+[run]
+start = "dev"
+[providers.remote]
+backend = "openai-compatible"
+base_url = "https://llm.example.test/v1/secret-token"
+[[roles]]
+id = "dev"
+provider = "remote"
+model = "m"
+"#,
+        );
+        let catalog = FakeCatalog {
+            result: Ok(vec!["m".into()]),
+        };
+        let report = run_doctor(&cfg, &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        let provider = report
+            .checks
+            .iter()
+            .find(|c| c.name == "provider:remote")
+            .expect("provider check");
+        assert!(!provider.passed);
+        assert!(provider.detail.contains("api_key_env"), "{provider:?}");
+    }
+
+    #[tokio::test]
+    async fn provider_detail_shows_origin_without_path() {
+        let cfg = config(&MLX_DEV.replace("/v1", "/v1/secret-token"));
+        let catalog = FakeCatalog {
+            result: Ok(vec!["qwen3.6-35b-4bit".into()]),
+        };
+        let report = run_doctor(&cfg, &catalog, &catalog, &healthy_host())
+            .await
+            .expect("report");
+        let provider = report
+            .checks
+            .iter()
+            .find(|c| c.name == "provider:mlx")
+            .expect("provider check");
+        assert!(
+            provider.detail.contains("http://127.0.0.1:8000"),
+            "{provider:?}"
+        );
+        assert!(!provider.detail.contains("secret-token"), "{provider:?}");
     }
 
     #[tokio::test]

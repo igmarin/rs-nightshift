@@ -27,7 +27,9 @@ pub(crate) fn to_llm_request(
 ///
 /// Accepts `http://` / `https://` URLs with a host (a path such as `/v1` is
 /// allowed) and rejects userinfo so credentials can never be embedded in the
-/// URL, and a query or fragment, which would break the appended endpoint paths. Rejected values are reported redacted.
+/// URL, a query or fragment (they would break the appended endpoint paths), and
+/// plain `http://` to a non-loopback host (the API key would travel in
+/// cleartext). Rejected values are reported redacted.
 ///
 /// `http://` is allowed for local OpenAI-compatible proxies (vLLM, Ollama);
 /// for remote keyed providers (Deepseek/Kimi/custom) prefer `https://` so the
@@ -59,6 +61,16 @@ pub(crate) fn validate_chat_base_url(value: &str) -> Result<String, Error> {
             ),
         }));
     }
+    // Plain http is only for this machine, so an API key never crosses a network
+    // in cleartext.
+    if parsed.scheme() == "http" && !is_loopback(&parsed) {
+        return Err(Error::from(ConfigError {
+            path: "provider base_url".into(),
+            message: format!(
+                "base URL {redacted:?} uses http:// on a non-loopback host; use https://"
+            ),
+        }));
+    }
     // Endpoints are built by appending (`/chat/completions`, `/models`), which a
     // query or fragment would swallow, so the request would go to the wrong path.
     if parsed.query().is_some() || parsed.fragment().is_some() {
@@ -68,6 +80,24 @@ pub(crate) fn validate_chat_base_url(value: &str) -> Result<String, Error> {
         }));
     }
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
+}
+
+/// `localhost`, `127.0.0.0/8` or `::1`.
+fn is_loopback(url: &reqwest::Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => false,
+    }
+}
+
+/// True when `value` parses as a URL whose host is this machine.
+pub(crate) fn is_loopback_base_url(value: &str) -> bool {
+    reqwest::Url::parse(value.trim()).is_ok_and(|url| is_loopback(&url))
 }
 
 /// OpenAI-compatible [`ModelClient`] used for Deepseek, Kimi, and any custom
@@ -374,11 +404,31 @@ mod tests {
     }
 
     #[test]
+    fn openai_new_allows_http_only_on_loopback() {
+        for url in [
+            "http://127.0.0.1:8000/v1",
+            "http://localhost:8000/v1",
+            "http://[::1]:8000/v1",
+            "https://api.example.test/v1",
+        ] {
+            assert!(
+                OpenAICompatibleAdapter::new(url, "k").is_ok(),
+                "{url} must pass"
+            );
+        }
+        let error = match OpenAICompatibleAdapter::new("http://10.0.0.5:8000/v1", "k") {
+            Ok(_) => panic!("plain http to a LAN host must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("https://"), "{error}");
+    }
+
+    #[test]
     fn openai_redacted_origin_reports_base_url() {
-        let client = OpenAICompatibleAdapter::new("http://host:8080/v1/", "k").expect("client");
+        let client = OpenAICompatibleAdapter::new("https://host:8080/v1/", "k").expect("client");
         assert_eq!(
             client.redacted_origin().as_deref(),
-            Some("http://host:8080/v1")
+            Some("https://host:8080/v1")
         );
     }
 }

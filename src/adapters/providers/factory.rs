@@ -7,7 +7,7 @@ use crate::ports::{ModelClient, ModelClientFactory};
 use std::collections::BTreeMap;
 
 use super::ollama::OllamaAdapter;
-use super::openai::OpenAICompatibleAdapter;
+use super::openai::{is_loopback_base_url, OpenAICompatibleAdapter};
 use super::options::ModelOptions;
 
 /// Default base URL for the built-in `ollama` provider.
@@ -118,7 +118,8 @@ fn build_ollama(
 /// `default_base_url` / `default_api_key_env` supply the built-in values for
 /// `deepseek` / `kimi`; a `ProviderSpec` override wins when present. Custom
 /// providers must supply `base_url`; without `api_key_env` they are treated as
-/// keyless local servers and get [`NO_API_KEY`].
+/// keyless local servers and get [`NO_API_KEY`], which requires a loopback
+/// `base_url` so a forgotten key on a remote provider stays a config error.
 fn build_openai_compatible(
     provider: &str,
     default_base_url: Option<&str>,
@@ -145,7 +146,15 @@ fn build_openai_compatible(
                 message: "environment variable not set".into(),
             })
         })?,
-        None => NO_API_KEY.to_owned(),
+        None if is_loopback_base_url(&base_url) => NO_API_KEY.to_owned(),
+        None => {
+            return Err(Error::from(ConfigError {
+                path: format!("provider {provider:?}"),
+                message: "no api_key_env configured; only a loopback base_url \
+                          (127.0.0.1, localhost, ::1) may omit it"
+                    .into(),
+            }))
+        }
     };
     let client = OpenAICompatibleAdapter::with_timeout(
         base_url,
@@ -340,6 +349,20 @@ mod tests {
             .await
             .expect("reply");
         assert_eq!(text, "mlx answer");
+    }
+
+    #[test]
+    fn factory_keyless_remote_provider_is_config_error() {
+        let spec = ProviderSpec {
+            backend: Some("openai-compatible".into()),
+            base_url: Some("https://llm.example.test/v1".into()),
+            api_key_env: None,
+        };
+        let err = match build_model_client("remote", Some(&spec), &options(&[])) {
+            Ok(_) => panic!("a remote provider without api_key_env must fail"),
+            Err(error) => error,
+        };
+        assert!(err.to_string().contains("loopback"), "{err}");
     }
 
     #[test]

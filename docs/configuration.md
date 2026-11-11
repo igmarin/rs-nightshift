@@ -110,8 +110,11 @@ timeout_secs = 1800
 ```
 
 Omit `api_key_env` for a server that needs no key. Nightshift then sends a
-placeholder bearer token (`local`), which local servers ignore. Set
-`api_key_env` when the server was started with a key.
+placeholder bearer token (`local`), which local servers ignore. This is only
+allowed when `base_url` is this machine (`127.0.0.1`, `localhost`, `::1`); a
+remote provider without `api_key_env` is a config error. Plain `http://` is
+also loopback-only: use `https://` for any other host, so a key never crosses
+the network in cleartext.
 
 `nightshift doctor` calls `GET {base_url}/models` for every such provider a
 role uses: `provider:<name>` fails when the server is down, and
