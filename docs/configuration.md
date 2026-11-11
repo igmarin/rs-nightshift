@@ -232,7 +232,8 @@ profile = "mac"             # optional; default is --profile / NIGHTSHIFT_PROFIL
 
 Relative `repo` and `config` paths in the queue file resolve against the
 queue file's own directory (not the directory you start `nightshift` in), and
-are stored as absolute paths. The queue's `--config` flag is a normal
+are stored as absolute paths with symlinks resolved, so a link that is later
+pointed at another checkout counts as a different job. The queue's `--config` flag is a normal
 command-line path. Each job writes its own
 dated run directory under `--out`, exactly like `harness`.
 
@@ -243,7 +244,7 @@ Otherwise the queue's own files make the repo dirty and its job is blocked.
 | :--- | :--- |
 | One job at a time | Jobs never run in parallel. |
 | A job fails | The queue moves on to the next job. `--stop-on-failure` stops instead. |
-| The job's repo has uncommitted changes | The job is skipped as `blocked: dirty_tree`. The harness never commits, so a second job on the same checkout is always blocked. Give each job its own checkout. |
+| The job's repo has uncommitted changes | The job is skipped as `blocked: dirty_tree`. The harness never commits, so a second job on the same checkout is blocked whenever an earlier job left changes there. Jobs that edit code need their own checkout; jobs that change nothing (a review-only graph) can share one. |
 | The process is killed or the machine reboots | Run the same command again. Jobs already `done` are skipped; every other job is tried again. A job that had already changed its repo is then `blocked: dirty_tree`: review that checkout, commit or restore it, and run the command once more. A `done` job is skipped only while its entry in the queue file is unchanged (same position, goal, repo, name, config and profile). |
 | Two queues use the same `--out` | The second one stops with an error. A lock file (`queue.lock`) allows one queue per `--out`; the lock is released when the process ends, even after a crash. |
 

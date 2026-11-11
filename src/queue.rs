@@ -78,14 +78,19 @@ pub fn read_queue_file(path: &Path) -> Result<QueueFile, Error> {
             ConfigError::new(location, format!("job {} has an empty repo", index + 1)).into(),
         );
     }
-    // Relative paths resolve against the queue file's directory and are
-    // stored absolute, so the same file names the same checkouts from any
-    // working directory (launchd starts in `/`).
+    // Relative paths resolve against the queue file's directory, so the same
+    // file names the same checkouts from any working directory (launchd
+    // starts in `/`). Symlinks are resolved, so a link re-pointed at another
+    // checkout is a different job; a path that does not exist yet stays
+    // absolute and its job fails on its own.
     let base = path.parent().unwrap_or_else(|| Path::new(""));
     let absolute = |relative: &Path| {
-        std::path::absolute(base.join(relative)).map_err(|error| {
-            ConfigError::new(location.clone(), format!("{}: {error}", relative.display()))
-        })
+        let joined = base.join(relative);
+        std::fs::canonicalize(&joined)
+            .or_else(|_| std::path::absolute(&joined))
+            .map_err(|error| {
+                ConfigError::new(location.clone(), format!("{}: {error}", relative.display()))
+            })
     };
     for job in &mut queue.jobs {
         job.repo = absolute(&job.repo)?;
@@ -193,7 +198,8 @@ pub async fn run_queue<H: JobHost>(
     std::fs::create_dir_all(out).map_err(|error| io_error("create", out, &error))?;
     // Held until this function returns; the OS drops it if the process dies.
     let _lock = lock(out).await?;
-    let out_absolute = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
+    // Resolved like the job repos, so the two can be compared.
+    let out_absolute = std::fs::canonicalize(out).unwrap_or_else(|_| out.to_path_buf());
     let previous = load_state(out)?;
     let mut state = QueueState {
         jobs: jobs
@@ -611,10 +617,12 @@ mod tests {
     #[tokio::test]
     async fn dirty_repo_that_contains_out_says_so() {
         let repo = tempfile::tempdir().expect("tempdir");
+        // Job repos arrive with symlinks resolved (see `read_queue_file`).
+        let repo_path = repo.path().canonicalize().expect("canonical");
         let out = repo.path().join("artifacts");
         let host = host(&out, &[]);
-        host.dirty.borrow_mut().insert(repo.path().to_path_buf());
-        let jobs = [job("one", &repo.path().display().to_string())];
+        host.dirty.borrow_mut().insert(repo_path.clone());
+        let jobs = [job("one", &repo_path.display().to_string())];
         let state = run_queue(&host, &jobs, &out, false).await.expect("queue");
         let reason = state.jobs[0].reason.as_deref().expect("reason");
         assert!(reason.starts_with(DIRTY_TREE), "{reason}");
@@ -678,6 +686,29 @@ mod tests {
         }
         let missing = read_queue_file(&dir.path().join("nope.toml")).expect_err("missing file");
         assert!(missing.to_string().contains("nope.toml"), "{missing}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repointed_symlink_is_a_different_job() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["a", "b"] {
+            std::fs::create_dir(dir.path().join(name)).expect("mkdir");
+        }
+        let link = dir.path().join("current");
+        let path = dir.path().join("goals.toml");
+        std::fs::write(&path, "[[jobs]]\ngoal = \"one\"\nrepo = \"current\"\n").expect("write");
+
+        std::os::unix::fs::symlink(dir.path().join("a"), &link).expect("symlink");
+        let first = read_queue_file(&path).expect("parses").jobs.remove(0);
+        std::fs::remove_file(&link).expect("unlink");
+        std::os::unix::fs::symlink(dir.path().join("b"), &link).expect("symlink");
+        let second = read_queue_file(&path).expect("parses").jobs.remove(0);
+
+        assert!(first.repo.ends_with("a"), "{:?}", first.repo);
+        assert!(second.repo.ends_with("b"), "{:?}", second.repo);
+        // `run_queue` skips a done job only when the whole job is equal.
+        assert_ne!(first, second);
     }
 
     #[test]
