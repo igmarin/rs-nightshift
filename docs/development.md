@@ -78,7 +78,7 @@ Pull requests are reviewed by
 medium effort, the same setup as Ludavela) using
 [`.github/review-prompt.md`](../.github/review-prompt.md) from the base branch as
 background. Findings post inline as `github-actions[bot]`. The workflow needs the
-`OPENAI_API_KEY` repository secret. It runs once per PR (on open and on
+`OPENAI_API_KEY` repository secret. It runs once per PR (on open, reopen and
 ready-for-review), not on every push. After pushing fixes, review the new head
 by toggling the PR to draft and back: `gh pr ready --undo && gh pr ready`.
 Re-running the old job from the Actions tab reviews the old commit, so it does
