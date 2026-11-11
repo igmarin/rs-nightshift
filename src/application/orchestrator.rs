@@ -106,6 +106,7 @@ where
                 verdict: None,
                 artifact: None,
                 block_reason: BlockReason::None,
+                detail: None,
             },
         )?;
 
@@ -128,6 +129,22 @@ where
                 return Err(error);
             }
         };
+        let on_retry = |attempt: u32, error: &Error| {
+            state.append_action(
+                request.run,
+                &ActionEvent {
+                    ts: clock.now_iso(),
+                    event: EventKind::Retry,
+                    role: current.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    verdict: None,
+                    artifact: None,
+                    block_reason: BlockReason::None,
+                    detail: Some(format!("attempt {attempt} rejected: {error}")),
+                },
+            )
+        };
         let outcome = match executor::execute(
             client.as_ref(),
             store,
@@ -139,6 +156,7 @@ where
                 role,
                 context: &context,
                 artifacts: &artifacts,
+                on_retry: &on_retry,
             },
         )
         .await
@@ -178,6 +196,7 @@ where
                 verdict: Some(outcome.output.verdict),
                 artifact: outcome.artifact.clone(),
                 block_reason: outcome.output.block_reason,
+                detail: None,
             },
         )?;
         state.write_snapshot(
@@ -206,6 +225,7 @@ where
                         verdict: Some(outcome.output.verdict),
                         artifact: outcome.artifact,
                         block_reason: reason,
+                        detail: None,
                     },
                 )?;
                 state.write_snapshot(
@@ -260,6 +280,7 @@ where
                         verdict: None,
                         artifact: None,
                         block_reason: BlockReason::None,
+                        detail: None,
                     },
                 )?;
                 context = RoleContext {
@@ -377,6 +398,7 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
             verdict: None,
             artifact: None,
             block_reason: reason,
+            detail: None,
         },
     )?;
     state.write_snapshot(
@@ -420,6 +442,7 @@ fn record_failure<S: StateStore, K: Clock>(
             verdict: None,
             artifact: None,
             block_reason: reason,
+            detail: None,
         },
     )?;
     state.write_snapshot(
@@ -821,5 +844,50 @@ model = "phi4"
         let fail = events.iter().find(|e| e.event == EventKind::Fail);
         assert!(fail.is_some(), "actions should contain a Fail event");
         assert_eq!(fail.unwrap().role, "po");
+    }
+    #[tokio::test]
+    async fn rejected_reply_is_retried_and_logged() {
+        let cfg = config(
+            r#"
+[run]
+start = "po"
+[[roles]]
+id = "po"
+provider = "ollama"
+model = "phi4"
+"#,
+        );
+        let factory = QueueFactory::new();
+        factory.push("not json");
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let state = MemoryStateStore::default();
+        let result = run_graph(
+            &factory,
+            &MemoryArtifactStore::default(),
+            &state,
+            &clock(),
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &RunRequest {
+                run: Path::new("/tmp/run/x"),
+                repo: Path::new("/repo"),
+                config: &cfg,
+                goal: "goal",
+            },
+        )
+        .await
+        .expect("run");
+        assert_eq!(result.status, RunStatus::Done);
+        assert_eq!(result.steps, 1, "a retry is the same step");
+        let events = state.events();
+        let retries: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == EventKind::Retry)
+            .collect();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].role, "po");
+        let detail = retries[0].detail.as_deref().expect("detail");
+        assert!(detail.starts_with("attempt 1 rejected: "), "{detail}");
+        assert!(detail.contains("JSON"), "{detail}");
     }
 }

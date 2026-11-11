@@ -140,6 +140,9 @@ max_loop  = 3
   `done` and `fail` are implicit terminals and need no `on` entry.
 - `max_loop` caps how many times a *back-edge* (`issues`/`questions` to an
   earlier role) may fire for that role. Default 3.
+- `retries` is how many extra attempts a role gets when its reply is rejected
+  (invalid envelope, failed edit tool) or the provider request fails.
+  Default 2; see [configuration](configuration.md#per-role-retries).
 - `options` is a provider/model-specific passthrough (temperature,
   think/reasoning, max_tokens, num_ctx, …) — never hardcoded.
 
@@ -218,9 +221,9 @@ used as argv).
   loop counters, total steps, last verdict, status (`running|done|blocked|failed`),
   `block_reason`.
 - `artifacts/latest/actions.jsonl` — append-only, one JSON object per action:
-  `{ts, event, role, provider, model, verdict, artifact, block_reason}`.
-  Events: `role_start`, `llm_call`, `tool_call`, `role_end`, `loop`, `halt`,
-  `done`, `fail`.
+  `{ts, event, role, provider, model, verdict, artifact, block_reason, detail}`.
+  Events: `role_start`, `llm_call`, `tool_call`, `retry`, `role_end`, `loop`,
+  `halt`, `done`, `fail`.
 - Context injection: each role's prompt gets the goal, the prior artifacts (or
   their summaries), and the last N action-log entries as run memory.
 

@@ -128,6 +128,7 @@ mod tests {
             verdict: None,
             artifact: None,
             block_reason: BlockReason::None,
+            detail: None,
         }
     }
 

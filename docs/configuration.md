@@ -226,6 +226,32 @@ timeout_secs = 3600  # 60 min — large-file generation on CPU
 Do not put the timeout only in `options`; it is a first-class field so the
 harness can bound the generate call, not a provider sampling knob.
 
+## Per-role retries
+
+A role gets `retries = 2` by default: up to two more attempts when its reply
+is rejected. Set `retries = 0` to fail on the first slip, or raise it for a
+flaky model.
+
+```toml
+[[roles]]
+id = "developer"
+retries = 3
+```
+
+| What failed | Retried? | Next prompt |
+| :--- | :--- | :--- |
+| Reply is not a valid JSON envelope | yes | same prompt plus `Your previous reply was rejected: <error>` |
+| `apply-patch`, `write-file` or `search-replace` failed | yes | same prompt plus the tool's error |
+| Provider request failed (connection reset, HTTP error) | yes | same prompt |
+| Timeout | no | on a slow machine the same prompt times out again |
+| Model not found, config error | no | |
+
+A retry is part of the same step, so it does not count against `max_steps`
+or `max_loop`. Each one adds a `retry` event to `actions.jsonl` with the
+attempt number and the reason. Each rejected reply is kept in the run
+directory as `raw_response_<role>_<attempt>.txt`. When the last attempt
+fails, the run fails as before.
+
 ## Role tools
 
 Each `[[roles]]` block may declare `tools = [...]`. Models return text plus a

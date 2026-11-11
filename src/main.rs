@@ -266,6 +266,10 @@ async fn real_main() -> anyhow::Result<()> {
                     role: entry,
                     context: &ctx,
                     artifacts: &[],
+                    on_retry: &|attempt, error| {
+                        eprintln!("attempt {attempt} rejected, retrying: {error}");
+                        Ok(())
+                    },
                 };
                 let outcome =
                     execute(client.as_ref(), &store, &tools, &context_provider, &params).await?;
