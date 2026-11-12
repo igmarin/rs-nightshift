@@ -11,7 +11,7 @@ Three things differ from a Linux server:
 | :--- | :--- |
 | No systemd | A launchd user agent: [`contrib/dev.nightshift.queue.plist`](../contrib/dev.nightshift.queue.plist) |
 | The Mac sleeps when idle | The agent runs the queue under `caffeinate -i` |
-| The model server must be up first | Start it yourself, or load [`contrib/dev.nightshift.model-server.plist`](../contrib/dev.nightshift.model-server.plist) |
+| The model server must be up first | Start it yourself, or load [`contrib/dev.nightshift.model-server.plist`](../contrib/dev.nightshift.model-server.plist). The queue agent waits for it. |
 
 ## 1. Lay out the files
 
@@ -25,11 +25,12 @@ The sample agent expects this layout. Any layout works if you edit the paths.
 ```
 
 ```text
-mkdir -p ~/nightshift/artifacts
+mkdir -p ~/nightshift/artifacts ~/Library/LaunchAgents
 ```
 
 The `artifacts` directory must exist before the agent is loaded, because
-launchd opens the log file there. Keep it outside the repos the jobs edit
+launchd opens the log file there. `~/Library/LaunchAgents` is where the agent
+files go; a new user account may not have it yet. Keep it outside the repos the jobs edit
 (see [Goal queue](configuration.md#goal-queue-nightshift-queue)).
 
 ## 2. Start the model server
@@ -81,9 +82,16 @@ sed "s|/Users/YOU|$HOME|g" contrib/dev.nightshift.queue.plist \
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.nightshift.queue.plist
 ```
 
-`bootstrap` loads the agent and starts the queue at once. You can close the
-terminal. To pick a machine profile, add `--profile NAME` to the arguments in
-the file, or set `profile` per job in the queue file.
+`bootstrap` loads the agent and starts it at once. You can close the
+terminal. To pick a machine profile, add `--profile NAME` to the
+`nightshift queue` line in the file, or set `profile` per job in the queue
+file.
+
+The agent first waits for the model server: it polls
+`http://127.0.0.1:8000/v1/models` every 5 seconds, for up to 10 minutes. This
+matters at login, when launchd starts both agents in no fixed order. If your
+server uses another port, change `url=` in the file. After 10 minutes the
+queue starts anyway, so the failure appears in the log and the report.
 
 | Task | Command |
 | :--- | :--- |

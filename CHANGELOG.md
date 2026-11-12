@@ -7,7 +7,8 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - macOS unattended runs: `contrib/dev.nightshift.queue.plist` (a launchd
-  agent that runs a goal queue under `caffeinate -i`),
+  agent that waits for the model server, then runs a goal queue under
+  `caffeinate -i`),
   `contrib/dev.nightshift.model-server.plist` (keeps a local model server
   up), and `docs/macos.md`. `nightshift doctor` adds a non-blocking
   `caffeinate` check on macOS (#112).

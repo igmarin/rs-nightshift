@@ -12,19 +12,31 @@
   <key>Label</key>
   <string>dev.nightshift.queue</string>
 
-  <!-- caffeinate -i holds off idle sleep for as long as the queue runs. -->
+  <!-- caffeinate -i holds off idle sleep for as long as the script runs.
+       The script waits for the model server (up to 10 minutes, then starts
+       anyway so the failure is recorded in the queue report), because
+       launchd starts both agents at login in no fixed order. The URL must
+       match base_url in the nightshift config. -->
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/caffeinate</string>
     <string>-i</string>
-    <string>/Users/YOU/.cargo/bin/nightshift</string>
-    <string>queue</string>
-    <string>--file</string>
-    <string>/Users/YOU/nightshift/goals.toml</string>
-    <string>--config</string>
-    <string>/Users/YOU/nightshift/nightshift.toml</string>
-    <string>--out</string>
-    <string>/Users/YOU/nightshift/artifacts</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>
+url=http://127.0.0.1:8000/v1/models
+i=0
+until /usr/bin/curl -sf -o /dev/null "$url"; do
+  if [ "$i" -eq 0 ]; then echo "waiting for the model server at $url"; fi
+  i=$((i + 1))
+  if [ "$i" -ge 120 ]; then echo "model server not ready after 10 minutes; starting anyway"; break; fi
+  sleep 5
+done
+exec "/Users/YOU/.cargo/bin/nightshift" queue \
+  --file "/Users/YOU/nightshift/goals.toml" \
+  --config "/Users/YOU/nightshift/nightshift.toml" \
+  --out "/Users/YOU/nightshift/artifacts"
+    </string>
   </array>
 
   <!-- launchd starts jobs with PATH=/usr/bin:/bin:/usr/sbin:/sbin. List every
