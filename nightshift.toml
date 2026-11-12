@@ -87,3 +87,7 @@ If there are issues, report them. If all good, mark as done.
 output = "03_qa_report.json"
 on = { issues = "developer" }
 max_loop = 3
+
+# Read by `run-tests` when a job edits this repo: format, lint and test.
+[test]
+command = "sh scripts/job-check.sh"
