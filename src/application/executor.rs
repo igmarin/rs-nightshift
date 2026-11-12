@@ -605,91 +605,70 @@ fn find_matching_think_close(bytes: &[u8]) -> Option<(usize, usize)> {
 /// object is returned as it is, valid or not, and the caller attempts
 /// value-level repair and reports why it failed.
 ///
-/// Otherwise the model wrote prose or a code listing first, and that text
-/// can have braces and example envelopes of its own. The envelope is then
-/// the last balanced object, not nested in another balanced object, that
-/// mentions `"verdict"`: an explanation comes before the answer. It must be
-/// JSON with a valid verdict, or the reply is rejected. An earlier example
-/// never stands in for a damaged answer, and nothing is taken from inside a
-/// larger object.
+/// Any other reply opens with prose or code; see [`envelope_after_prose`].
 fn extract_balanced_object(text: &str) -> Result<String, Error> {
     let no_object = || invalid_envelope("model did not return a JSON object");
-    let chars: Vec<char> = text.chars().collect();
     if text.trim_start().starts_with('{') {
+        let chars: Vec<char> = text.chars().collect();
         let first = chars.iter().position(|&c| c == '{').ok_or_else(no_object)?;
         let last = balanced_end(&chars, first).ok_or_else(no_object)?;
         return Ok(chars[first..=last].iter().collect());
     }
-    // A `"` in the prose is read both ways: as the start of a string (so a
-    // literal like "{" opens nothing), then as plain text (so a lone `"` does
-    // not hide the envelope). Either reading must end in a valid answer.
-    [true, false]
-        .into_iter()
-        .find_map(|quotes_in_prose| {
-            outermost_balanced_spans(&chars, quotes_in_prose)
-                .into_iter()
-                .rev()
-                .map(|(first, last)| chars[first..=last].iter().collect::<String>())
-                .find(|candidate| mentions_verdict(candidate))
-                .filter(|candidate| has_valid_verdict(candidate))
-        })
-        .ok_or_else(no_object)
+    envelope_after_prose(text).ok_or_else(no_object)
 }
 
-/// `candidate` is meant as an answer: valid JSON with a top-level `verdict`
-/// key, or damaged JSON that has the text `"verdict"` anywhere.
-fn mentions_verdict(candidate: &str) -> bool {
-    match serde_json::from_str::<serde_json::Value>(candidate) {
-        Ok(value) => value.get("verdict").is_some(),
-        Err(_) => candidate.contains("\"verdict\""),
-    }
-}
-
-/// `candidate` is a JSON object whose `verdict` is one of the known verdicts.
-fn has_valid_verdict(candidate: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(candidate)
-        .ok()
-        .and_then(|value| value.get("verdict").cloned())
-        .is_some_and(|verdict| serde_json::from_value::<Verdict>(verdict).is_ok())
-}
-
-/// Every balanced `{…}` in `chars` that is not inside another balanced
-/// `{…}`, as inclusive `(first, last)` index pairs in order. One pass: a `{`
-/// that is never closed and a `}` with nothing open are plain text. Braces
-/// inside string literals are skipped; outside every object a `"` starts a
-/// string only when `quotes_in_prose` is set.
-fn outermost_balanced_spans(chars: &[char], quotes_in_prose: bool) -> Vec<(usize, usize)> {
-    let mut open: Vec<usize> = Vec::new();
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &c) in chars.iter().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
+/// The envelope in a reply that opens with prose or a code listing, which
+/// can hold braces and example envelopes of its own. `None` rejects the
+/// reply, and every doubtful case is `None`: a retry is cheap, acting on the
+/// wrong object is not.
+///
+/// - A `{` not followed by a `"key":` is text (code braces, `{}`, a Rust
+///   block that holds a string).
+/// - A `{` followed by a `"key":` opens a JSON object. It must read as one
+///   JSON value, or the reply is rejected: a damaged object may be the
+///   answer, or may enclose it.
+/// - The inside of an object that was read is not searched.
+/// - The answer is the last object read, since an explanation and its
+///   examples come first. It must have a known verdict, and no brace may
+///   follow it: plain prose after the answer is fine, anything that could be
+///   another object is not.
+fn envelope_after_prose(text: &str) -> Option<String> {
+    let mut last: Option<(usize, usize, serde_json::Value)> = None;
+    for (start, _) in text.match_indices('{') {
+        let read_until = last.as_ref().map_or(0, |&(_, end, _)| end);
+        if start < read_until || !opens_json_object(&text[start + 1..]) {
             continue;
         }
+        let mut values =
+            serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+        let value = values.next()?.ok()?;
+        last = Some((start, start + values.byte_offset(), value));
+    }
+    let (start, end, value) = last?;
+    let known_verdict = value
+        .get("verdict")
+        .is_some_and(|verdict| serde_json::from_value::<Verdict>(verdict.clone()).is_ok());
+    let braces_after = text[end..].contains(['{', '}']);
+    (known_verdict && !braces_after).then(|| text[start..end].to_string())
+}
+
+/// `rest`, the text after a `{`, begins a JSON object: a `"key"` on one line
+/// and then a `:`. Code such as `=> { "text" }` has the quote but no colon.
+fn opens_json_object(rest: &str) -> bool {
+    let Some(key) = rest.trim_start().strip_prefix('"') else {
+        return false;
+    };
+    let mut escaped = false;
+    for (i, c) in key.char_indices() {
         match c {
-            '"' if quotes_in_prose || !open.is_empty() => in_string = true,
-            '{' => open.push(i),
-            '}' => {
-                if let Some(first) = open.pop() {
-                    // Spans closed earlier that start after `first` are inside it.
-                    while spans.last().is_some_and(|&(start, _)| start > first) {
-                        spans.pop();
-                    }
-                    spans.push((first, i));
-                }
-            }
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return key[i + 1..].trim_start().starts_with(':'),
+            '\n' => return false,
             _ => {}
         }
     }
-    spans
+    false
 }
 
 /// Index of the `}` that closes the `{` at `start`, tracking brace depth and
@@ -2071,7 +2050,8 @@ mod tests {
         let reply = concat!(
             "I will add the line and two tests.\n\n```rust\n",
             "use crate::state::{ActionEvent, EventKind};\n",
-            "fn render() -> String { format!(\"{report}\") }\n```\n\n",
+            "fn render() -> String { format!(\"{report}\") }\n",
+            "fn label() -> &'static str {\n    \"a string in a block\"\n}\n```\n\n",
             "```json\n",
             "{\"verdict\":\"continue\",\"content\":\"file: a.rs\\nfn a() {}\"}\n```"
         );
@@ -2081,10 +2061,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_finds_the_envelope_after_thousands_of_braces() {
-        // No cap on how far the envelope may be: 5,000 unmatched braces first.
+    fn parse_finds_the_envelope_after_thousands_of_braces_and_a_lone_quote() {
+        // No cap on how far the envelope may be, and a lone `"` in the prose
+        // (a 27" screen, a Rust char literal '"') does not hide it.
         let reply = format!(
-            "{}{}",
+            "On a 27\" screen: {}{}",
             "if x { ".repeat(5_000),
             r#"{"verdict":"done","content":"ok"}"#
         );
@@ -2094,13 +2075,13 @@ mod tests {
 
     #[test]
     fn parse_takes_the_last_envelope_after_prose_with_examples() {
-        // Example envelopes come before the answer; braces without a
-        // verdict come after it.
+        // Before the answer: an example envelope, one with an unknown
+        // verdict, and an object with a nested verdict. After it: plain prose.
         let reply = concat!(
             "The format is {\"verdict\":\"done\",\"content\":\"example\"}, ",
-            "never {\"verdict\":\"pending\"}.\n",
+            "never {\"verdict\":\"pending\"} or {\"note\": {\"verdict\": \"fail\"}}.\n",
             "{\"verdict\":\"continue\",\"content\":\"real\"}\n",
-            "That replaces fn a() { b() }."
+            "That is the whole change."
         );
         let output = parse_role_output(reply).expect("last envelope");
         assert_eq!(output.verdict, Verdict::Continue);
@@ -2108,81 +2089,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_ignores_a_later_object_that_only_quotes_the_word_verdict() {
-        let reply = concat!(
-            "Result:\n{\"verdict\":\"done\",\"content\":\"ok\"}\n",
-            "{\"note\":\"the key \\\"verdict\\\" is required\"}"
-        );
-        let output = parse_role_output(reply).expect("envelope before the note");
-        assert_eq!(output.verdict, Verdict::Done);
-    }
-
-    #[test]
-    fn parse_finds_the_envelope_after_a_lone_quote_in_prose() {
-        // A 27" screen, or a Rust char literal '"', must not hide the answer.
-        let reply = "On a 27\" screen: if c == '{' {\n{\"verdict\":\"done\",\"content\":\"ok\"}";
-        let output = parse_role_output(reply).expect("envelope after a lone quote");
-        assert_eq!(output.verdict, Verdict::Done);
-        // A string literal holding a brace is read as a string, as before.
-        let reply = "Call push(\"{\") first.\n{\"verdict\":\"done\",\"content\":\"ok\"}";
-        let output = parse_role_output(reply).expect("envelope after a brace literal");
-        assert_eq!(output.verdict, Verdict::Done);
-    }
-
-    #[test]
-    fn parse_rejects_a_damaged_answer_after_a_valid_example() {
-        // The last object that mentions a verdict is the answer. When it is
-        // damaged or its verdict is unknown, the earlier example must not be
-        // used in its place.
-        for answer in [
-            r#"{"verdict":"continue","content":"real", oops}"#,
-            r#"{"verdict":"pending","content":"real"}"#,
+    fn parse_rejects_a_prose_reply_whose_answer_is_in_doubt() {
+        // Every reply starts with a valid example, which must never be used
+        // in place of the answer.
+        let example = r#"Like {"verdict":"done","content":"example"}:"#;
+        for (case, rest) in [
+            ("code braces, no answer", "use a::{B, C}; fn x() { y() }"),
+            (
+                "damaged answer",
+                r#"{"verdict":"continue","content":"real", oops}"#,
+            ),
+            (
+                "unknown verdict",
+                r#"{"verdict":"pending","content":"real"}"#,
+            ),
+            (
+                "unterminated answer",
+                r#"{"verdict":"continue","content":"re"#,
+            ),
+            (
+                "envelope nested in a damaged object",
+                r#"{"verdict":"continue","content":"real", broken: {"verdict":"done"}}"#,
+            ),
+            (
+                "envelope nested in an unclosed object",
+                r#"{"broken": {"verdict":"done","content":"x"}"#,
+            ),
+            (
+                "code braces after the answer",
+                r#"{"verdict":"continue","content":"real"} fn a() { b() }"#,
+            ),
+            (
+                "another object after the answer",
+                r#"{"verdict":"continue","content":"real"} {"note":"x"}"#,
+            ),
         ] {
-            let reply = format!("Like {{\"verdict\":\"done\",\"content\":\"example\"}}:\n{answer}");
-            let error = parse_role_output(&reply).expect_err("damaged answer");
+            let error = parse_role_output(&format!("{example}\n{rest}")).expect_err(case);
             assert!(
                 error.to_string().contains("did not return a JSON object"),
-                "{answer}: {error}"
+                "{case}: {error}"
             );
         }
-    }
-
-    #[test]
-    fn parse_rejects_an_envelope_nested_in_a_damaged_one() {
-        // The outer object is not valid JSON; the object inside it must not
-        // be taken for the reply.
-        let reply = concat!(
-            "Answer: {\"verdict\":\"continue\",\"content\":\"real patch\", ",
-            "broken: {\"verdict\":\"done\",\"content\":\"example\"}}"
-        );
-        let error = parse_role_output(reply).expect_err("nested envelope");
-        assert!(
-            error.to_string().contains("did not return a JSON object"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn parse_skips_a_json_object_that_is_not_an_envelope() {
-        // The first object is valid JSON without a top-level verdict; its
-        // nested "verdict" must not be taken for the reply.
-        let reply = concat!(
-            "Example: {\"note\": {\"verdict\": \"fail\"}}\n",
-            "{\"verdict\":\"done\",\"content\":\"ok\"}"
-        );
-        let output = parse_role_output(reply).expect("second object");
-        assert_eq!(output.verdict, Verdict::Done);
-        assert_eq!(output.content, "ok");
-    }
-
-    #[test]
-    fn parse_rejects_prose_with_braces_and_no_envelope() {
-        let error = parse_role_output("I'll fix it: use a::{B, C}; fn x() { y() }")
-            .expect_err("no envelope");
-        assert!(
-            error.to_string().contains("did not return a JSON object"),
-            "{error}"
-        );
     }
 
     #[test]
