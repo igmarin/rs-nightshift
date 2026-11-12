@@ -197,7 +197,8 @@ used as argv).
 
 - `apply-patch` — `git apply --check` first, validate patch paths stay in the
   repo, dirty-tree guard, then apply.
-- `write-file` — write `content` starting with `file: <path>` as the full file.
+- `write-file` — write `content` starting with `file: <path>` as the full file;
+  creates the file and its directories when they do not exist.
 - `search-replace` — exact `old:` / `new:` replacements in existing files.
   Unique match required; not-found and ambiguous matches are errors. Never
   creates files, never commits.

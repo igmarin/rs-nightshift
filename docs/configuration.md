@@ -321,7 +321,7 @@ config load.
 | `gather-context` | Before the LLM call | Injects codegraph/graphify context (and optional `context_files`) into the prompt |
 | `run-tests` | Before the LLM call | Runs the detected test command and injects the results |
 | `apply-patch` | After `continue` / `done` | Applies the role's `content` as a unified diff (`git apply --check`, then apply) |
-| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the full file |
+| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the full file. Creates the file and its directories when they do not exist. One file per reply. |
 | `search-replace` | After `continue` / `done` | Replaces unique `old:` snippets with `new:` text in existing files |
 
 ### search-replace
