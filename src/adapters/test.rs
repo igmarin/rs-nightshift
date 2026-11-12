@@ -3,10 +3,19 @@
 use crate::error::{ArtifactError, Error};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Default per-run test timeout.
 pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Most bytes kept from one output stream. The rest is read and dropped, so
+/// a command that prints without end cannot use up memory.
+const MAX_STREAM_BYTES: usize = 1024 * 1024;
+
+/// Added to a stream that was longer than [`MAX_STREAM_BYTES`].
+const TRUNCATED_NOTE: &str = "\n[output truncated]\n";
 
 /// Captured test invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,28 +71,28 @@ impl TestRunner for ProcessTestRunner {
                     "failed to spawn test command: {e}"
                 )))
             })?;
+        // Read both pipes while the command runs. A pipe holds about 64 KB;
+        // a command that prints more blocks until someone reads it.
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers = drain(child.stdout.take(), &stop)
+            .and_then(|stdout| Ok((stdout, drain(child.stderr.take(), &stop)?)));
+        let (stdout, stderr) = match readers {
+            Ok(readers) => readers,
+            Err(error) => {
+                stop.store(true, Ordering::Relaxed);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::from(ArtifactError::artifact(format!(
+                    "failed to read the test command's output: {error}"
+                ))));
+            }
+        };
         let start = Instant::now();
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let stdout = child
-                        .stdout
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-                            buf
-                        })
-                        .unwrap_or_default();
-                    let stderr = child
-                        .stderr
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-                            buf
-                        })
-                        .unwrap_or_default();
+                    let stdout = stdout.join().unwrap_or_default();
+                    let stderr = stderr.join().unwrap_or_default();
                     let mut output = String::from_utf8_lossy(&stdout).into_owned();
                     if !stderr.is_empty() {
                         if !output.is_empty() {
@@ -98,6 +107,10 @@ impl TestRunner for ProcessTestRunner {
                     });
                 }
                 Ok(None) if start.elapsed() >= self.timeout => {
+                    // The readers stop at their next chunk and close the
+                    // pipes, so a process the command left behind fails on
+                    // its next write instead of being read forever.
+                    stop.store(true, Ordering::Relaxed);
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(Error::from(ArtifactError::artifact(
@@ -105,10 +118,47 @@ impl TestRunner for ProcessTestRunner {
                     )));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(error.into());
+                }
             }
         }
     }
+}
+
+/// Read a child's pipe on its own thread, until its end or until `stop` is
+/// set. Keeps at most [`MAX_STREAM_BYTES`].
+fn drain<R>(
+    pipe: Option<R>,
+    stop: &Arc<AtomicBool>,
+) -> std::io::Result<std::thread::JoinHandle<Vec<u8>>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    let stop = Arc::clone(stop);
+    std::thread::Builder::new().spawn(move || {
+        let mut kept = Vec::new();
+        let Some(mut pipe) = pipe else { return kept };
+        let mut truncated = false;
+        let mut chunk = [0_u8; 8192];
+        while !stop.load(Ordering::Relaxed) {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let room = MAX_STREAM_BYTES - kept.len();
+                    kept.extend_from_slice(&chunk[..read.min(room)]);
+                    truncated |= read > room;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        if truncated {
+            kept.extend_from_slice(TRUNCATED_NOTE.as_bytes());
+        }
+        kept
+    })
 }
 
 /// Resolve argv from `nightshift.toml` or a repo heuristic. Never from a model.
@@ -294,6 +344,66 @@ mod tests {
         let out = runner.run(tmp.path(), &["false".into()]).expect("run");
         assert_ne!(out.exit_code, 0);
         assert_eq!(out.command, ["false"]);
+    }
+
+    #[test]
+    fn process_runner_reads_output_larger_than_a_pipe() {
+        // A pipe holds about 64 KB. A command that prints more must not block.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let runner = ProcessTestRunner::new(Duration::from_secs(10));
+        let script = "head -c 200000 /dev/zero; head -c 200000 /dev/zero >&2";
+        let out = runner
+            .run(tmp.path(), &["sh".into(), "-c".into(), script.into()])
+            .expect("run");
+        assert_eq!(out.exit_code, 0);
+        // 200 000 bytes from each stream, plus the newline between them.
+        assert_eq!(out.output.len(), 400_001);
+    }
+
+    #[test]
+    fn process_runner_keeps_a_bounded_part_of_endless_output() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let runner = ProcessTestRunner::new(Duration::from_secs(10));
+        let out = runner
+            .run(
+                tmp.path(),
+                &[
+                    "head".into(),
+                    "-c".into(),
+                    "3000000".into(),
+                    "/dev/zero".into(),
+                ],
+            )
+            .expect("run");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.output.len(), MAX_STREAM_BYTES + TRUNCATED_NOTE.len());
+        assert!(out.output.ends_with(TRUNCATED_NOTE));
+    }
+
+    #[test]
+    fn process_runner_stops_reading_a_leftover_process_after_a_timeout() {
+        // The command leaves a background loop that prints forever. After the
+        // timeout nobody reads the pipe, so the loop fails on a write and ends.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let script = "(while :; do echo x; sleep 0.05; done) & echo $! > pid; wait";
+        let runner = ProcessTestRunner::new(Duration::from_millis(300));
+        runner
+            .run(tmp.path(), &["sh".into(), "-c".into(), script.into()])
+            .expect_err("timeout");
+        let pid = std::fs::read_to_string(tmp.path().join("pid")).expect("pid");
+        let alive = || {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .expect("kill -0")
+                .success()
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "the leftover process {} still runs", pid.trim());
     }
 
     #[test]
