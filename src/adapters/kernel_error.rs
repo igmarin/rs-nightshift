@@ -45,6 +45,22 @@ pub fn complete_text(response: llm_kernel::llm::LLMResponse) -> Result<String, P
     }
 }
 
+/// Extract token usage from an [`llm_kernel::llm::LLMResponse`].
+///
+/// Returns `None` when both `prompt_tokens` and `completion_tokens` are zero
+/// (the kernel fills zeros when the server sends no usage information),
+/// otherwise returns `Some` with the reported counts.
+pub fn usage(response: &llm_kernel::llm::LLMResponse) -> Option<crate::ports::Usage> {
+    if response.usage.prompt_tokens == 0 && response.usage.completion_tokens == 0 {
+        None
+    } else {
+        Some(crate::ports::Usage {
+            prompt_tokens: response.usage.prompt_tokens,
+            completion_tokens: response.usage.completion_tokens,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +116,37 @@ mod tests {
             assert!(error.to_string().contains("cut off"), "{error}");
             assert!(!error.to_string().contains("half a rep"), "{error}");
         }
+    }
+
+    #[test]
+    fn usage_returns_none_when_both_token_counts_are_zero() {
+        let response = llm_kernel::llm::LLMResponse {
+            content: "hello".into(),
+            usage: llm_kernel::llm::TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(usage(&response).is_none());
+    }
+
+    #[test]
+    fn usage_returns_some_when_token_counts_are_nonzero() {
+        let response = llm_kernel::llm::LLMResponse {
+            content: "hello".into(),
+            usage: llm_kernel::llm::TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                total_tokens: 30,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let u = usage(&response).expect("usage");
+        assert_eq!(u.prompt_tokens, 10);
+        assert_eq!(u.completion_tokens, 20);
     }
 }

@@ -36,6 +36,15 @@ pub struct GenerateRequest {
     pub timeout: Option<Duration>,
 }
 
+/// Token usage counts reported by the model server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    /// Number of tokens in the prompt.
+    pub prompt_tokens: u32,
+    /// Number of tokens in the completion.
+    pub completion_tokens: u32,
+}
+
 /// Generates text for one role call.
 ///
 /// Adapters (for example an `llm-kernel` wrapper) implement this trait; the
@@ -44,6 +53,16 @@ pub struct GenerateRequest {
 pub trait ModelClient: Send + Sync {
     /// Run one completion and return the model's text.
     async fn generate(&self, request: &GenerateRequest) -> Result<String, Error>;
+
+    /// Like [`Self::generate`], plus the token counts when the server reports them.
+    ///
+    /// The default implementation calls [`Self::generate`] and reports no usage.
+    async fn generate_with_usage(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<(String, Option<Usage>), Error> {
+        Ok((self.generate(request).await?, None))
+    }
 
     /// Redacted origin for run-log context, or `None` to omit the line.
     fn redacted_origin(&self) -> Option<String> {
