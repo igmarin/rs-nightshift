@@ -79,6 +79,13 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
         format!("Status: {}", status_label(snapshot.status)),
         format!("Steps: {}", snapshot.steps),
     ];
+    let retry_count = events
+        .iter()
+        .filter(|event| event.event == EventKind::Retry)
+        .count();
+    if retry_count > 0 {
+        lines.push(format!("Retries: {}", retry_count));
+    }
     if snapshot.status != RunStatus::Done {
         lines.push(format!(
             "Block reason: {}",
@@ -435,5 +442,52 @@ mod tests {
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
         assert!(!report.contains("Time per role"), "{report}");
+    }
+
+    #[test]
+    fn report_shows_retry_count() {
+        let events = vec![
+            ActionEvent {
+                ts: "t".into(),
+                event: EventKind::Retry,
+                role: "dev".into(),
+                provider: String::new(),
+                model: String::new(),
+                verdict: None,
+                artifact: None,
+                block_reason: BlockReason::None,
+                detail: None,
+            },
+            ActionEvent {
+                ts: "t".into(),
+                event: EventKind::Retry,
+                role: "dev".into(),
+                provider: String::new(),
+                model: String::new(),
+                verdict: None,
+                artifact: None,
+                block_reason: BlockReason::None,
+                detail: None,
+            },
+        ];
+        let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
+        assert!(report.contains("Retries: 2"), "{report}");
+    }
+
+    #[test]
+    fn report_omits_retry_line_when_none() {
+        let events = vec![ActionEvent {
+            ts: "t".into(),
+            event: EventKind::RoleEnd,
+            role: "dev".into(),
+            provider: String::new(),
+            model: String::new(),
+            verdict: Some(Verdict::Done),
+            artifact: None,
+            block_reason: BlockReason::None,
+            detail: None,
+        }];
+        let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
+        assert!(!report.contains("Retries:"), "{report}");
     }
 }

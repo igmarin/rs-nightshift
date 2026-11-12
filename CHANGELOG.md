@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- The run report shows `Retries: N` after the `Steps:` line when the run
+  retried a role at least once.
 - The run report ends with a `Time per role` section: the seconds each role
   took, summed over its turns, from the timestamps already in the action
   log.
