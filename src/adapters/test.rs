@@ -4,7 +4,7 @@ use crate::error::{ArtifactError, Error};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Default per-run test timeout.
@@ -13,6 +13,12 @@ pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Most bytes kept from one output stream. The rest is read and dropped, so
 /// a command that prints without end cannot use up memory.
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
+
+/// How long to wait for the end of the output after the command has exited.
+/// The output of the command itself is read well within this time. Only a
+/// process that the command left behind, with the pipes still open, takes
+/// longer; the runner does not wait for it.
+const LEFTOVER_GRACE: Duration = Duration::from_secs(2);
 
 /// Added to a stream that was longer than [`MAX_STREAM_BYTES`].
 const TRUNCATED_NOTE: &str = "\n[output truncated]\n";
@@ -77,9 +83,10 @@ impl TestRunner for ProcessTestRunner {
         // Read both pipes while the command runs. A pipe holds about 64 KB;
         // a command that prints more blocks until someone reads it.
         let stop = Arc::new(AtomicBool::new(false));
-        let readers = drain(child.stdout.take(), &stop)
-            .and_then(|stdout| Ok((stdout, drain(child.stderr.take(), &stop)?)));
-        let (stdout, stderr) = match readers {
+        let (stdout, stderr) = (Arc::default(), Arc::default());
+        let readers = drain(child.stdout.take(), &stdout, &stop)
+            .and_then(|first| Ok([first, drain(child.stderr.take(), &stderr, &stop)?]));
+        let readers = match readers {
             Ok(readers) => readers,
             Err(error) => {
                 stop.store(true, Ordering::Relaxed);
@@ -93,8 +100,17 @@ impl TestRunner for ProcessTestRunner {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let stdout = stdout.join().unwrap_or_default();
-                    let stderr = stderr.join().unwrap_or_default();
+                    // The pipes end when the last process that holds them
+                    // exits. That can be a process the command left behind,
+                    // so wait a short time only, then take what was read.
+                    let exited = Instant::now();
+                    while !readers.iter().all(std::thread::JoinHandle::is_finished)
+                        && exited.elapsed() < LEFTOVER_GRACE
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    stop.store(true, Ordering::Relaxed);
+                    let (stdout, stderr) = (take(&stdout), take(&stderr));
                     let mut output = String::from_utf8_lossy(&stdout).into_owned();
                     if !stderr.is_empty() {
                         if !output.is_empty() {
@@ -162,37 +178,52 @@ fn kill_group(kill: &str, group: u32) -> Option<String> {
 }
 
 /// Read a child's pipe on its own thread, until its end or until `stop` is
-/// set. Keeps at most [`MAX_STREAM_BYTES`].
+/// set. Appends to `kept`, at most [`MAX_STREAM_BYTES`] and then
+/// [`TRUNCATED_NOTE`], so `kept` can be taken while the thread still reads.
 fn drain<R>(
     pipe: Option<R>,
+    kept: &Arc<Mutex<Vec<u8>>>,
     stop: &Arc<AtomicBool>,
-) -> std::io::Result<std::thread::JoinHandle<Vec<u8>>>
+) -> std::io::Result<std::thread::JoinHandle<()>>
 where
     R: std::io::Read + Send + 'static,
 {
-    let stop = Arc::clone(stop);
+    let (kept, stop) = (Arc::clone(kept), Arc::clone(stop));
     std::thread::Builder::new().spawn(move || {
-        let mut kept = Vec::new();
-        let Some(mut pipe) = pipe else { return kept };
+        let Some(mut pipe) = pipe else { return };
+        let mut room = MAX_STREAM_BYTES;
         let mut truncated = false;
         let mut chunk = [0_u8; 8192];
         while !stop.load(Ordering::Relaxed) {
             match pipe.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(read) => {
-                    let room = MAX_STREAM_BYTES - kept.len();
-                    kept.extend_from_slice(&chunk[..read.min(room)]);
-                    truncated |= read > room;
+                    let keep = read.min(room);
+                    room -= keep;
+                    // Past the limit the data is read and dropped, so the
+                    // command is not blocked on a full pipe.
+                    if keep == 0 && truncated {
+                        continue;
+                    }
+                    let Ok(mut kept) = kept.lock() else { break };
+                    kept.extend_from_slice(&chunk[..keep]);
+                    if keep < read {
+                        kept.extend_from_slice(TRUNCATED_NOTE.as_bytes());
+                        truncated = true;
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => break,
             }
         }
-        if truncated {
-            kept.extend_from_slice(TRUNCATED_NOTE.as_bytes());
-        }
-        kept
     })
+}
+
+/// What a reader has kept so far.
+fn take(kept: &Mutex<Vec<u8>>) -> Vec<u8> {
+    kept.lock()
+        .map(|mut kept| std::mem::take(&mut *kept))
+        .unwrap_or_default()
 }
 
 /// Resolve argv from `nightshift.toml` or a repo heuristic. Never from a model.
@@ -477,6 +508,25 @@ mod tests {
         // No such program: nothing is signalled, and the caller is told.
         let problem = kill_group("no-such-kill-program", 1).expect("problem");
         assert!(problem.contains("could not run"), "{problem}");
+    }
+
+    #[test]
+    fn process_runner_does_not_wait_for_a_process_the_command_left_behind() {
+        // The command exits at once. The `sleep` it started keeps both pipes
+        // open; waiting for their end would take as long as the `sleep`.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let script = "sleep 8 & echo $! > pid; echo done; exit 3";
+        let runner = ProcessTestRunner::new(Duration::from_secs(60));
+        let start = Instant::now();
+        let out = runner
+            .run(tmp.path(), &["sh".into(), "-c".into(), script.into()])
+            .expect("run");
+        let waited = start.elapsed();
+        let pid = std::fs::read_to_string(tmp.path().join("pid")).expect("pid");
+        let _ = Command::new("kill").arg(pid.trim()).status();
+        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+        assert_eq!(out.exit_code, 3);
+        assert_eq!(out.output, "done\n");
     }
 
     #[test]

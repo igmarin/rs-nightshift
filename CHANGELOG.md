@@ -83,6 +83,10 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `run-tests` no longer waits, without a time limit, for a process that the
+  test command started and left running after its own exit (for example a
+  server that a test did not stop). It waits 2 seconds for the end of the
+  output, then uses what was written.
 - `run-tests` no longer fails with "test command timed out" when the test
   command prints more than about 64 KB. The output was read only after the
   command exited, so a full pipe blocked the command until the time limit.
