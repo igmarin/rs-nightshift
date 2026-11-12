@@ -622,6 +622,9 @@ fn extract_balanced_object(text: &str) -> Result<String, Error> {
 /// reply, and every doubtful case is `None`: a retry is cheap, acting on the
 /// wrong object is not.
 ///
+/// - A `{` inside a fenced block for a language other than JSON is text: a
+///   listing can hold JSON literals (a fixture, a raw string) that are not
+///   the reply. Bare and `json` fences can hold the envelope.
 /// - A `{` not followed by a `"key":` is text (code braces, `{}`, a Rust
 ///   block that holds a string).
 /// - A `{` followed by a `"key":` opens a JSON object. It must read as one
@@ -633,10 +636,14 @@ fn extract_balanced_object(text: &str) -> Result<String, Error> {
 ///   follow it: plain prose after the answer is fine, anything that could be
 ///   another object is not.
 fn envelope_after_prose(text: &str) -> Option<String> {
+    let listings = non_json_fences(text);
     let mut last: Option<(usize, usize, serde_json::Value)> = None;
     for (start, _) in text.match_indices('{') {
         let read_until = last.as_ref().map_or(0, |&(_, end, _)| end);
-        if start < read_until || !opens_json_object(&text[start + 1..]) {
+        if start < read_until
+            || listings.iter().any(|listing| listing.contains(&start))
+            || !opens_json_object(&text[start + 1..])
+        {
             continue;
         }
         let mut values =
@@ -650,6 +657,33 @@ fn envelope_after_prose(text: &str) -> Option<String> {
         .is_some_and(|verdict| serde_json::from_value::<Verdict>(verdict.clone()).is_ok());
     let braces_after = text[end..].contains(['{', '}']);
     (known_verdict && !braces_after).then(|| text[start..end].to_string())
+}
+
+/// Byte ranges of the fenced blocks whose info string names a language other
+/// than JSON. A fence that is never closed runs to the end of the text.
+fn non_json_fences(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    // Start of the open fence, and whether it is a non-JSON one.
+    let mut open: Option<(usize, bool)> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(info) = line.trim_start().strip_prefix("```") {
+            match open.take() {
+                None => {
+                    let info = info.trim();
+                    let listing = !(info.is_empty() || info.eq_ignore_ascii_case("json"));
+                    open = Some((offset, listing));
+                }
+                Some((start, true)) => ranges.push(start..offset + line.len()),
+                Some((_, false)) => {}
+            }
+        }
+        offset += line.len();
+    }
+    if let Some((start, true)) = open {
+        ranges.push(start..text.len());
+    }
+    ranges
 }
 
 /// `rest`, the text after a `{`, begins a JSON object: a `"key"` on one line
@@ -1002,8 +1036,11 @@ fn repair_backtick_strings(input: &str) -> String {
         let c = chars[i];
         // Detect a backtick in a value position: preceded by `:` (with
         // optional whitespace). This avoids false positives from backticks
-        // inside properly-quoted JSON strings.
-        if c == '`' && backtick_in_value_position(&chars, i) {
+        // inside properly-quoted JSON strings. A run of three is a code
+        // fence, not a string: "Here is the fix:" before a fenced listing
+        // must leave the fence intact.
+        let fence = chars[i..].starts_with(&['`', '`', '`']);
+        if c == '`' && !fence && backtick_in_value_position(&chars, i) {
             // Collect the backtick string content until the closing backtick.
             let mut content = String::new();
             let mut j = i + 1;
@@ -2051,7 +2088,9 @@ mod tests {
             "I will add the line and two tests.\n\n```rust\n",
             "use crate::state::{ActionEvent, EventKind};\n",
             "fn render() -> String { format!(\"{report}\") }\n",
-            "fn label() -> &'static str {\n    \"a string in a block\"\n}\n```\n\n",
+            "fn label() -> &'static str {\n    \"a string in a block\"\n}\n",
+            "const FIXTURE: &str = r#\"{\"verdict\":\"done\",\"content\":\"fixture\"}\"#;\n",
+            "```\n\n",
             "```json\n",
             "{\"verdict\":\"continue\",\"content\":\"file: a.rs\\nfn a() {}\"}\n```"
         );
@@ -2122,6 +2161,10 @@ mod tests {
             (
                 "another object after the answer",
                 r#"{"verdict":"continue","content":"real"} {"note":"x"}"#,
+            ),
+            (
+                "an envelope literal in a code listing, no answer",
+                "```rust\nconst FIXTURE: &str = r#\"{\"verdict\":\"fail\",\"content\":\"x\"}\"#;\n```",
             ),
         ] {
             let error = parse_role_output(&format!("{example}\n{rest}")).expect_err(case);
