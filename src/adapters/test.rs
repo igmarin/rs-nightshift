@@ -83,7 +83,7 @@ impl TestRunner for ProcessTestRunner {
             Ok(readers) => readers,
             Err(error) => {
                 stop.store(true, Ordering::Relaxed);
-                stop_command(&mut child);
+                let _ = stop_command(&mut child);
                 return Err(Error::from(ArtifactError::artifact(format!(
                     "failed to read the test command's output: {error}"
                 ))));
@@ -113,10 +113,13 @@ impl TestRunner for ProcessTestRunner {
                     // pipes. That covers a process that left the command's
                     // group: it fails on its next write.
                     stop.store(true, Ordering::Relaxed);
-                    stop_command(&mut child);
-                    return Err(Error::from(ArtifactError::artifact(
-                        "test command timed out",
-                    )));
+                    let message = match stop_command(&mut child) {
+                        None => "test command timed out".to_string(),
+                        Some(problem) => format!(
+                            "test command timed out; processes it started may still run ({problem})"
+                        ),
+                    };
+                    return Err(Error::from(ArtifactError::artifact(message)));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(error) => {
@@ -129,18 +132,33 @@ impl TestRunner for ProcessTestRunner {
 }
 
 /// Stop the command and, on Unix, every process still in its group: what it
-/// started, and what those started.
-fn stop_command(child: &mut std::process::Child) {
-    // `kill` with a negative id signals a process group. The command is not
-    // reaped yet, so its id still names the group it leads.
+/// started, and what those started. Returns the reason when the group could
+/// not be signalled; then only the command itself was stopped.
+fn stop_command(child: &mut std::process::Child) -> Option<String> {
+    // The command is not reaped yet, so its id still names the group it leads.
     #[cfg(unix)]
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
+    let problem = kill_group("kill", child.id());
+    #[cfg(not(unix))]
+    let problem = None;
+    let _ = child.kill();
+    let _ = child.wait();
+    problem
+}
+
+/// Signal process group `group` with the `kill` program: a negative id names
+/// a group. Returns the reason when that did not work.
+#[cfg(unix)]
+fn kill_group(kill: &str, group: u32) -> Option<String> {
+    let status = Command::new(kill)
+        .args(["-KILL", "--", &format!("-{group}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    let _ = child.kill();
-    let _ = child.wait();
+    match status {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("`{kill}` ended with {status}")),
+        Err(error) => Some(format!("could not run `{kill}`: {error}")),
+    }
 }
 
 /// Read a child's pipe on its own thread, until its end or until `stop` is
@@ -451,6 +469,14 @@ mod tests {
             let _ = Command::new("kill").arg(pid.trim()).status();
         }
         assert!(!still_alive, "process {} outlived the timeout", pid.trim());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_group_reports_why_it_could_not_signal() {
+        // No such program: nothing is signalled, and the caller is told.
+        let problem = kill_group("no-such-kill-program", 1).expect("problem");
+        assert!(problem.contains("could not run"), "{problem}");
     }
 
     #[test]
