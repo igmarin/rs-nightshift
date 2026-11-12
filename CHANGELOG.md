@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- macOS unattended runs: `contrib/dev.nightshift.queue.plist` (a launchd
+  agent that waits for the model server, then runs a goal queue under
+  `caffeinate -i`),
+  `contrib/dev.nightshift.model-server.plist` (keeps a local model server
+  up), and `docs/macos.md`. `nightshift doctor` adds a non-blocking
+  `caffeinate` check on macOS (#112).
 - `nightshift queue --file goals.toml [--config PATH] [--out DIR]
   [--stop-on-failure]` runs many harness jobs back to back. A failed job does
   not stop the queue, a job whose repo has uncommitted changes is skipped as

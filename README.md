@@ -53,7 +53,12 @@ No Rust toolchain required on the server — the binary is self-contained.
 
 Before your first run, the server needs:
 
-- **Ollama** listening on `127.0.0.1:11434` with these models pulled:
+- A local model server: **Ollama**, or any **OpenAI-compatible server**
+  (rapid-mlx, llama.cpp, LM Studio; see
+  [`docs/configuration.md`](docs/configuration.md#local-openai-compatible-servers-rapid-mlx-llamacpp-lm-studio)).
+  On a Mac, follow [`docs/macos.md`](docs/macos.md).
+- For the default Ollama setup: Ollama listening on `127.0.0.1:11434` with
+  these models pulled:
   `llama3.2:3b`, `llama3.1:8b`, `mistral-nemo:12b`, `qwen2.5-coder:7b`,
   `deepseek-r1:7b`, `gemma2:9b`, `phi3.5:latest`
 - See [`docs/ollama.md`](docs/ollama.md) for tuning Ollama on CPU-only or
@@ -122,6 +127,10 @@ tmux attach -t nightshift
 Or use systemd with the bundled
 [`contrib/nightshift.service`](contrib/nightshift.service) — edit the goal and
 paths, then `systemctl start --no-block nightshift.service`.
+
+On macOS, use the launchd agent in
+[`contrib/dev.nightshift.queue.plist`](contrib/dev.nightshift.queue.plist),
+which also keeps the Mac awake — see [`docs/macos.md`](docs/macos.md).
 
 Progress is always appended to `artifacts/latest/run.log` — no TTY needed.
 
@@ -285,6 +294,7 @@ folder has a README describing its responsibility and ownership:
 
 ## Further reading
 
+- [docs/macos.md](docs/macos.md) — unattended runs on a Mac: launchd agents, staying awake, memory
 - [docs/ollama.md](docs/ollama.md) — Ollama tuning: CPU-only and integrated-GPU setups, Modelfile variants, service overrides
 - [docs/architecture.md](docs/architecture.md) — the role-graph harness: hexagon, commands, providers, capabilities, state/report
 - [docs/role-graph.md](docs/role-graph.md) — role-graph design and the full config schema

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent: run a nightshift goal queue with the terminal closed and
+  the Mac kept awake. Setup and commands: docs/macos.md.
+
+  launchd expands neither ~ nor $HOME: every path must be absolute. Replace
+  /Users/YOU throughout (docs/macos.md has a one-line sed for it).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.nightshift.queue</string>
+
+  <!-- caffeinate -i holds off idle sleep for as long as the script runs.
+       The script waits for the model server (up to 10 minutes, then starts
+       anyway so the failure is recorded in the queue report), because
+       launchd starts both agents at login in no fixed order. The URL must
+       match base_url in the nightshift config. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>
+url=http://127.0.0.1:8000/v1/models
+i=0
+until /usr/bin/curl -sf -o /dev/null "$url"; do
+  if [ "$i" -eq 0 ]; then echo "waiting for the model server at $url"; fi
+  i=$((i + 1))
+  if [ "$i" -ge 120 ]; then echo "model server not ready after 10 minutes; starting anyway"; break; fi
+  sleep 5
+done
+exec "/Users/YOU/.cargo/bin/nightshift" queue \
+  --file "/Users/YOU/nightshift/goals.toml" \
+  --config "/Users/YOU/nightshift/nightshift.toml" \
+  --out "/Users/YOU/nightshift/artifacts"
+    </string>
+  </array>
+
+  <!-- launchd starts jobs with PATH=/usr/bin:/bin:/usr/sbin:/sbin. List every
+       directory the role tools need (cargo, git, codegraph, graphify). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOU/.cargo/bin:/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/nightshift</string>
+
+  <!-- The directory must exist before the agent is loaded. -->
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/nightshift/artifacts/queue.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/nightshift/artifacts/queue.log</string>
+
+  <!-- Start when loaded (and at each login, which resumes the queue after a
+       reboot). No KeepAlive: a finished queue is not started again. -->
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

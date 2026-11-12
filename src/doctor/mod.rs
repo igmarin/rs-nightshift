@@ -32,6 +32,9 @@ where
     let mut checks = Vec::new();
 
     push_toolchain_checks(&mut checks, host);
+    if cfg!(target_os = "macos") {
+        push_caffeinate_check(&mut checks, host);
+    }
 
     // codegraph/graphify: required only when a role gathers context.
     let uses_context = config
@@ -266,6 +269,24 @@ fn api_key_env_for(provider: &str, spec: Option<&ProviderSpec>) -> Option<String
 fn model_matches(installed: &str, required: &str) -> bool {
     // Exact tag match only: a `phi4-mini` install must not satisfy `phi4`.
     installed == required
+}
+
+/// macOS sleeps when idle, which pauses a long run; `caffeinate -i` holds
+/// it off. A warning only: a run works without it.
+fn push_caffeinate_check(checks: &mut Vec<Check>, host: &impl HostCommands) {
+    let ok = host.command_on_path("caffeinate");
+    checks.push(Check {
+        name: "caffeinate".into(),
+        passed: ok,
+        required: false,
+        detail: if ok {
+            "caffeinate is on PATH; start long runs as `caffeinate -i nightshift ...` \
+             (docs/macos.md)"
+                .into()
+        } else {
+            "caffeinate not found; the Mac may sleep during a long run".into()
+        },
+    });
 }
 
 #[cfg(test)]
@@ -671,6 +692,23 @@ model = "m"
             .await
             .expect("report");
         assert!(!report.checks.iter().any(|c| c.name.starts_with("num_ctx")));
+    }
+
+    #[test]
+    fn caffeinate_check_never_blocks() {
+        for (commands, passed) in [(vec!["caffeinate"], true), (vec![], false)] {
+            let host = FakeHost {
+                rustc: true,
+                mise: true,
+                commands,
+            };
+            let mut checks = Vec::new();
+            push_caffeinate_check(&mut checks, &host);
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].name, "caffeinate");
+            assert_eq!(checks[0].passed, passed);
+            assert!(!checks[0].required);
+        }
     }
 
     #[test]
