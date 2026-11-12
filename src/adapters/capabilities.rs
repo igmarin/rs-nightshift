@@ -446,25 +446,33 @@ fn resolve_repo_file(repo: &Path, rel: &str, tool: &str) -> Result<PathBuf, Erro
     Ok(canonical)
 }
 
-/// The 1-based line of each place where `needle` starts in `haystack`,
-/// overlapping places included: `"aaa"` contains `"aa"` twice, and
-/// `str::matches` would report one and miss the ambiguity.
-fn match_lines(haystack: &str, needle: &str) -> Vec<usize> {
+/// How many match lines an "ambiguous" error lists.
+const SHOWN_MATCHES: usize = 5;
+
+/// In how many places `needle` starts in `haystack`, overlapping places
+/// included, and the 1-based line of the first [`SHOWN_MATCHES`] of them.
+///
+/// `"aaa"` contains `"aa"` twice; `str::matches` would report one and miss
+/// the ambiguity.
+fn match_lines(haystack: &str, needle: &str) -> (usize, Vec<usize>) {
     let mut lines = Vec::new();
     if needle.is_empty() {
-        return lines;
+        return (0, lines);
     }
     // `line` is the line of `counted`: newlines are counted once, not again
     // from the start for each match.
-    let (mut from, mut counted, mut line) = (0, 0, 1);
+    let (mut count, mut from, mut counted, mut line) = (0, 0, 0, 1);
     while let Some(offset) = haystack[from..].find(needle) {
         let at = from + offset;
-        line += haystack[counted..at].matches('\n').count();
-        counted = at;
-        lines.push(line);
+        if lines.len() < SHOWN_MATCHES {
+            line += haystack[counted..at].matches('\n').count();
+            counted = at;
+            lines.push(line);
+        }
+        count += 1;
         from = at + haystack[at..].chars().next().map_or(1, char::len_utf8);
     }
-    lines
+    (count, lines)
 }
 
 /// Why `old` is not in `body`, written for the role's next attempt.
@@ -487,8 +495,13 @@ fn where_old_differs(body: &str, old: &str) -> String {
             .take_while(|(old, file)| same(old, file))
             .count()
     };
+    // shortcut: only the first MAX_STARTS places where the first line of
+    // `old` occurs are tried, so a file of repeated lines cannot make this
+    // slow. A place after those gives a less exact message, nothing worse.
+    const MAX_STARTS: usize = 1000;
     let best = (0..file.len())
         .filter(|&start| same(file[start], first))
+        .take(MAX_STARTS)
         .max_by_key(|&start| (run(start), std::cmp::Reverse(start)));
     let Some(start) = best else {
         return format!(
@@ -579,8 +592,8 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
         })?;
         // A failure says where to look: the message is the role's only
         // guide for its next attempt.
-        let lines = match_lines(body, &block.old);
-        match lines.len() {
+        let (count, lines) = match_lines(body, &block.old);
+        match count {
             0 => {
                 return Err(Error::from(ArtifactError::artifact(format!(
                     "search-replace: old_text not found in {}. {}\nQuote the file as it is now.",
@@ -592,7 +605,7 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
                 *body = body.replacen(&block.old, &block.new, 1);
             }
             n => {
-                let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
+                let shown: Vec<String> = lines.iter().map(usize::to_string).collect();
                 return Err(Error::from(ArtifactError::artifact(format!(
                     "search-replace: old_text matches {n} locations in {} (ambiguous), at lines {}. \
                      Add lines before or after it to old, so that it matches one place.",
@@ -1079,16 +1092,18 @@ file: leftover.txt
 
     #[test]
     fn match_lines_finds_sliding_windows_and_their_lines() {
-        assert_eq!(match_lines("aaa", "aa"), [1, 1]);
-        assert_eq!(match_lines("aaaa", "aa").len(), 3);
-        assert_eq!(match_lines("hello", "hello"), [1]);
-        assert!(match_lines("hello", "nope").is_empty());
-        assert_eq!(match_lines("x = 1\ny = 2\nx = 1\n", "x = 1"), [1, 3]);
-        assert_eq!(match_lines("a\n\na a\nb\na", "a"), [1, 3, 3, 5]);
-        // Many matches in a large text stay fast: one pass, not one per match.
+        assert_eq!(match_lines("aaa", "aa"), (2, vec![1, 1]));
+        assert_eq!(match_lines("aaaa", "aa").0, 3);
+        assert_eq!(match_lines("hello", "hello"), (1, vec![1]));
+        assert_eq!(match_lines("hello", "nope"), (0, vec![]));
+        assert_eq!(
+            match_lines("x = 1\ny = 2\nx = 1\n", "x = 1"),
+            (2, vec![1, 3])
+        );
+        assert_eq!(match_lines("a\n\na a\nb\na", "a"), (4, vec![1, 3, 3, 5]));
+        // Every match is counted; only the first few lines are kept.
         let big = "x\n".repeat(200_000);
-        let lines = match_lines(&big, "x");
-        assert_eq!((lines.len(), lines[199_999]), (200_000, 200_000));
+        assert_eq!(match_lines(&big, "x"), (200_000, vec![1, 2, 3, 4, 5]));
     }
 
     #[test]
@@ -1132,6 +1147,10 @@ file: leftover.txt
         let long = "x".repeat(1000);
         let why = where_old_differs(&format!("a\n{long}\n"), "a\nb");
         assert!(why.len() < 600, "{}", why.len());
+        // A file of repeated lines: the search is bounded, and still answers.
+        let body = "}\n".repeat(20_000);
+        let why = where_old_differs(&body, &format!("{}differs", "}\n".repeat(2_000)));
+        assert!(why.contains("for 2000 line(s), then differs"), "{why}");
     }
 
     #[tokio::test]
