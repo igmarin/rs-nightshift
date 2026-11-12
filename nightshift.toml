@@ -88,6 +88,9 @@ output = "03_qa_report.json"
 on = { issues = "developer" }
 max_loop = 3
 
-# Read by `run-tests` when a job edits this repo: format, lint and test.
+# Not part of the role graph above. The `run-tests` tool reads this table from
+# the repo a job edits, whichever config file drives the job. So a job that
+# edits this repo, with a role that declares `run-tests`, runs this script:
+# format, lint and test.
 [test]
 command = "sh scripts/job-check.sh"
