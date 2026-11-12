@@ -115,7 +115,12 @@ impl CapabilityRunner {
             }) {
                 body_lines.pop();
             }
-            let body = body_lines.join("\n");
+            // A text file ends with a newline; without it formatters and
+            // `git diff` flag every file this tool writes.
+            let mut body = body_lines.join("\n");
+            if !body.is_empty() {
+                body.push('\n');
+            }
             let body_len = body.len();
             if let Some(dir) = file_path.parent() {
                 std::fs::create_dir_all(dir).map_err(|error| {
@@ -936,7 +941,7 @@ file: leftover.txt
         assert!(out.contains(".github/ISSUE_TEMPLATE/task.md"), "{out}");
         let body = std::fs::read_to_string(repo.path().join(".github/ISSUE_TEMPLATE/task.md"))
             .expect("read");
-        assert_eq!(body, "## Goal\n\nText");
+        assert_eq!(body, "## Goal\n\nText\n", "one final newline");
 
         // An existing file is still replaced as a whole.
         runner
@@ -944,7 +949,7 @@ file: leftover.txt
             .await
             .expect("overwrite");
         let body = std::fs::read_to_string(repo.path().join("hello.txt")).expect("read");
-        assert_eq!(body, "bye");
+        assert_eq!(body, "bye\n");
     }
 
     #[tokio::test]

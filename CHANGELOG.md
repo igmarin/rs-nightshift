@@ -72,6 +72,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `write-file` ends the file with a newline. It used to drop the final
+  newline, so every file it wrote failed format checks.
 - `search-replace` restores the files it already wrote when a later write
   fails, so a failed call leaves the repo unchanged and is safe to retry.
 - `search-replace` roles: the contract now tells the model to keep the whole
