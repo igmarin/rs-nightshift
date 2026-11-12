@@ -599,14 +599,59 @@ fn find_matching_think_close(bytes: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Find the first `{` and return the substring through the matching `}`,
-/// tracking brace depth and skipping over string literals.
+/// Return the reply's envelope: the first balanced `{…}` that is a JSON
+/// object with a string `verdict`.
+///
+/// A model often writes prose or a code listing before the envelope, and
+/// that text has braces of its own, so the first `{` is not always the
+/// envelope. When no candidate qualifies and the reply starts with `{`, the
+/// first balanced object is returned as it is: the caller attempts
+/// value-level repair and reports why it failed.
 fn extract_balanced_object(text: &str) -> Result<String, Error> {
+    // shortcut: tries at most this many `{`, each with a linear scan; raise it
+    // if replies with more braces before the envelope show up.
+    const MAX_CANDIDATES: usize = 2_000;
     let chars: Vec<char> = text.chars().collect();
-    let start = chars
+    let mut first: Option<String> = None;
+    // The inside of a valid JSON object holds its values, not another reply.
+    let mut skip_until = 0;
+    let starts = chars
         .iter()
-        .position(|&c| c == '{')
-        .ok_or_else(|| invalid_envelope("model did not return a JSON object"))?;
+        .enumerate()
+        .filter(|(_, c)| **c == '{')
+        .map(|(i, _)| i)
+        .take(MAX_CANDIDATES);
+    for start in starts {
+        if start < skip_until {
+            continue;
+        }
+        let Some(end) = balanced_end(&chars, start) else {
+            continue;
+        };
+        let candidate: String = chars[start..=end].iter().collect();
+        match serde_json::from_str::<serde_json::Value>(&candidate) {
+            Ok(value)
+                if value
+                    .get("verdict")
+                    .is_some_and(serde_json::Value::is_string) =>
+            {
+                return Ok(candidate);
+            }
+            Ok(_) => skip_until = end + 1,
+            Err(_) => {}
+        }
+        first.get_or_insert(candidate);
+    }
+    // A reply that opens with prose and has no envelope is not a damaged
+    // envelope: say so, instead of a JSON syntax error about its first brace.
+    first
+        .filter(|_| text.trim_start().starts_with('{'))
+        .ok_or_else(|| invalid_envelope("model did not return a JSON object"))
+}
+
+/// Index of the `}` that closes the `{` at `start`, tracking brace depth and
+/// skipping over string literals. `None` when the braces never balance.
+fn balanced_end(chars: &[char], start: usize) -> Option<usize> {
     let mut depth: i32 = 0;
     let mut in_string = false;
     let mut escaped = false;
@@ -634,11 +679,11 @@ fn extract_balanced_object(text: &str) -> Result<String, Error> {
         } else if c == '}' {
             depth -= 1;
             if depth == 0 {
-                return Ok(chars[start..=i].iter().collect());
+                return Some(i);
             }
         }
     }
-    Err(invalid_envelope("model did not return a JSON object"))
+    None
 }
 
 /// Parse JSON into a `Value`, repairing non-string `content` fields.
@@ -1974,6 +2019,45 @@ mod tests {
         let output = parse_role_output(raw).expect("trailing text ignored");
         assert_eq!(output.verdict, Verdict::Done);
         assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_finds_the_envelope_after_prose_and_code() {
+        // Seen with a real model: an explanation and a code listing first,
+        // then the envelope in a json fence.
+        let reply = concat!(
+            "I will add the line and two tests.\n\n```rust\n",
+            "use crate::state::{ActionEvent, EventKind};\n",
+            "fn render() -> String { format!(\"{report}\") }\n```\n\n",
+            "```json\n",
+            "{\"verdict\":\"continue\",\"content\":\"file: a.rs\\nfn a() {}\"}\n```"
+        );
+        let output = parse_role_output(reply).expect("envelope after prose");
+        assert_eq!(output.verdict, Verdict::Continue);
+        assert_eq!(output.content, "file: a.rs\nfn a() {}");
+    }
+
+    #[test]
+    fn parse_skips_a_json_object_that_is_not_an_envelope() {
+        // The first object is valid JSON without a top-level verdict; its
+        // nested "verdict" must not be taken for the reply.
+        let reply = concat!(
+            "Example: {\"note\": {\"verdict\": \"fail\"}}\n",
+            "{\"verdict\":\"done\",\"content\":\"ok\"}"
+        );
+        let output = parse_role_output(reply).expect("second object");
+        assert_eq!(output.verdict, Verdict::Done);
+        assert_eq!(output.content, "ok");
+    }
+
+    #[test]
+    fn parse_rejects_prose_with_braces_and_no_envelope() {
+        let error = parse_role_output("I'll fix it: use a::{B, C}; fn x() { y() }")
+            .expect_err("no envelope");
+        assert!(
+            error.to_string().contains("did not return a JSON object"),
+            "{error}"
+        );
     }
 
     #[test]
