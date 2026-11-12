@@ -62,28 +62,16 @@ impl TestRunner for ProcessTestRunner {
                     "failed to spawn test command: {e}"
                 )))
             })?;
+        // Read both pipes while the command runs. A pipe holds about 64 KB;
+        // a command that prints more blocks until someone reads it.
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
         let start = Instant::now();
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let stdout = child
-                        .stdout
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-                            buf
-                        })
-                        .unwrap_or_default();
-                    let stderr = child
-                        .stderr
-                        .take()
-                        .map(|mut s| {
-                            let mut buf = Vec::new();
-                            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
-                            buf
-                        })
-                        .unwrap_or_default();
+                    let stdout = stdout.join().unwrap_or_default();
+                    let stderr = stderr.join().unwrap_or_default();
                     let mut output = String::from_utf8_lossy(&stdout).into_owned();
                     if !stderr.is_empty() {
                         if !output.is_empty() {
@@ -109,6 +97,20 @@ impl TestRunner for ProcessTestRunner {
             }
         }
     }
+}
+
+/// Read a child's pipe to its end on its own thread.
+fn drain<R>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
 }
 
 /// Resolve argv from `nightshift.toml` or a repo heuristic. Never from a model.
@@ -294,6 +296,20 @@ mod tests {
         let out = runner.run(tmp.path(), &["false".into()]).expect("run");
         assert_ne!(out.exit_code, 0);
         assert_eq!(out.command, ["false"]);
+    }
+
+    #[test]
+    fn process_runner_reads_output_larger_than_a_pipe() {
+        // A pipe holds about 64 KB. A command that prints more must not block.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let runner = ProcessTestRunner::new(Duration::from_secs(10));
+        let script = "head -c 200000 /dev/zero; head -c 200000 /dev/zero >&2";
+        let out = runner
+            .run(tmp.path(), &["sh".into(), "-c".into(), script.into()])
+            .expect("run");
+        assert_eq!(out.exit_code, 0);
+        // 200 000 bytes from each stream, plus the newline between them.
+        assert_eq!(out.output.len(), 400_001);
     }
 
     #[test]
