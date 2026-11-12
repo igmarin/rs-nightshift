@@ -214,6 +214,15 @@ where
     A: ArtifactStore,
     T: ToolRunner,
 {
+    // Keep every rejected reply so the operator can see what the model
+    // returned. The role id is sanitized to prevent path traversal.
+    let keep = |text: &str| {
+        let safe_id = sanitize_filename(&params.role.id);
+        let debug_name = format!("raw_response_{safe_id}_{attempt}.txt");
+        if let Err(write_err) = store.write_artifact(params.run, &debug_name, text) {
+            eprintln!("warning: failed to write debug artifact {debug_name}: {write_err}");
+        }
+    };
     let text = client
         .generate(&GenerateRequest {
             model: params.role.model.clone(),
@@ -231,22 +240,19 @@ where
         .map_err(|error| {
             // A timeout is not retried: on a slow machine the same prompt
             // times out again and doubles the wait.
-            let retry = if matches!(error, Error::Provider(ProviderError::Ollama(_))) {
-                Retry::Same
-            } else {
-                Retry::No
+            let retry = match &error {
+                Error::Provider(ProviderError::Ollama(_)) => Retry::Same,
+                // The model wrote past its output limit. It is told so, and
+                // can send a shorter reply.
+                Error::Provider(ProviderError::CutOff { text }) => {
+                    keep(text);
+                    Retry::WithFeedback
+                }
+                _ => Retry::No,
             };
             Failure { error, retry }
         })?;
-    // Keep every rejected reply so the operator can see what the model
-    // returned. The role id is sanitized to prevent path traversal.
-    let keep_rejected = || {
-        let safe_id = sanitize_filename(&params.role.id);
-        let debug_name = format!("raw_response_{safe_id}_{attempt}.txt");
-        if let Err(write_err) = store.write_artifact(params.run, &debug_name, &text) {
-            eprintln!("warning: failed to write debug artifact {debug_name}: {write_err}");
-        }
-    };
+    let keep_rejected = || keep(&text);
     let output = parse_role_output(&text).map_err(|error| {
         keep_rejected();
         Failure {
@@ -1747,6 +1753,38 @@ mod tests {
         assert!(error.to_string().contains("old_text not found"), "{error}");
         assert_eq!(client.calls().len(), 3);
         assert_eq!(seen.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn cut_off_reply_is_kept_and_retried_with_the_reason() {
+        let client = ScriptedModelClient::new();
+        client.push_err(Error::from(ProviderError::CutOff {
+            text: "{\"verdict\": \"continue\", \"content\": \"file: a.rs\\nold:\\nfn a".into(),
+        }));
+        client.push_text(GOOD);
+        let store = MemoryArtifactStore::default();
+        let tools = StubToolRunner::default();
+        let mut role = role(Some("out.txt"));
+        role.retries = 1;
+        let (result, seen) = execute_recording_retries(&client, &store, &tools, &role).await;
+        assert_eq!(
+            result.expect("second attempt").output.verdict,
+            Verdict::Continue
+        );
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].1.contains("cut off"), "{}", seen[0].1);
+        let calls = client.calls();
+        assert!(
+            calls[1]
+                .prompt
+                .contains(&format!("Your previous reply was rejected: {}", seen[0].1)),
+            "{}",
+            calls[1].prompt
+        );
+        let kept = store
+            .read_artifact(Path::new("/tmp/run/x"), "raw_response_developer_1.txt")
+            .expect("cut-off reply kept");
+        assert!(kept.ends_with("fn a"), "{kept}");
     }
 
     #[tokio::test]

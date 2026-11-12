@@ -294,6 +294,7 @@ retries = 3
 | What failed | Retried? | Next prompt |
 | :--- | :--- | :--- |
 | Reply is not a valid JSON envelope | yes | same prompt plus `Your previous reply was rejected: <error>` |
+| Reply was cut off at the output limit (`max_tokens`) | yes | same prompt plus the reason, so the model can send less text |
 | `apply-patch`, `write-file` or `search-replace` failed | yes | same prompt plus the tool's error |
 | Provider request failed (connection reset, HTTP error) | yes | same prompt |
 | Timeout | no | on a slow machine the same prompt times out again |
@@ -305,6 +306,13 @@ attempt number and the reason. Each rejected reply is kept in the run
 directory as `raw_response_<role>_<attempt>.txt`; a later pass through the
 same role (a loop-back) overwrites them. When the last attempt fails, the
 run fails as before.
+
+A reply that the model did not finish is never used, also when its text can
+be repaired into a valid envelope: it would apply half an edit, or write a
+file that ends in the middle. The server reports this (`finish_reason` is
+`length`). If a role keeps failing with "the reply was cut off at the output
+limit", raise its `max_tokens`, or ask for less output per reply (for
+example `search-replace` blocks in place of a whole file).
 
 `retries` may be at most 10. A role with two edit tools is not retried once
 the first tool has changed the repo. `plan` keeps no action log, so it

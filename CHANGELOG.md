@@ -88,6 +88,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- A reply that the model did not finish, because it reached `max_tokens`,
+  is rejected and retried with that reason. Before, the harness did not look
+  at why a reply ended: it repaired the cut-off text and used it, so half an
+  edit could be applied, and the role was told something else (for example
+  "block is missing a new: field").
 - `run-tests` no longer waits, without a time limit, for a process that the
   test command started and left running after its own exit (for example a
   server that a test did not stop). It waits 2 seconds for the end of the

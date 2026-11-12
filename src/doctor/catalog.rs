@@ -159,6 +159,9 @@ pub(crate) mod tests {
                 Err(Error::Provider(ProviderError::Timeout)) => {
                     Err(Error::from(ProviderError::Timeout))
                 }
+                Err(Error::Provider(ProviderError::CutOff { text })) => {
+                    Err(Error::from(ProviderError::CutOff { text: text.clone() }))
+                }
                 Err(Error::Artifact(ArtifactError::Artifact(msg))) => {
                     Err(Error::from(ArtifactError::artifact(msg.clone())))
                 }

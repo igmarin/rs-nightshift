@@ -1,6 +1,6 @@
 //! OpenAI-compatible [`ModelClient`] adapter (Deepseek, Kimi, custom).
 
-use crate::adapters::kernel_error::map_kernel_error;
+use crate::adapters::kernel_error::{complete_text, map_kernel_error};
 use crate::error::{ConfigError, Error, ProviderError};
 use crate::ports::{GenerateRequest, ModelClient};
 use async_trait::async_trait;
@@ -192,7 +192,7 @@ impl ModelClient for OpenAICompatibleAdapter {
         .and_then(|result| {
             result.map_err(|error| Error::from(map_kernel_error(error, &request.model)))
         })?;
-        Ok(response.content)
+        Ok(complete_text(response)?)
     }
 
     fn redacted_origin(&self) -> Option<String> {
@@ -236,6 +236,23 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["messages"][1]["content"], "review the patch");
         assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[tokio::test]
+    async fn openai_generate_rejects_a_reply_cut_off_at_the_output_limit() {
+        let server = MockServer::start().await;
+        let body = chat_response("{\"verdict\": \"cont")
+            .replace(r#""finish_reason":"stop""#, r#""finish_reason":"length""#);
+        assert!(body.contains("length"), "{body}");
+        mount_chat(&server, &body).await;
+
+        let client = OpenAICompatibleAdapter::new(format!("{}/v1", server.uri()), "sk-test")
+            .expect("client");
+        let error = client.generate(&request("m")).await.expect_err("cut off");
+        assert!(
+            matches!(&error, Error::Provider(ProviderError::CutOff { text }) if text == "{\"verdict\": \"cont"),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]
