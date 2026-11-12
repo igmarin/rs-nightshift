@@ -347,6 +347,11 @@ not reach a test command that is running at that moment. That command ends
 at its next write to its output; one that prints nothing runs until it ends
 by itself.
 
+A test command can also exit and leave a process running, for example a
+server that a test started and did not stop. nightshift does not wait for
+that process and does not stop it. It takes the output written up to 2
+seconds after the command's exit.
+
 A job is "done" when the QA role says so, and the QA role sees only this
 command's result. So put every check the repo's CI makes into it. The command
 is split on spaces and runs without a shell (no quotes, `&&` or pipes), so
