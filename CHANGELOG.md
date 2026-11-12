@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- The run report ends with a `Time per role` section: the seconds each role
+  took, summed over its turns, from the timestamps already in the action
+  log.
 - `write-file` creates the file, and its parent directories, when it does
   not exist yet. Before, it could only replace an existing file, so no tool
   could add a new file without a hand-written diff. The path rules are the
