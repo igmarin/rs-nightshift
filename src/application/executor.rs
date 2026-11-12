@@ -620,13 +620,29 @@ fn extract_balanced_object(text: &str) -> Result<String, Error> {
         let last = balanced_end(&chars, first).ok_or_else(no_object)?;
         return Ok(chars[first..=last].iter().collect());
     }
-    outermost_balanced_spans(&chars)
+    // A `"` in the prose is read both ways: as the start of a string (so a
+    // literal like "{" opens nothing), then as plain text (so a lone `"` does
+    // not hide the envelope). Either reading must end in a valid answer.
+    [true, false]
         .into_iter()
-        .rev()
-        .map(|(first, last)| chars[first..=last].iter().collect::<String>())
-        .find(|candidate| candidate.contains("\"verdict\""))
-        .filter(|candidate| has_valid_verdict(candidate))
+        .find_map(|quotes_in_prose| {
+            outermost_balanced_spans(&chars, quotes_in_prose)
+                .into_iter()
+                .rev()
+                .map(|(first, last)| chars[first..=last].iter().collect::<String>())
+                .find(|candidate| mentions_verdict(candidate))
+                .filter(|candidate| has_valid_verdict(candidate))
+        })
         .ok_or_else(no_object)
+}
+
+/// `candidate` is meant as an answer: valid JSON with a top-level `verdict`
+/// key, or damaged JSON that has the text `"verdict"` anywhere.
+fn mentions_verdict(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(value) => value.get("verdict").is_some(),
+        Err(_) => candidate.contains("\"verdict\""),
+    }
 }
 
 /// `candidate` is a JSON object whose `verdict` is one of the known verdicts.
@@ -640,8 +656,9 @@ fn has_valid_verdict(candidate: &str) -> bool {
 /// Every balanced `{…}` in `chars` that is not inside another balanced
 /// `{…}`, as inclusive `(first, last)` index pairs in order. One pass: a `{`
 /// that is never closed and a `}` with nothing open are plain text. Braces
-/// inside string literals are skipped.
-fn outermost_balanced_spans(chars: &[char]) -> Vec<(usize, usize)> {
+/// inside string literals are skipped; outside every object a `"` starts a
+/// string only when `quotes_in_prose` is set.
+fn outermost_balanced_spans(chars: &[char], quotes_in_prose: bool) -> Vec<(usize, usize)> {
     let mut open: Vec<usize> = Vec::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut in_string = false;
@@ -658,7 +675,7 @@ fn outermost_balanced_spans(chars: &[char]) -> Vec<(usize, usize)> {
             continue;
         }
         match c {
-            '"' => in_string = true,
+            '"' if quotes_in_prose || !open.is_empty() => in_string = true,
             '{' => open.push(i),
             '}' => {
                 if let Some(first) = open.pop() {
@@ -2088,6 +2105,28 @@ mod tests {
         let output = parse_role_output(reply).expect("last envelope");
         assert_eq!(output.verdict, Verdict::Continue);
         assert_eq!(output.content, "real");
+    }
+
+    #[test]
+    fn parse_ignores_a_later_object_that_only_quotes_the_word_verdict() {
+        let reply = concat!(
+            "Result:\n{\"verdict\":\"done\",\"content\":\"ok\"}\n",
+            "{\"note\":\"the key \\\"verdict\\\" is required\"}"
+        );
+        let output = parse_role_output(reply).expect("envelope before the note");
+        assert_eq!(output.verdict, Verdict::Done);
+    }
+
+    #[test]
+    fn parse_finds_the_envelope_after_a_lone_quote_in_prose() {
+        // A 27" screen, or a Rust char literal '"', must not hide the answer.
+        let reply = "On a 27\" screen: if c == '{' {\n{\"verdict\":\"done\",\"content\":\"ok\"}";
+        let output = parse_role_output(reply).expect("envelope after a lone quote");
+        assert_eq!(output.verdict, Verdict::Done);
+        // A string literal holding a brace is read as a string, as before.
+        let reply = "Call push(\"{\") first.\n{\"verdict\":\"done\",\"content\":\"ok\"}";
+        let output = parse_role_output(reply).expect("envelope after a brace literal");
+        assert_eq!(output.verdict, Verdict::Done);
     }
 
     #[test]
