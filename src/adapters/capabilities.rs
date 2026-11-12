@@ -117,11 +117,8 @@ impl CapabilityRunner {
             }
             let body = body_lines.join("\n");
             let body_len = body.len();
-            if let Some(dir) = file_path.parent() {
-                std::fs::create_dir_all(dir).map_err(|error| {
-                    ArtifactError::artifact(format!("write-file: create directory: {error}"))
-                })?;
-            }
+// Use directory-handle-relative, no-follow operations for creation and writing,
+// so the validated repository path cannot be redirected by a symlink swap.
             write_atomically(&file_path, &body, "write-file")?;
             Ok(format!("wrote {path} ({body_len} bytes)"))
         })
