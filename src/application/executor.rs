@@ -599,53 +599,46 @@ fn find_matching_think_close(bytes: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Return the reply's envelope: the first balanced `{…}` that is a JSON
-/// object with a string `verdict`.
+/// Return the reply's envelope: the first JSON object with a string
+/// `verdict`, wherever it starts.
 ///
 /// A model often writes prose or a code listing before the envelope, and
 /// that text has braces of its own, so the first `{` is not always the
-/// envelope. When no candidate qualifies and the reply starts with `{`, the
+/// envelope. When there is no envelope and the reply starts with `{`, the
 /// first balanced object is returned as it is: the caller attempts
 /// value-level repair and reports why it failed.
 fn extract_balanced_object(text: &str) -> Result<String, Error> {
-    // shortcut: tries at most this many `{`, each with a linear scan; raise it
-    // if replies with more braces before the envelope show up.
-    const MAX_CANDIDATES: usize = 2_000;
-    let chars: Vec<char> = text.chars().collect();
-    let mut first: Option<String> = None;
     // The inside of a valid JSON object holds its values, not another reply.
     let mut skip_until = 0;
-    let starts = chars
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| **c == '{')
-        .map(|(i, _)| i)
-        .take(MAX_CANDIDATES);
-    for start in starts {
+    for (start, _) in text.match_indices('{') {
         if start < skip_until {
             continue;
         }
-        let Some(end) = balanced_end(&chars, start) else {
-            continue;
-        };
-        let candidate: String = chars[start..=end].iter().collect();
-        match serde_json::from_str::<serde_json::Value>(&candidate) {
-            Ok(value)
-                if value
-                    .get("verdict")
-                    .is_some_and(serde_json::Value::is_string) =>
+        // Reads one JSON value and stops at the first byte that cannot be
+        // JSON, so a brace in prose or code costs a few bytes, not a scan of
+        // the rest of the reply.
+        let mut values =
+            serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = values.next() {
+            let end = start + values.byte_offset();
+            if value
+                .get("verdict")
+                .is_some_and(serde_json::Value::is_string)
             {
-                return Ok(candidate);
+                return Ok(text[start..end].to_string());
             }
-            Ok(_) => skip_until = end + 1,
-            Err(_) => {}
+            skip_until = end;
         }
-        first.get_or_insert(candidate);
     }
     // A reply that opens with prose and has no envelope is not a damaged
     // envelope: say so, instead of a JSON syntax error about its first brace.
-    first
-        .filter(|_| text.trim_start().starts_with('{'))
+    if !text.trim_start().starts_with('{') {
+        return Err(invalid_envelope("model did not return a JSON object"));
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let first = chars.iter().position(|&c| c == '{').unwrap_or(0);
+    balanced_end(&chars, first)
+        .map(|last| chars[first..=last].iter().collect())
         .ok_or_else(|| invalid_envelope("model did not return a JSON object"))
 }
 
@@ -2035,6 +2028,18 @@ mod tests {
         let output = parse_role_output(reply).expect("envelope after prose");
         assert_eq!(output.verdict, Verdict::Continue);
         assert_eq!(output.content, "file: a.rs\nfn a() {}");
+    }
+
+    #[test]
+    fn parse_finds_the_envelope_after_thousands_of_braces() {
+        // No cap on how far the envelope may be: 5,000 unmatched braces first.
+        let reply = format!(
+            "{}{}",
+            "if x { ".repeat(5_000),
+            r#"{"verdict":"done","content":"ok"}"#
+        );
+        let output = parse_role_output(&reply).expect("envelope after many braces");
+        assert_eq!(output.verdict, Verdict::Done);
     }
 
     #[test]
