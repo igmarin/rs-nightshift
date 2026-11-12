@@ -446,26 +446,86 @@ fn resolve_repo_file(repo: &Path, rel: &str, tool: &str) -> Result<PathBuf, Erro
     Ok(canonical)
 }
 
-/// Count needle occurrences in haystack, including overlapping matches.
+/// The 1-based line of each place where `needle` starts in `haystack`,
+/// overlapping places included: `"aaa"` contains `"aa"` twice, and
+/// `str::matches` would report one and miss the ambiguity.
+fn match_lines(haystack: &str, needle: &str) -> Vec<usize> {
+    let mut lines = Vec::new();
+    if needle.is_empty() {
+        return lines;
+    }
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let at = from + offset;
+        lines.push(haystack[..at].matches('\n').count() + 1);
+        from = at + haystack[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    lines
+}
+
+/// Why `old` is not in `body`, written for the role's next attempt.
 ///
-/// `"aaa"` contains `"aa"` twice (offsets 0 and 1). `str::matches` would
-/// report one non-overlapping match and miss the ambiguity.
-fn count_overlapping(haystack: &str, needle: &str) -> usize {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return 0;
-    }
-    let mut count = 0;
-    let mut rest = haystack;
-    while let Some(offset) = rest.find(needle) {
-        count += 1;
-        let advance = rest[offset..].chars().next().map_or(1, char::len_utf8);
-        let next = offset + advance;
-        if next >= rest.len() {
-            break;
-        }
-        rest = &rest[next..];
-    }
-    count
+/// Lines `old` up with the place in the file that it matches for the most
+/// lines (leading and trailing whitespace ignored), then names the first
+/// line that is not exactly equal.
+fn where_old_differs(body: &str, old: &str) -> String {
+    // Long lines are cut: the text goes back into a prompt.
+    let shown = |line: &str| line.chars().take(160).collect::<String>();
+    let same = |a: &str, b: &str| a.trim() == b.trim();
+    let file: Vec<&str> = body.lines().collect();
+    let old: Vec<&str> = old.lines().collect();
+    let Some(first) = old.first() else {
+        return String::new();
+    };
+    let run = |start: usize| {
+        old.iter()
+            .zip(&file[start..])
+            .take_while(|(old, file)| same(old, file))
+            .count()
+    };
+    let best = (0..file.len())
+        .filter(|&start| same(file[start], first))
+        .max_by_key(|&start| (run(start), std::cmp::Reverse(start)));
+    let Some(start) = best else {
+        return format!(
+            "no line of the file matches the first line of old: {}",
+            shown(first)
+        );
+    };
+    let equal = old
+        .iter()
+        .zip(&file[start..])
+        .take_while(|(old, file)| old == file)
+        .count();
+    let from = start + 1;
+    let Some(wanted) = old.get(equal) else {
+        return format!(
+            "old matches the file from line {from} line by line, but not as one text; \
+             check the line endings"
+        );
+    };
+    let Some(actual) = file.get(start + equal) else {
+        return format!(
+            "old matches the file from line {from} for {equal} line(s), but the file ends \
+             after line {}.\n  old line {}: {}",
+            file.len(),
+            equal + 1,
+            shown(wanted)
+        );
+    };
+    let note = if same(wanted, actual) {
+        " (only the whitespace differs)"
+    } else {
+        ""
+    };
+    format!(
+        "old matches the file from line {from} for {equal} line(s), then differs{note}.\n  \
+         old line {}: {}\n  file line {}: {}",
+        equal + 1,
+        shown(wanted),
+        from + equal,
+        shown(actual)
+    )
 }
 
 fn write_atomically(path: &Path, body: &str, tool: &str) -> Result<(), Error> {
@@ -513,21 +573,27 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
                 block.path
             ))
         })?;
-        let count = count_overlapping(body, &block.old);
-        match count {
+        // A failure says where to look: the message is the role's only
+        // guide for its next attempt.
+        let lines = match_lines(body, &block.old);
+        match lines.len() {
             0 => {
                 return Err(Error::from(ArtifactError::artifact(format!(
-                    "search-replace: old_text not found in {}",
-                    block.path
+                    "search-replace: old_text not found in {}. {}\nQuote the file as it is now.",
+                    block.path,
+                    where_old_differs(body, &block.old)
                 ))));
             }
             1 => {
                 *body = body.replacen(&block.old, &block.new, 1);
             }
             n => {
+                let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
                 return Err(Error::from(ArtifactError::artifact(format!(
-                    "search-replace: old_text matches {n} locations in {} (ambiguous)",
-                    block.path
+                    "search-replace: old_text matches {n} locations in {} (ambiguous), at lines {}. \
+                     Add lines before or after it to old, so that it matches one place.",
+                    block.path,
+                    shown.join(", ")
                 ))));
             }
         }
@@ -1008,10 +1074,90 @@ file: leftover.txt
     }
 
     #[test]
-    fn count_overlapping_counts_sliding_windows() {
-        assert_eq!(count_overlapping("aaa", "aa"), 2);
-        assert_eq!(count_overlapping("aaaa", "aa"), 3);
-        assert_eq!(count_overlapping("hello", "hello"), 1);
-        assert_eq!(count_overlapping("hello", "nope"), 0);
+    fn match_lines_finds_sliding_windows_and_their_lines() {
+        assert_eq!(match_lines("aaa", "aa"), [1, 1]);
+        assert_eq!(match_lines("aaaa", "aa").len(), 3);
+        assert_eq!(match_lines("hello", "hello"), [1]);
+        assert!(match_lines("hello", "nope").is_empty());
+        assert_eq!(match_lines("x = 1\ny = 2\nx = 1\n", "x = 1"), [1, 3]);
+    }
+
+    #[test]
+    fn where_old_differs_names_the_first_line_that_differs() {
+        // The file changed after the model last read it: `old` is stale.
+        let body = "fn a() {\n    one();\n    added();\n    two();\n}\n";
+        let old = "fn a() {\n    one();\n    two();\n}";
+        let why = where_old_differs(body, old);
+        assert!(why.contains("from line 1 for 2 line(s)"), "{why}");
+        assert!(why.contains("old line 3:     two();"), "{why}");
+        assert!(why.contains("file line 3:     added();"), "{why}");
+        assert!(!why.contains("whitespace"), "{why}");
+    }
+
+    #[test]
+    fn where_old_differs_says_when_only_whitespace_differs() {
+        let body = "fn a() {\n    one();\n}\n";
+        let why = where_old_differs(body, "fn a() {\n  one();\n}");
+        assert!(why.contains("from line 1 for 1 line(s)"), "{why}");
+        assert!(why.contains("old line 2:   one();"), "{why}");
+        assert!(why.contains("file line 2:     one();"), "{why}");
+        assert!(why.contains("only the whitespace differs"), "{why}");
+    }
+
+    #[test]
+    fn where_old_differs_takes_the_longest_run_and_handles_the_edges() {
+        // The second `a` starts the longer run.
+        let why = where_old_differs("a\nx\na\nb\nq\n", "a\nb\nc");
+        assert!(why.contains("from line 3 for 2 line(s)"), "{why}");
+        assert!(why.contains("file line 5: q"), "{why}");
+        // `old` runs past the end of the file.
+        let why = where_old_differs("a\nb\n", "a\nb\nc");
+        assert!(why.contains("the file ends after line 2"), "{why}");
+        // Nothing to line up with.
+        let why = where_old_differs("hello\n", "nope");
+        assert!(
+            why.contains("no line of the file matches the first line of old: nope"),
+            "{why}"
+        );
+        // A very long line is cut.
+        let long = "x".repeat(1000);
+        let why = where_old_differs(&format!("a\n{long}\n"), "a\nb");
+        assert!(why.len() < 600, "{}", why.len());
+    }
+
+    #[tokio::test]
+    async fn search_replace_errors_say_where_to_look() {
+        let repo = init_repo();
+        std::fs::write(
+            repo.path().join("f.rs"),
+            "let x = 1;\nlet y = 2;\nlet x = 1;\n",
+        )
+        .expect("write");
+        let runner = CapabilityRunner::new();
+        let err = runner
+            .run(
+                "search-replace",
+                repo.path(),
+                &search_replace_input("f.rs", "let x = 1;", "let x = 3;"),
+            )
+            .await
+            .expect_err("ambiguous");
+        assert!(
+            err.to_string()
+                .contains("matches 2 locations in f.rs (ambiguous), at lines 1, 3"),
+            "{err}"
+        );
+        let err = runner
+            .run(
+                "search-replace",
+                repo.path(),
+                "file: f.rs\nold:\nlet y = 2;\nlet x = 9;\nnew:\nlet y = 5;\n",
+            )
+            .await
+            .expect_err("not found");
+        let text = err.to_string();
+        assert!(text.contains("old_text not found in f.rs"), "{text}");
+        assert!(text.contains("from line 2 for 1 line(s)"), "{text}");
+        assert!(text.contains("file line 3: let x = 1;"), "{text}");
     }
 }
