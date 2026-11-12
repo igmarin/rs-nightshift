@@ -401,3 +401,21 @@ unchanged. Paths must stay inside the repo. Secret-bearing paths (`.git`,
 `.env`, keys, and the rest of the `context_files` denylist) are rejected,
 including symlinks that resolve into those paths. The tool never creates
 files and never commits.
+
+When an `old` text does not match, the error says where to look, and the role
+gets it as feedback for its next attempt (see `retries`):
+
+```text
+search-replace: old_text not found in src/report.rs. old matches the file from line 33 for 7 line(s), then differs.
+  old line 8:     if snapshot.status != RunStatus::Done {
+  file line 40:     let retry_count = events
+Quote the file as it is now.
+```
+
+Whitespace at the start and end of a line is ignored to find that place, and
+the message says when only the whitespace differs. When `old` matches more
+than once, the error lists the line of each match.
+
+In the role's prompt, ask for short `old` blocks: the lines that change and
+one or two lines around them. A long block fails on the first line that the
+model does not copy exactly.

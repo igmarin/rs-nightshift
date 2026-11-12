@@ -53,6 +53,11 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `search-replace` errors say where to look. "old_text not found" now names
+  the place in the file that `old` matches for the most lines and shows the
+  first line that differs, from `old` and from the file. "ambiguous" lists
+  the line of each match. Before, a role that quoted the file wrongly got no
+  hint and repeated the same reply on each retry.
 - `run-tests` stops everything the test command started when the command
   reaches its time limit. Before, only the command itself was stopped, so a
   test program that hung under `cargo test` kept running after the role had
