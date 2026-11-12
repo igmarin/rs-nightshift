@@ -75,6 +75,7 @@ All notable changes to this project are documented in this file.
 - `run-tests` no longer fails with "test command timed out" when the test
   command prints more than about 64 KB. The output was read only after the
   command exited, so a full pipe blocked the command until the time limit.
+  At most 1 MiB of each output stream is kept.
 - A reply with prose or a code listing before its JSON envelope is accepted.
   The parser took the first `{` in the reply, so braces in that text hid a
   valid envelope and the reply was rejected with a JSON syntax error. A reply
