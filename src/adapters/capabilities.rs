@@ -72,7 +72,8 @@ impl CapabilityRunner {
         Ok("patch applied".to_string())
     }
 
-    /// Write `input` as full file content to `repo`. The input must start
+    /// Write `input` as full file content to `repo`, creating the file (and
+    /// its parent directories) when it does not exist. The input must start
     /// with a header line `file: <path>` followed by the file content. The
     /// content is considered to end at the first sentinel line that looks
     /// like another context marker (`<!-- file:`, `<!-- end file content -->`,
@@ -93,7 +94,7 @@ impl CapabilityRunner {
                     ArtifactError::artifact("write-file: input must start with 'file: <path>'")
                 })?
                 .trim();
-            let file_path = resolve_repo_file(&repo, path, "write-file")?;
+            let file_path = resolve_writable_repo_file(&repo, path)?;
             // Collect body lines, stopping at context-marker sentinels that
             // small models often echo from the prompt. Also strip a common
             // JSON artifact: a lone trailing `"` line that the model inserts
@@ -114,8 +115,18 @@ impl CapabilityRunner {
             }) {
                 body_lines.pop();
             }
-            let body = body_lines.join("\n");
+            // A text file ends with a newline; without it formatters and
+            // `git diff` flag every file this tool writes.
+            let mut body = body_lines.join("\n");
+            if !body.is_empty() {
+                body.push('\n');
+            }
             let body_len = body.len();
+            if let Some(dir) = file_path.parent() {
+                std::fs::create_dir_all(dir).map_err(|error| {
+                    ArtifactError::artifact(format!("write-file: create directory: {error}"))
+                })?;
+            }
             write_atomically(&file_path, &body, "write-file")?;
             Ok(format!("wrote {path} ({body_len} bytes)"))
         })
@@ -330,8 +341,9 @@ fn append_body_line(buf: &mut String, line: &str) {
     }
 }
 
-/// Resolve `rel` inside `repo`. Rejects empty, absolute, `..`, and secret paths.
-fn resolve_repo_file(repo: &Path, rel: &str, tool: &str) -> Result<PathBuf, Error> {
+/// Reject a repo-relative path that is empty, absolute, contains `..`, or
+/// names a secret-bearing path. Looks at the text only, not the filesystem.
+fn check_relative_path(rel: &str, tool: &str) -> Result<(), Error> {
     let path = Path::new(rel);
     if rel.is_empty()
         || path.is_absolute()
@@ -348,7 +360,64 @@ fn resolve_repo_file(repo: &Path, rel: &str, tool: &str) -> Result<PathBuf, Erro
             "{tool}: path is a secret-bearing path: {rel}"
         ))));
     }
-    let file_path = repo.join(path);
+    Ok(())
+}
+
+/// Resolve `rel` for `write-file`: an existing file (the rules of
+/// [`resolve_repo_file`]) or a file that does not exist yet.
+///
+/// For a new file the deepest existing ancestor is canonicalized, so a
+/// symlinked directory cannot move the write outside the repo or into a
+/// secret-bearing path. The missing directories are not created here.
+fn resolve_writable_repo_file(repo: &Path, rel: &str) -> Result<PathBuf, Error> {
+    const TOOL: &str = "write-file";
+    check_relative_path(rel, TOOL)?;
+    let file_path = repo.join(rel);
+    // `symlink_metadata` also sees a dangling symlink, which must go through
+    // the existing-file rules instead of being replaced.
+    if file_path.symlink_metadata().is_ok() {
+        return resolve_repo_file(repo, rel, TOOL);
+    }
+    let repo_canonical = repo
+        .canonicalize()
+        .map_err(|error| ArtifactError::artifact(format!("{TOOL}: invalid repo: {error}")))?;
+    // `rel` is relative with no `..`, so the walk ends at `repo` at the latest.
+    let ancestor = file_path
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.symlink_metadata().is_ok())
+        .unwrap_or(repo);
+    let ancestor_canonical = ancestor
+        .canonicalize()
+        .map_err(|error| ArtifactError::artifact(format!("{TOOL}: invalid path {rel}: {error}")))?;
+    if !ancestor_canonical.starts_with(&repo_canonical) {
+        return Err(Error::from(ArtifactError::artifact(format!(
+            "{TOOL}: path escapes repo root"
+        ))));
+    }
+    if !ancestor_canonical.is_dir() {
+        return Err(Error::from(ArtifactError::artifact(format!(
+            "{TOOL}: not a directory: {}",
+            ancestor.strip_prefix(repo).unwrap_or(ancestor).display()
+        ))));
+    }
+    let rest = file_path.strip_prefix(ancestor).unwrap_or(Path::new(rel));
+    let target = ancestor_canonical.join(rest);
+    let target_rel = target.strip_prefix(&repo_canonical).unwrap_or(&target);
+    if is_secret_path(&target_rel.to_string_lossy()) {
+        return Err(Error::from(ArtifactError::artifact(format!(
+            "{TOOL}: path resolves to secret-bearing path {}",
+            target_rel.display()
+        ))));
+    }
+    Ok(target)
+}
+
+/// Resolve `rel` to an existing file inside `repo`. Rejects empty, absolute,
+/// `..`, and secret paths.
+fn resolve_repo_file(repo: &Path, rel: &str, tool: &str) -> Result<PathBuf, Error> {
+    check_relative_path(rel, tool)?;
+    let file_path = repo.join(rel);
     let canonical = file_path
         .canonicalize()
         .map_err(|error| ArtifactError::artifact(format!("{tool}: invalid path {rel}: {error}")))?;
@@ -855,6 +924,87 @@ file: leftover.txt
             .await
             .expect_err("secret");
         assert!(err.to_string().contains("secret"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn write_file_creates_a_new_file_and_its_directories() {
+        let repo = init_repo();
+        let runner = CapabilityRunner::new();
+        let out = runner
+            .run(
+                "write-file",
+                repo.path(),
+                "file: .github/ISSUE_TEMPLATE/task.md\n## Goal\n\nText\n",
+            )
+            .await
+            .expect("create");
+        assert!(out.contains(".github/ISSUE_TEMPLATE/task.md"), "{out}");
+        let body = std::fs::read_to_string(repo.path().join(".github/ISSUE_TEMPLATE/task.md"))
+            .expect("read");
+        assert_eq!(body, "## Goal\n\nText\n", "one final newline");
+
+        // An existing file is still replaced as a whole.
+        runner
+            .run("write-file", repo.path(), "file: hello.txt\nbye\n")
+            .await
+            .expect("overwrite");
+        let body = std::fs::read_to_string(repo.path().join("hello.txt")).expect("read");
+        assert_eq!(body, "bye\n");
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_a_new_file_below_a_file() {
+        let repo = init_repo();
+        let err = CapabilityRunner::new()
+            .run("write-file", repo.path(), "file: hello.txt/new.md\nx\n")
+            .await
+            .expect_err("parent is a file");
+        assert!(err.to_string().contains("not a directory"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_a_new_secret_file() {
+        let repo = init_repo();
+        let err = CapabilityRunner::new()
+            .run("write-file", repo.path(), "file: config/.env\nKEY=1\n")
+            .await
+            .expect_err("secret");
+        assert!(err.to_string().contains("secret"), "{err}");
+        assert!(!repo.path().join("config").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_rejects_a_new_file_through_an_escaping_symlink() {
+        let repo = init_repo();
+        let outside = tempfile::tempdir().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("out")).expect("symlink");
+        std::os::unix::fs::symlink(repo.path().join(".git"), repo.path().join("meta"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(outside.path().join("missing"), repo.path().join("dangling"))
+            .expect("symlink");
+        let runner = CapabilityRunner::new();
+
+        let err = runner
+            .run("write-file", repo.path(), "file: out/sub/new.md\nx\n")
+            .await
+            .expect_err("escapes");
+        assert!(err.to_string().contains("escapes repo root"), "{err}");
+        assert!(!outside.path().join("sub").exists());
+
+        let err = runner
+            .run("write-file", repo.path(), "file: meta/hooks/pre-push\nx\n")
+            .await
+            .expect_err("secret through symlink");
+        assert!(err.to_string().contains("secret"), "{err}");
+        assert!(!repo.path().join(".git/hooks/pre-push").exists());
+
+        // A dangling symlink is not treated as a free name.
+        runner
+            .run("write-file", repo.path(), "file: dangling\nx\n")
+            .await
+            .expect_err("dangling symlink");
+        assert!(!outside.path().join("missing").exists());
     }
 
     #[test]

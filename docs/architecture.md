@@ -136,7 +136,9 @@ the capability adapters (`src/adapters/capabilities.rs`), declared per role via
   `git apply --check`, dirty-tree guard, then apply. Runs as a post-tool for
   `continue` / `done` verdicts. Never commits.
 - **`write-file`** — write `content` that starts with `file: <path>` as the
-  full file. Post-tool for `continue` / `done`. Path must stay in the repo.
+  full file, creating it (and its directories) when it does not exist.
+  Post-tool for `continue` / `done`. Path must stay in the repo and must not
+  be a secret-bearing path, also when a symlinked directory is in the way.
 - **`search-replace`** — exact `old:` / `new:` substitutions in existing
   files. Each `old` snippet must match once (including overlapping matches);
   not-found and ambiguous matches abort with no writes. Secret-bearing paths
