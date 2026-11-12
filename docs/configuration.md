@@ -324,6 +324,44 @@ config load.
 | `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the full file. Creates the file and its directories when they do not exist. One file per reply. |
 | `search-replace` | After `continue` / `done` | Replaces unique `old:` snippets with `new:` text in existing files |
 
+### run-tests
+
+The test command is chosen for the repo the job edits, never by a model:
+
+| The repo has | Command |
+| :--- | :--- |
+| `nightshift.toml` with a `[test]` table | its `command` |
+| `Cargo.toml` | `cargo test` |
+| `Gemfile` | `bundle exec rspec` |
+| `mix.exs` | `mix test` |
+| `pyproject.toml`, `pytest.ini` or `setup.py` | `pytest` |
+
+The first match wins. The command runs in the repo with a 600 second limit;
+its exit code and output go into the role's prompt.
+
+A job is "done" when the QA role says so, and the QA role sees only this
+command's result. So put every check the repo's CI makes into it. The command
+is split on spaces and runs without a shell (no quotes, `&&` or pipes), so
+point it at a script for more than one step:
+
+```toml
+# nightshift.toml in the repo the job edits
+[test]
+command = "sh scripts/job-check.sh"
+```
+
+```sh
+#!/bin/sh
+set -e
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+This repo uses that script ([`scripts/job-check.sh`](../scripts/job-check.sh)).
+A formatter that fixes the files (`cargo fmt`, not `cargo fmt --check`) saves
+a round trip to the developer role.
+
 ### search-replace
 
 Prefer this over `apply-patch` or `write-file` when the model can quote a unique
