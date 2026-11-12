@@ -608,9 +608,10 @@ fn find_matching_think_close(bytes: &[u8]) -> Option<(usize, usize)> {
 /// Otherwise the model wrote prose or a code listing first, and that text
 /// can have braces and example envelopes of its own. The envelope is then
 /// the last balanced object, not nested in another balanced object, that
-/// parses as JSON with a valid `verdict`: an explanation comes before the
-/// answer. Nothing is taken from inside a larger object, so a damaged
-/// envelope is rejected rather than replaced by something it contains.
+/// mentions `"verdict"`: an explanation comes before the answer. It must be
+/// JSON with a valid verdict, or the reply is rejected. An earlier example
+/// never stands in for a damaged answer, and nothing is taken from inside a
+/// larger object.
 fn extract_balanced_object(text: &str) -> Result<String, Error> {
     let no_object = || invalid_envelope("model did not return a JSON object");
     let chars: Vec<char> = text.chars().collect();
@@ -623,7 +624,8 @@ fn extract_balanced_object(text: &str) -> Result<String, Error> {
         .into_iter()
         .rev()
         .map(|(first, last)| chars[first..=last].iter().collect::<String>())
-        .find(|candidate| has_valid_verdict(candidate))
+        .find(|candidate| candidate.contains("\"verdict\""))
+        .filter(|candidate| has_valid_verdict(candidate))
         .ok_or_else(no_object)
 }
 
@@ -2075,17 +2077,35 @@ mod tests {
 
     #[test]
     fn parse_takes_the_last_envelope_after_prose_with_examples() {
-        // An example envelope, and one with an unknown verdict, come before
-        // the answer.
+        // Example envelopes come before the answer; braces without a
+        // verdict come after it.
         let reply = concat!(
             "The format is {\"verdict\":\"done\",\"content\":\"example\"}, ",
             "never {\"verdict\":\"pending\"}.\n",
             "{\"verdict\":\"continue\",\"content\":\"real\"}\n",
-            "{\"verdict\":\"pending\",\"content\":\"not a verdict\"}"
+            "That replaces fn a() { b() }."
         );
-        let output = parse_role_output(reply).expect("last valid envelope");
+        let output = parse_role_output(reply).expect("last envelope");
         assert_eq!(output.verdict, Verdict::Continue);
         assert_eq!(output.content, "real");
+    }
+
+    #[test]
+    fn parse_rejects_a_damaged_answer_after_a_valid_example() {
+        // The last object that mentions a verdict is the answer. When it is
+        // damaged or its verdict is unknown, the earlier example must not be
+        // used in its place.
+        for answer in [
+            r#"{"verdict":"continue","content":"real", oops}"#,
+            r#"{"verdict":"pending","content":"real"}"#,
+        ] {
+            let reply = format!("Like {{\"verdict\":\"done\",\"content\":\"example\"}}:\n{answer}");
+            let error = parse_role_output(&reply).expect_err("damaged answer");
+            assert!(
+                error.to_string().contains("did not return a JSON object"),
+                "{answer}: {error}"
+            );
+        }
     }
 
     #[test]
