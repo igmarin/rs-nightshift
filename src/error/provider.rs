@@ -37,6 +37,16 @@ pub enum ProviderError {
     /// The provider request exceeded the client timeout.
     #[error("provider request timed out")]
     Timeout,
+
+    /// The model stopped at its output limit, so the reply is incomplete.
+    #[error(
+        "the reply was cut off at the output limit (max_tokens) before it was complete; \
+         reply with less text"
+    )]
+    CutOff {
+        /// The incomplete reply, kept in the run directory.
+        text: String,
+    },
 }
 
 #[cfg(test)]

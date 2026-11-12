@@ -1,6 +1,6 @@
 //! Ollama [`ModelClient`] adapter preserving `keep_alive: 0` unload.
 
-use crate::adapters::kernel_error::map_kernel_error;
+use crate::adapters::kernel_error::{complete_text, map_kernel_error};
 use crate::adapters::ollama::OllamaClient;
 use crate::error::Error;
 use crate::generate::Origin;
@@ -73,7 +73,7 @@ impl ModelClient for OllamaAdapter {
             .complete_with_timeout(llm_request, timeout)
             .await
             .map_err(|error| map_kernel_error(error, &request.model))?;
-        Ok(response.content)
+        Ok(complete_text(response)?)
     }
 
     fn redacted_origin(&self) -> Option<String> {

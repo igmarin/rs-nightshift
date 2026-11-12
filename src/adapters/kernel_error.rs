@@ -31,6 +31,20 @@ pub fn map_kernel_error(error: KernelError, model: &str) -> ProviderError {
     }
 }
 
+/// The text of a reply that the model finished, or [`ProviderError::CutOff`]
+/// when it stopped at its output limit (`finish_reason` is `length`).
+///
+/// A cut-off reply must not be used: repairing it would apply half an edit,
+/// or write a file that ends in the middle.
+pub fn complete_text(response: llm_kernel::llm::LLMResponse) -> Result<String, ProviderError> {
+    match response.finish_reason.as_deref() {
+        Some("length" | "max_tokens") => Err(ProviderError::CutOff {
+            text: response.content,
+        }),
+        _ => Ok(response.content),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +76,29 @@ mod tests {
         match err {
             ProviderError::Ollama(msg) => assert!(msg.contains("boom"), "{msg}"),
             other => panic!("expected Ollama, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn complete_text_rejects_a_reply_that_stopped_at_the_output_limit() {
+        let reply = |finish_reason: Option<&str>| llm_kernel::llm::LLMResponse {
+            content: "half a rep".into(),
+            finish_reason: finish_reason.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(
+            complete_text(reply(Some("stop"))).expect("stop"),
+            "half a rep"
+        );
+        assert_eq!(complete_text(reply(None)).expect("none"), "half a rep");
+        for reason in ["length", "max_tokens"] {
+            let error = complete_text(reply(Some(reason))).expect_err(reason);
+            assert!(
+                matches!(&error, ProviderError::CutOff { text } if text == "half a rep"),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("cut off"), "{error}");
+            assert!(!error.to_string().contains("half a rep"), "{error}");
         }
     }
 }
