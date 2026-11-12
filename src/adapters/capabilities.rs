@@ -454,10 +454,14 @@ fn match_lines(haystack: &str, needle: &str) -> Vec<usize> {
     if needle.is_empty() {
         return lines;
     }
-    let mut from = 0;
+    // `line` is the line of `counted`: newlines are counted once, not again
+    // from the start for each match.
+    let (mut from, mut counted, mut line) = (0, 0, 1);
     while let Some(offset) = haystack[from..].find(needle) {
         let at = from + offset;
-        lines.push(haystack[..at].matches('\n').count() + 1);
+        line += haystack[counted..at].matches('\n').count();
+        counted = at;
+        lines.push(line);
         from = at + haystack[at..].chars().next().map_or(1, char::len_utf8);
     }
     lines
@@ -1080,6 +1084,11 @@ file: leftover.txt
         assert_eq!(match_lines("hello", "hello"), [1]);
         assert!(match_lines("hello", "nope").is_empty());
         assert_eq!(match_lines("x = 1\ny = 2\nx = 1\n", "x = 1"), [1, 3]);
+        assert_eq!(match_lines("a\n\na a\nb\na", "a"), [1, 3, 3, 5]);
+        // Many matches in a large text stay fast: one pass, not one per match.
+        let big = "x\n".repeat(200_000);
+        let lines = match_lines(&big, "x");
+        assert_eq!((lines.len(), lines[199_999]), (200_000, 200_000));
     }
 
     #[test]
