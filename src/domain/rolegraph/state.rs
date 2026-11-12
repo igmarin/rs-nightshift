@@ -27,7 +27,8 @@ pub enum RunStatus {
 pub enum EventKind {
     /// A role began.
     RoleStart,
-    /// An LLM completion was requested.
+    /// One model call finished or failed; [`ActionEvent::call`] has its
+    /// time and token counts.
     LlmCall,
     /// A declared capability ran.
     ToolCall,
@@ -70,6 +71,22 @@ pub struct ActionEvent {
     /// Free-text detail (a `retry` event's attempt number and reason).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Time and token counts of one model call (an `llm_call` event).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<ModelCall>,
+}
+
+/// Time and token counts of one model call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCall {
+    /// Wall-clock time of the call, in milliseconds.
+    pub duration_ms: u64,
+    /// Prompt tokens, when the server reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u32>,
+    /// Completion tokens, when the server reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u32>,
 }
 
 /// Resumable snapshot of where a run stands.
@@ -108,6 +125,7 @@ mod tests {
             artifact: Some("03_qa_report.json".into()),
             block_reason: BlockReason::None,
             detail: None,
+            call: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"event\":\"role_end\""), "{json}");
@@ -128,10 +146,64 @@ mod tests {
             artifact: None,
             block_reason: BlockReason::None,
             detail: None,
+            call: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(!json.contains("verdict"), "{json}");
         assert!(!json.contains("artifact"), "{json}");
+        assert!(!json.contains("call"), "{json}");
+    }
+
+    #[test]
+    fn llm_call_event_round_trips_with_and_without_tokens() {
+        let mut event = ActionEvent {
+            ts: "2026-11-12T00:00:00Z".into(),
+            event: EventKind::LlmCall,
+            role: "dev".into(),
+            provider: "mlx".into(),
+            model: "qwen3.6-35b-4bit".into(),
+            verdict: None,
+            artifact: None,
+            block_reason: BlockReason::None,
+            detail: None,
+            call: Some(ModelCall {
+                duration_ms: 1500,
+                prompt_tokens: Some(900),
+                completion_tokens: Some(120),
+            }),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"llm_call\""), "{json}");
+        assert!(
+            json.contains(
+                "\"call\":{\"duration_ms\":1500,\"prompt_tokens\":900,\"completion_tokens\":120}"
+            ),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<ActionEvent>(&json).expect("parse"),
+            event
+        );
+
+        // A server that reports no usage: only the time is written.
+        event.call = Some(ModelCall {
+            duration_ms: 1500,
+            prompt_tokens: None,
+            completion_tokens: None,
+        });
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"call\":{\"duration_ms\":1500}"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ActionEvent>(&json).expect("parse"),
+            event
+        );
+    }
+
+    #[test]
+    fn action_log_lines_without_call_still_parse() {
+        let line = r#"{"ts":"t","event":"role_start","role":"po","provider":"mlx","model":"m","block_reason":"none"}"#;
+        let event: ActionEvent = serde_json::from_str(line).expect("old line parses");
+        assert_eq!(event.call, None);
     }
 
     #[test]

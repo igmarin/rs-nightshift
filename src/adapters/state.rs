@@ -129,6 +129,7 @@ mod tests {
             artifact: None,
             block_reason: BlockReason::None,
             detail: None,
+            call: None,
         }
     }
 
