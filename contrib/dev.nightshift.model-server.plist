@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent: keep a local OpenAI-compatible model server running
+  (rapid-mlx here; any server command works). Setup: docs/macos.md.
+
+  Replace /Users/YOU, both MODEL entries (an id from `rapid-mlx models`) and,
+  if needed, the port. The port must match base_url in the nightshift config.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.nightshift.model-server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/rapid-mlx</string>
+    <string>serve</string>
+    <string>MODEL</string>
+    <string>--port</string>
+    <string>8000</string>
+    <!-- The id roles use as `model`; without it the server lists the
+         model under its full repository name. -->
+    <string>--served-model-name</string>
+    <string>MODEL</string>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/nightshift-model-server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/nightshift-model-server.log</string>
+
+  <!-- Start at login and start again whenever the server exits. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
