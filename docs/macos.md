@@ -113,14 +113,39 @@ reread it.
 - The display may sleep. That does not affect the run.
 - `caffeinate` does not stop a sleep you ask for (Apple menu, power button) or
   a closed laptop lid. Keep a MacBook open and on power.
-- A user agent needs a logged-in user. For a Mac that must recover from a
-  power cut on its own, turn on automatic login and
-  `sudo pmset -a autorestart 1`.
 - Low Power Mode can slow generation. Check with `pmset -g | grep lowpowermode`
-  (`1` is on) and turn it off in System Settings if runs are slower than
-  expected.
+  (`1` is on). Turn it off with `sudo pmset -a lowpowermode 0`, or in System
+  Settings under Energy.
+- To start the Mac again after a power cut: `sudo pmset -a autorestart 1`.
 
-## 6. Memory
+## 6. Without a display
+
+A Mac runs the queue the same way with no monitor attached. Set these up
+while the monitor is still connected:
+
+1. Turn on Remote Login (System Settings, General, Sharing), so you can reach
+   the Mac with `ssh`. Screen Sharing is optional.
+2. Log in on the Mac and leave that user logged in. A locked screen is fine.
+   The queue agent is a user agent: launchd runs it only while its user has a
+   login session on the Mac itself.
+3. Load the agent (step 4), then disconnect the monitor.
+
+After a restart, nobody is logged in, so the agent does not start until that
+user logs in again. Automatic login covers this, but macOS does not offer it
+while FileVault is on.
+
+If you only have an `ssh` session and nobody is logged in on the Mac, there
+is no `gui/$UID` domain to load the agent into. Start the queue with `nohup`
+instead, so it survives the end of the `ssh` session. An `ssh` shell has your
+normal `PATH`:
+
+```text
+nohup caffeinate -i nightshift queue --file ~/nightshift/goals.toml \
+  --config ~/nightshift/nightshift.toml --out ~/nightshift/artifacts \
+  >> ~/nightshift/artifacts/queue.log 2>&1 &
+```
+
+## 7. Memory
 
 Apple Silicon shares one memory pool between the system and the models, so
 every model a config uses must fit in RAM at the same time, with room for
