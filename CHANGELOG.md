@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- The run report shows `Retries: N` after the `Steps:` line when the run
+  retried a role at least once.
 - `write-file` creates the file, and its parent directories, when it does
   not exist yet. Before, it could only replace an existing file, so no tool
   could add a new file without a hand-written diff. The path rules are the
