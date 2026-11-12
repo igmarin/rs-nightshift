@@ -72,6 +72,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- A reply with prose or a code listing before its JSON envelope is accepted.
+  The parser took the first `{` in the reply, so braces in that text hid a
+  valid envelope and the reply was rejected with a JSON syntax error. A reply
+  that opens with prose and has no envelope is now rejected as "model did
+  not return a JSON object".
 - `write-file` ends the file with a newline. It used to drop the final
   newline, so every file it wrote failed format checks.
 - `search-replace` restores the files it already wrote when a later write
