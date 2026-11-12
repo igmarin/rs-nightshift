@@ -113,9 +113,10 @@ reread it.
 - The display may sleep. That does not affect the run.
 - `caffeinate` does not stop a sleep you ask for (Apple menu, power button) or
   a closed laptop lid. Keep a MacBook open and on power.
-- Low Power Mode can slow generation. Check with `pmset -g | grep lowpowermode`
-  (`1` is on). Turn it off with `sudo pmset -a lowpowermode 0`, or in System
-  Settings under Energy.
+- Turn Low Power Mode off. On an M2 Ultra one model went from about 49 to
+  about 90 tokens per second when it was turned off. Check with
+  `pmset -g | grep lowpowermode` (`1` is on); turn it off with
+  `sudo pmset -a lowpowermode 0`, or in System Settings under Energy.
 - To start the Mac again after a power cut: `sudo pmset -a autorestart 1`.
 
 ## 6. Without a display
@@ -156,7 +157,7 @@ context.
   31B and 35B) loaded together used about 44 GB, with no swap.
 - Check while a run is active: `sysctl vm.swapusage` should show `used = 0`.
   If it grows, use fewer or smaller models, or one model for every role.
-- Speed varies more than size: those three models ran at 8 to 49 tokens per
-  second on the same machine. Try a model on a real goal, and with
+- Speed varies more than size: those three models ran at 26 to 91 tokens per
+  second on the same machine (Low Power Mode off). Try a model on a real goal, and with
   [`nightshift bench`](configuration.md#benchmark-a-model-nightshift-bench),
   before giving it a role.
