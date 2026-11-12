@@ -51,12 +51,14 @@ fn parse_timestamp(ts: &str) -> Option<i64> {
     };
     let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
     let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
+    let days_in_month = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1..=12 => 31,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&day) || hour > 23 || minute > 59 || second > 59 {
         return None;
     }
     // Days since 1970-01-01, leap years included (Howard Hinnant's
@@ -100,6 +102,9 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
     for event in events {
         match event.event {
             EventKind::RoleStart => {
+                // A new start replaces an earlier one that had no end, also
+                // when the new one does not parse.
+                pending_starts.remove(&event.role);
                 if let Some(ts) = parse_timestamp(&event.ts) {
                     pending_starts.insert(event.role.clone(), ts);
                 }
@@ -243,6 +248,48 @@ mod tests {
         assert_eq!(parse_timestamp("2024-01-15T10:30:4\u{e9}"), None);
         assert_eq!(parse_timestamp("\u{e9}024-01-15T10:30:45"), None);
         assert_eq!(parse_timestamp("+024-01-15T10:30:45Z"), None);
+    }
+
+    #[test]
+    fn parse_timestamp_rejects_days_that_do_not_exist() {
+        assert_eq!(parse_timestamp("2024-02-30T10:00:00Z"), None);
+        assert_eq!(parse_timestamp("2023-02-29T10:00:00Z"), None);
+        assert_eq!(parse_timestamp("2100-02-29T10:00:00Z"), None);
+        assert_eq!(parse_timestamp("2024-04-31T10:00:00Z"), None);
+        assert_eq!(parse_timestamp("2024-01-00T10:00:00Z"), None);
+        assert!(parse_timestamp("2024-02-29T10:00:00Z").is_some());
+        assert!(parse_timestamp("2000-02-29T10:00:00Z").is_some());
+        assert!(parse_timestamp("2024-12-31T10:00:00Z").is_some());
+    }
+
+    fn event(kind: EventKind, role: &str, ts: &str) -> ActionEvent {
+        ActionEvent {
+            ts: ts.into(),
+            event: kind,
+            role: role.into(),
+            provider: String::new(),
+            model: String::new(),
+            verdict: None,
+            artifact: None,
+            block_reason: BlockReason::None,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn a_start_that_does_not_parse_drops_the_earlier_start() {
+        // The first start has no end. The second start is unreadable, so the
+        // end that follows has no start to pair with.
+        let events = vec![
+            event(EventKind::RoleStart, "dev", "2024-01-15T10:00:00Z"),
+            event(EventKind::RoleStart, "dev", "invalid"),
+            event(EventKind::RoleEnd, "dev", "2024-01-15T11:00:00Z"),
+            event(EventKind::RoleStart, "qa", "2024-01-15T11:00:00Z"),
+            event(EventKind::RoleEnd, "qa", "2024-01-15T11:00:07Z"),
+        ];
+        let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
+        assert!(report.contains("  qa: 7s"), "{report}");
+        assert!(!report.contains("dev:"), "{report}");
     }
 
     #[test]
