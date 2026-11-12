@@ -60,17 +60,20 @@ impl TestRunner for ProcessTestRunner {
                 "test command is empty",
             )));
         }
-        let mut child = Command::new(&argv[0])
+        let mut command = Command::new(&argv[0]);
+        command
             .args(&argv[1..])
             .current_dir(repo)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                Error::from(ArtifactError::artifact(format!(
-                    "failed to spawn test command: {e}"
-                )))
-            })?;
+            .stderr(Stdio::piped());
+        // Its own process group, so a timeout can stop everything it started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|e| {
+            Error::from(ArtifactError::artifact(format!(
+                "failed to spawn test command: {e}"
+            )))
+        })?;
         // Read both pipes while the command runs. A pipe holds about 64 KB;
         // a command that prints more blocks until someone reads it.
         let stop = Arc::new(AtomicBool::new(false));
@@ -80,8 +83,7 @@ impl TestRunner for ProcessTestRunner {
             Ok(readers) => readers,
             Err(error) => {
                 stop.store(true, Ordering::Relaxed);
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_command(&mut child);
                 return Err(Error::from(ArtifactError::artifact(format!(
                     "failed to read the test command's output: {error}"
                 ))));
@@ -108,11 +110,10 @@ impl TestRunner for ProcessTestRunner {
                 }
                 Ok(None) if start.elapsed() >= self.timeout => {
                     // The readers stop at their next chunk and close the
-                    // pipes, so a process the command left behind fails on
-                    // its next write instead of being read forever.
+                    // pipes. That covers a process that left the command's
+                    // group: it fails on its next write.
                     stop.store(true, Ordering::Relaxed);
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    stop_command(&mut child);
                     return Err(Error::from(ArtifactError::artifact(
                         "test command timed out",
                     )));
@@ -125,6 +126,21 @@ impl TestRunner for ProcessTestRunner {
             }
         }
     }
+}
+
+/// Stop the command and, on Unix, every process still in its group: what it
+/// started, and what those started.
+fn stop_command(child: &mut std::process::Child) {
+    // `kill` with a negative id signals a process group. The command is not
+    // reaped yet, so its id still names the group it leads.
+    #[cfg(unix)]
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Read a child's pipe on its own thread, until its end or until `stop` is
@@ -404,6 +420,37 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!alive(), "the leftover process {} still runs", pid.trim());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_stops_what_the_command_started_after_a_timeout() {
+        // The command starts a process that prints nothing and outlives the
+        // timeout. Stopping only the command would leave it running.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let script = "sleep 30 & echo $! > pid; wait";
+        let runner = ProcessTestRunner::new(Duration::from_millis(300));
+        runner
+            .run(tmp.path(), &["sh".into(), "-c".into(), script.into()])
+            .expect_err("timeout");
+        let pid = std::fs::read_to_string(tmp.path().join("pid")).expect("pid");
+        let alive = || {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .expect("kill -0")
+                .success()
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let still_alive = alive();
+        if still_alive {
+            let _ = Command::new("kill").arg(pid.trim()).status();
+        }
+        assert!(!still_alive, "process {} outlived the timeout", pid.trim());
     }
 
     #[test]

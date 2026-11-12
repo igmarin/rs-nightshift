@@ -339,6 +339,14 @@ The test command is chosen for the repo the job edits, never by a model:
 The first match wins. The command runs in the repo with a 600 second limit;
 its exit code and output go into the role's prompt.
 
+When the limit is reached, nightshift stops the command and every process it
+started (for `cargo test`: also the test program that hangs), and the role
+fails with `test command timed out`. For this, the command runs in its own
+process group. One effect: Ctrl-C in the terminal stops nightshift but does
+not reach a test command that is running at that moment. That command ends
+at its next write to its output; one that prints nothing runs until it ends
+by itself.
+
 A job is "done" when the QA role says so, and the QA role sees only this
 command's result. So put every check the repo's CI makes into it. The command
 is split on spaces and runs without a shell (no quotes, `&&` or pipes), so
