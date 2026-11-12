@@ -129,7 +129,8 @@ the capability adapters (`src/adapters/capabilities.rs`), declared per role via
 
 - **`run-tests`** — detect the test command (`cargo test`, `bundle exec rspec`,
   `mix test`, `pytest`, or `[test] command` in config), run it in the repo with
-  a 600 s wall-clock timeout, and capture the exit code + output. Runs as a
+  a 600 s wall-clock timeout, and capture the exit code + output. The command
+  gets its own process group; a timeout stops the whole group. Runs as a
   pre-tool: the results are injected into the role's prompt so it reasons over
   real results. The command never comes from model output.
 - **`apply-patch`** — validate the diff paths (no `..`, no absolute paths),

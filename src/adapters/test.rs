@@ -60,17 +60,20 @@ impl TestRunner for ProcessTestRunner {
                 "test command is empty",
             )));
         }
-        let mut child = Command::new(&argv[0])
+        let mut command = Command::new(&argv[0]);
+        command
             .args(&argv[1..])
             .current_dir(repo)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                Error::from(ArtifactError::artifact(format!(
-                    "failed to spawn test command: {e}"
-                )))
-            })?;
+            .stderr(Stdio::piped());
+        // Its own process group, so a timeout can stop everything it started.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|e| {
+            Error::from(ArtifactError::artifact(format!(
+                "failed to spawn test command: {e}"
+            )))
+        })?;
         // Read both pipes while the command runs. A pipe holds about 64 KB;
         // a command that prints more blocks until someone reads it.
         let stop = Arc::new(AtomicBool::new(false));
@@ -80,8 +83,7 @@ impl TestRunner for ProcessTestRunner {
             Ok(readers) => readers,
             Err(error) => {
                 stop.store(true, Ordering::Relaxed);
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = stop_command(&mut child);
                 return Err(Error::from(ArtifactError::artifact(format!(
                     "failed to read the test command's output: {error}"
                 ))));
@@ -108,14 +110,16 @@ impl TestRunner for ProcessTestRunner {
                 }
                 Ok(None) if start.elapsed() >= self.timeout => {
                     // The readers stop at their next chunk and close the
-                    // pipes, so a process the command left behind fails on
-                    // its next write instead of being read forever.
+                    // pipes. That covers a process that left the command's
+                    // group: it fails on its next write.
                     stop.store(true, Ordering::Relaxed);
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(Error::from(ArtifactError::artifact(
-                        "test command timed out",
-                    )));
+                    let message = match stop_command(&mut child) {
+                        None => "test command timed out".to_string(),
+                        Some(problem) => format!(
+                            "test command timed out; processes it started may still run ({problem})"
+                        ),
+                    };
+                    return Err(Error::from(ArtifactError::artifact(message)));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(error) => {
@@ -124,6 +128,36 @@ impl TestRunner for ProcessTestRunner {
                 }
             }
         }
+    }
+}
+
+/// Stop the command and, on Unix, every process still in its group: what it
+/// started, and what those started. Returns the reason when the group could
+/// not be signalled; then only the command itself was stopped.
+fn stop_command(child: &mut std::process::Child) -> Option<String> {
+    // The command is not reaped yet, so its id still names the group it leads.
+    #[cfg(unix)]
+    let problem = kill_group("kill", child.id());
+    #[cfg(not(unix))]
+    let problem = None;
+    let _ = child.kill();
+    let _ = child.wait();
+    problem
+}
+
+/// Signal process group `group` with the `kill` program: a negative id names
+/// a group. Returns the reason when that did not work.
+#[cfg(unix)]
+fn kill_group(kill: &str, group: u32) -> Option<String> {
+    let status = Command::new(kill)
+        .args(["-KILL", "--", &format!("-{group}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("`{kill}` ended with {status}")),
+        Err(error) => Some(format!("could not run `{kill}`: {error}")),
     }
 }
 
@@ -404,6 +438,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!alive(), "the leftover process {} still runs", pid.trim());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_stops_what_the_command_started_after_a_timeout() {
+        // The command starts a process that prints nothing and outlives the
+        // timeout. Stopping only the command would leave it running.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let script = "sleep 30 & echo $! > pid; wait";
+        let runner = ProcessTestRunner::new(Duration::from_millis(300));
+        runner
+            .run(tmp.path(), &["sh".into(), "-c".into(), script.into()])
+            .expect_err("timeout");
+        let pid = std::fs::read_to_string(tmp.path().join("pid")).expect("pid");
+        let alive = || {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .expect("kill -0")
+                .success()
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let still_alive = alive();
+        if still_alive {
+            let _ = Command::new("kill").arg(pid.trim()).status();
+        }
+        assert!(!still_alive, "process {} outlived the timeout", pid.trim());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_group_reports_why_it_could_not_signal() {
+        // No such program: nothing is signalled, and the caller is told.
+        let problem = kill_group("no-such-kill-program", 1).expect("problem");
+        assert!(problem.contains("could not run"), "{problem}");
     }
 
     #[test]

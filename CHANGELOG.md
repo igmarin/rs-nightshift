@@ -53,6 +53,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `run-tests` stops everything the test command started when the command
+  reaches its time limit. Before, only the command itself was stopped, so a
+  test program that hung under `cargo test` kept running after the role had
+  failed. The command now runs in its own process group, so Ctrl-C in the
+  terminal no longer reaches a running test command directly (see
+  `docs/configuration.md`, `run-tests`).
 - A run never reuses another run's directory: when `{date}_{slug}` already
   exists (two runs started in the same second), `-2`, `-3`, … is appended.
 - CI and release checks now run `cargo doc --no-deps`, and broken or
