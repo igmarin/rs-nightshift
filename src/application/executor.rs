@@ -32,15 +32,25 @@ to send findings back for a fix, \"questions\" to ask for clarification, \
 text in \"content\".";
 
 /// Extra contract appended when a role declares the `search-replace` tool.
+/// Each block is spelled out line by line, with an example: a one-line
+/// `old: <snippet>` form led models to quote the whole file and send no `new:`.
 const SEARCH_REPLACE_CONTRACT: &str =
-    "When using search-replace, put the edits in \"content\" as:\n\
-file: <repo-relative path>\n\
-old: <exact unique snippet>\n\
-new: <replacement>\n\
-Repeat old/new blocks for more edits. old_text must match exactly once. \
-Keep the whole edit (the file:, old: and new: lines) inside the one \"content\" \
-JSON string, with newlines escaped as \\n; do not close the string before new:. \
-Keep old: short: quote only the lines you change, plus enough to be unique.";
+    "When using search-replace, put the edits in \"content\" as one or more \
+blocks. Each block is: a line `file: <repo-relative path>`, a line `old:`, \
+the lines to replace copied exactly from the current file, a line `new:`, \
+then the replacement lines. Every block needs both old: and new:. \
+For example, to add a line after `let a = 1;`:\n\
+file: src/lib.rs\n\
+old:\n\
+\x20   let a = 1;\n\
+new:\n\
+\x20   let a = 1;\n\
+\x20   let b = 2;\n\
+Keep each old: short: only the lines that change plus one or two lines \
+around them, so that it matches exactly once in the file. Never quote the \
+whole file. Use one block per place that changes. Keep the whole edit (the \
+file:, old: and new: lines) inside the one \"content\" JSON string, with \
+newlines escaped as \\n; do not close the string before new:.";
 
 /// Loop-back context carried into a role when a back-edge fires.
 #[derive(Debug, Clone, Default, PartialEq)]

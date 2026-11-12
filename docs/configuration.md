@@ -403,7 +403,9 @@ new: <h1>Hello</h1>
 ```
 
 Multi-line snippets and extra `old:` / `new:` blocks (same file or another
-`file:` header) are allowed. Each `old` text must match exactly once, including overlapping occurrences;
+`file:` header) are allowed. A multi-line snippet starts on the line after
+`old:` or `new:`. The role's system prompt already explains this format, with
+an example, so the role prompt does not need to repeat it. Each `old` text must match exactly once, including overlapping occurrences;
 zero matches or two-plus matches abort the whole tool call and leave the repo
 unchanged. Paths must stay inside the repo. Secret-bearing paths (`.git`,
 `.env`, keys, and the rest of the `context_files` denylist) are rejected,

@@ -53,6 +53,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The format note a `search-replace` role gets spells each block out line by
+  line (`file:`, `old:`, the old lines, `new:`, the new lines), shows a short
+  example, and says never to quote the whole file. Before, it showed
+  `old: <exact unique snippet>` on one line, and with a short role prompt a
+  model quoted the whole file after `old:`, sent no `new:`, and repeated that
+  on every retry.
 - `search-replace` errors say where to look. "old_text not found" now names
   the place in the file that `old` matches for the most lines and shows the
   first line that differs, from `old` and from the file. "ambiguous" lists

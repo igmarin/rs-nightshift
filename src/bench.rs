@@ -519,4 +519,20 @@ mod tests {
         assert!(preview(&long).ends_with("…\""));
         assert_eq!(preview("ok"), "\"ok\"");
     }
+
+    #[test]
+    fn search_replace_contract_example_is_a_valid_block() {
+        let contract = output_contract(true);
+        let start = contract
+            .find("file: src/lib.rs")
+            .expect("contract has an example");
+        let end = contract
+            .find("Keep each old:")
+            .expect("example ends before the rules");
+        let blocks = parse_search_replace(&contract[start..end]).expect("the example parses");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, "src/lib.rs");
+        assert_eq!(blocks[0].old, "    let a = 1;");
+        assert_eq!(blocks[0].new, "    let a = 1;\n    let b = 2;");
+    }
 }
