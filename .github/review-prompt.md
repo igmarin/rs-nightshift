@@ -121,7 +121,8 @@ workflow or script file inside a pipeline PR).
   tool rejects `..`, absolute paths and secret-bearing paths (`.env`, keys, `.git/`, …).
   `apply-patch` gets the paths from `git apply --numstat` (plus `rename from` /
   `copy from` lines) and checks them before any `git apply`, including its `--3way`
-  fallback. `write-file` and
+  fallback; a path through a symlink in the working tree is refused (`--3way` would
+  write through an untracked one). `write-file` and
   `search-replace` also reject symlinks that lead outside the repo or into those paths.
 - **INV-5** Prompts receive AST slices and listed files (`context_files`), not a
   recursive tree dump.

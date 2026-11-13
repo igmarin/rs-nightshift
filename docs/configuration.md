@@ -281,8 +281,9 @@ load.
 ### apply-patch
 
 Every path the diff touches must stay in the repo (no `..`, no absolute
-paths) and must not be a secret-bearing path (the
-[`context_files`](#context_files) list). Nightshift gets the paths from git
+paths), must not be a secret-bearing path (the
+[`context_files`](#context_files) list), and must not go through a symlink
+in the working tree (nor be one). Nightshift gets the paths from git
 itself (`git apply --numstat`), so new, deleted, binary, renamed and copied
 files, and names git writes in quotes, are all checked. A patch that breaks
 this, or that git cannot read, is rejected before anything is applied. So

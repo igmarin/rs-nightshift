@@ -113,7 +113,9 @@ All notable changes to this project are documented in this file.
   quoted names are checked too; before, it read only the `+++` lines. The
   check now runs before every `git apply`: before, when it failed, the
   `git apply --3way` fallback still applied the patch, so only git's own path
-  rules applied.
+  rules applied. It also refuses a path through a symlink in the working
+  tree: `git apply --3way` writes through a symlink git does not track, so a
+  patch could write outside the repo.
 - A reply that the model did not finish, because it reached `max_tokens`,
   is rejected and retried with that reason. Before, the harness did not look
   at why a reply ended: it repaired the cut-off text and used it, so half an

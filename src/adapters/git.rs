@@ -39,9 +39,40 @@ fn touched_paths(repo: &Path, patch: &str) -> Result<Vec<PathBuf>, Error> {
             )
             .into());
         }
-        paths.push(PathBuf::from(source));
+        // Some git versions list the old name themselves.
+        let source = PathBuf::from(source);
+        if !paths.contains(&source) {
+            paths.push(source);
+        }
     }
     Ok(paths)
+}
+
+/// The paths `patch` touches ([`touched_paths`]) pass
+/// [`validate_patch_paths`], and none of them goes through a symlink in
+/// `repo`'s working tree, including the file itself.
+fn check_patch_paths(repo: &Path, patch: &str) -> Result<(), Error> {
+    let paths = touched_paths(repo, patch)?;
+    validate_patch_paths(&paths)?;
+    for path in &paths {
+        // Git refuses a path "beyond a symbolic link" itself, except with
+        // `--3way` when it does not track the link: it then writes through it.
+        let mut current = repo.to_path_buf();
+        for component in path.components() {
+            current.push(component);
+            if current
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+            {
+                return Err(ArtifactError::invalid(
+                    PATCH_FILE,
+                    format!("patch path goes through a symlink: {}", path.display()),
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Paths in `git apply --numstat -z` output: `added\tdeleted\tpath\0` per
@@ -103,7 +134,7 @@ pub fn head_commit(repo: &Path) -> Result<String, Error> {
 /// This is the safe preflight used by `apply_checked` and
 /// `crate::dev::write_and_apply_patch`. It never modifies the working tree.
 pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
-    validate_patch_paths(&touched_paths(repo, patch)?)?;
+    check_patch_paths(repo, patch)?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
     std::fs::write(tmp.path(), patch)
         .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
@@ -139,10 +170,7 @@ pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
             // `original` may be the path check itself, and `--3way` checks
             // nothing, so check the paths again. A patch git cannot parse
             // cannot be applied with `--3way` either.
-            if touched_paths(repo, patch)
-                .and_then(|paths| validate_patch_paths(&paths))
-                .is_err()
-            {
+            if check_patch_paths(repo, patch).is_err() {
                 return Err(original);
             }
             // Last resort: 3-way merge uses the index to resolve context
@@ -518,8 +546,12 @@ diff --git a/file.txt b/file.txt
             ),
         ];
         for (patch, expected) in cases {
-            let expected: Vec<PathBuf> = expected.into_iter().map(PathBuf::from).collect();
-            assert_eq!(touched(patch).expect(patch), expected, "{patch}");
+            let mut expected: Vec<PathBuf> = expected.into_iter().map(PathBuf::from).collect();
+            let mut paths = touched(patch).expect(patch);
+            // The order depends on whether git lists a rename's old name.
+            expected.sort();
+            paths.sort();
+            assert_eq!(paths, expected, "{patch}");
         }
     }
 
@@ -528,6 +560,23 @@ diff --git a/file.txt b/file.txt
         let patch = "diff --git \"a/x\\t.env\" b/plain.txt\nsimilarity index 100%\nrename from \"x\\t.env\"\nrename to plain.txt\n";
         let err = touched(patch).expect_err("quoted source");
         assert!(err.to_string().contains("quoted path"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_checked_does_not_write_through_a_symlink() {
+        // `git apply --check` refuses this path, but the `--3way` fallback
+        // wrote through a symlink git does not track, outside the repo.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (repo, outside) = (dir.path().join("repo"), dir.path().join("outside"));
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        git(&repo, &["init", "-q", "-b", "main"]).expect("init");
+        std::os::unix::fs::symlink(&outside, repo.join("link")).expect("symlink");
+        let patch = "diff --git a/link/evil.txt b/link/evil.txt\nnew file mode 100644\n--- /dev/null\n+++ b/link/evil.txt\n@@ -0,0 +1 @@\n+pwned\n";
+        let err = apply_checked(&repo, patch).expect_err("through a symlink");
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert!(!outside.join("evil.txt").exists());
     }
 
     #[test]
