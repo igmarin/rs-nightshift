@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Each run keeps its report in the run directory as `run_report.md`, and
+  `nightshift queue` prints each job's report to its log (stderr). Before,
+  a queue run kept only `queue_report.md`, so the status, retries, time per
+  role and model calls of each job were not shown anywhere.
 - `[providers.ollama] keep_loaded = true` leaves the model loaded after each
   call. By default nightshift still asks Ollama to unload it after every
   call (`keep_alive: 0`), so every role call loads the model again; with
