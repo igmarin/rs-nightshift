@@ -32,13 +32,16 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo test --doc
+cargo doc --no-deps
 cargo audit
 cargo deny check
 cargo llvm-cov --workspace --fail-under-lines 85
 ```
 
-All gates must pass before a PR is marked ready for review. CI runs the same set
-plus the release build smoke test and `actionlint`.
+All gates must pass before a PR is marked ready for review. CI runs the same
+set plus a release build, `actionlint`, and the action-pin check.
+`cargo doc --no-deps` fails on a broken or private doc link, because
+`src/lib.rs` denies both lints.
 
 ### End-to-end tests
 
@@ -51,24 +54,7 @@ and the exit code. It needs only `git`; no model server, `codegraph`, or
 
 ## Pre-push gate
 
-For a quick pre-push check, run the gate subset:
-
-```text
-./scripts/pre-push-gate.sh
-```
-
-or, equivalently:
-
-```text
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-cargo test --doc
-cargo audit
-cargo deny check
-```
-
-The full local gate (including coverage) is in the [Local gates](#local-gates) section above.
+`./scripts/pre-push-gate.sh` runs the local gates without coverage.
 
 ## PR workflow
 
@@ -109,18 +95,21 @@ targeting `main`:
 
 - Format check (`cargo fmt --all -- --check`)
 - Clippy (`cargo clippy --all-targets --all-features -- -D warnings`)
-- Tests (`cargo test`)
-- Doc tests (`cargo test --doc`)
+- Tests (`cargo test`). These include `tests/toolchain_consistency.rs`,
+  which fails when `Cargo.toml`, `rust-toolchain.toml`, `.mise.toml`,
+  `dist-workspace.toml` and `ci.yml` name different Rust versions, and
+  `tests/workflow_consistency.rs` (see below).
+- Doc tests (`cargo test --doc`) and the doc build (`cargo doc --no-deps`)
 - `cargo-deny` (license and advisory checks)
-- `cargo-audit` (security vulnerability scan)
+- `cargo-audit` (security advisories)
 - Line coverage (`cargo llvm-cov --workspace --fail-under-lines 85`)
-- Release build smoke test
-- `actionlint` (workflow YAML linting)
-- Toolchain consistency (rust-toolchain.toml vs ci.yml vs release-checks.yml)
+- Release build (`cargo build --release`)
+- `actionlint` (workflow YAML) and `scripts/check-action-pins.sh` (every
+  action pinned to a commit SHA)
 
 ## Release checks
 
-`.github/workflows/release-checks.yml` is a reusable workflow that mirrors the
-CI quality gates, pinned to the crate's `rust-version`. It runs before any
-release artifacts are built. The drift-detection test
-(`tests/workflow_consistency.rs`) ensures it stays in sync with `ci.yml`.
+`.github/workflows/release-checks.yml` is a reusable workflow that runs the
+CI quality gates before any release artifact is built. The test
+`tests/workflow_consistency.rs` fails when it is missing a gate that `ci.yml`
+runs.

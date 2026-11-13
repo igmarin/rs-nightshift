@@ -1,9 +1,9 @@
 # Unattended runs on macOS
 
 How to keep a [goal queue](configuration.md#goal-queue-nightshift-queue)
-running on a Mac with the terminal closed and the machine awake. This is the
-macOS counterpart of the systemd unit in
-[`contrib/nightshift.service`](../contrib/nightshift.service).
+running on a Mac with the terminal closed and the machine awake. On Linux,
+the systemd unit in [`contrib/nightshift.service`](../contrib/nightshift.service)
+runs the same queue.
 
 Three things differ from a Linux server:
 
@@ -29,9 +29,10 @@ mkdir -p ~/nightshift/artifacts ~/Library/LaunchAgents
 ```
 
 The `artifacts` directory must exist before the agent is loaded, because
-launchd opens the log file there. `~/Library/LaunchAgents` is where the agent
-files go; a new user account may not have it yet. Keep it outside the repos the jobs edit
+launchd opens the log file there. Keep it outside the repos the jobs edit
 (see [Goal queue](configuration.md#goal-queue-nightshift-queue)).
+`~/Library/LaunchAgents` is where the agent files go; a new user account may
+not have it yet.
 
 ## 2. Start the model server
 
@@ -166,6 +167,6 @@ context.
 - Check while a run is active: `sysctl vm.swapusage` should show `used = 0`.
   If it grows, use fewer or smaller models, or one model for every role.
 - Speed varies more than size: those three models ran at 26 to 91 tokens per
-  second on the same machine (Low Power Mode off). Try a model on a real goal, and with
-  [`nightshift bench`](configuration.md#benchmark-a-model-nightshift-bench),
-  before giving it a role.
+  second on the same machine (Low Power Mode off). Try a model with
+  [`nightshift bench`](configuration.md#benchmark-a-model-nightshift-bench)
+  and on a real goal before giving it a role.

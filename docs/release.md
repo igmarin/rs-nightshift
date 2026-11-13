@@ -14,12 +14,14 @@ in [`dist-workspace.toml`](../dist-workspace.toml).
 
 The tag triggers `release.yml`, which:
 
-1. Runs the CI-equivalent gate in
-   [`.github/workflows/release-checks.yml`](../.github/workflows/release-checks.yml)
-   (`fmt`, `clippy`, `test`, `cargo test --doc`, 85% line coverage).
-2. Builds each target on its native runner (`ubuntu-22.04`, `ubuntu-22.04-arm`,
-   `macos-15-intel`, `macos-14`) — no cross-compilation or OpenSSL setup, since
-   `reqwest` uses `rustls-tls`.
+1. Runs the CI gates in
+   [`.github/workflows/release-checks.yml`](../.github/workflows/release-checks.yml):
+   `fmt`, `clippy`, `test`, `cargo test --doc`, `cargo doc --no-deps`, 85%
+   line coverage, `cargo audit` and `cargo deny check`.
+2. Builds each target on a native GitHub runner that dist picks, so there is
+   no cross-compiling. TLS uses `reqwest`'s `rustls` feature, so no OpenSSL is
+   needed; it pulls in `aws-lc-rs`, which needs a C toolchain (the runners
+   have one).
 3. Uploads tarballs, `sha256` checksums, and the generated
    `rs-nightshift-installer.sh` to a GitHub Release.
 
@@ -33,6 +35,11 @@ After editing `dist-workspace.toml`, regenerate the workflow:
 ```text
 dist init --yes   # or: dist generate
 ```
+
+Regenerating drops the hand-edited `permissions` in `release.yml` (dist has
+no setting for them; `allow-dirty = ["ci"]` lets `dist plan` accept the
+edit). Put them back before you commit: `contents: read` for the workflow,
+and `contents: write` only on the `host` job that creates the release.
 
 Dry-run locally to verify the build:
 

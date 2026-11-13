@@ -1,20 +1,22 @@
-# Ollama Tuning
+# Ollama tuning
 
-rs-nightshift ships with built-in defaults that work on a typical local Ollama
-setup, but on CPU-only machines (especially laptops with integrated GPUs) a few
-Ollama tweaks make the difference between unusable slowness and a practical
-pipeline.
+How to make Ollama fast enough for nightshift on a machine without a
+discrete GPU. The numbers on this page were measured in August 2026 on an
+AMD Ryzen 7 7730U laptop (8 cores, integrated Radeon graphics).
 
-This guide covers the recommended Ollama service configuration, how to create
-tuned model variants with `Modelfile`s, and the benchmarked settings for the
-`harness` demo.
+## How nightshift calls Ollama
 
-## Quick start: the best CPU-only setup we found
+- One completion at a time.
+- After each completion, nightshift asks Ollama to unload the model
+  (`keep_alive: 0`), so every role call loads it again. `OLLAMA_KEEP_ALIVE`
+  does not change this: it only affects other clients, such as `ollama run`.
+- Each call has a time limit: 3600 s by default, or the role's
+  `timeout_secs` (see [configuration](configuration.md)).
+- A role's `options` can set `temperature`, `max_tokens` and `think`.
+  `num_ctx` is not sent to Ollama (`nightshift doctor` warns about it): set
+  the context size in a Modelfile, as below.
 
-These settings were validated on an AMD Ryzen 7 7730U with integrated Radeon
-Graphics (no discrete GPU):
-
-### 1. Ollama systemd override
+## 1. Ollama service settings
 
 `/etc/systemd/system/ollama.service.d/override.conf`:
 
@@ -23,7 +25,6 @@ Graphics (no discrete GPU):
 Environment="OLLAMA_NUM_THREAD=8"
 Environment="OLLAMA_VULKAN=1"
 Environment="OLLAMA_IGPU_ENABLE=1"
-Environment="OLLAMA_KEEP_ALIVE=24h"
 ```
 
 ```bash
@@ -33,15 +34,14 @@ sudo systemctl restart ollama
 
 | Variable | Why |
 | :--------- | :-- |
-| `OLLAMA_NUM_THREAD=8` | The 7730U has 8 physical cores / 16 threads. Using all 16 SMT threads is slightly slower for this workload, so 8 is the sweet spot. Adjust to your physical core count. |
-| `OLLAMA_VULKAN=1` | Enable Vulkan backend discovery. |
-| `OLLAMA_IGPU_ENABLE=1` | Allow Ollama to consider integrated GPUs. On most shared-memory iGPUs this still results in `100% CPU`, but it is required to test GPU offload. |
-| `OLLAMA_KEEP_ALIVE=24h` | Keep models loaded for 24 hours. Prevents ~1.3s cold-start reloads between harness runs and keeps the CPU/GPU context warm. |
+| `OLLAMA_NUM_THREAD=8` | The 7730U has 8 physical cores and 16 threads. All 16 threads were slightly slower than 8 for this workload. Use your physical core count. |
+| `OLLAMA_VULKAN=1` | Lets Ollama look for a Vulkan GPU. |
+| `OLLAMA_IGPU_ENABLE=1` | Lets Ollama consider integrated GPUs. On most shared-memory iGPUs it still runs `100% CPU` (see [below](#why-the-igpu-is-not-used)), but you need it to test GPU offload. |
 
-### 2. A tuned `llama3.2:3b-fast` model
+## 2. A tuned model
 
-Create a tuned variant instead of relying on global env vars for context size
-and thread count:
+Put the context size and thread count in a model variant instead of global
+settings:
 
 ```bash
 cat > /tmp/Modelfile.llama3.2.3b.fast <<'EOF'
@@ -57,26 +57,12 @@ ollama create llama3.2:3b-fast -f /tmp/Modelfile.llama3.2.3b.fast
 
 | Parameter | Why |
 | :-------- | :-- |
-| `num_ctx 2048` | Enough for the short prompts in the harness demo; smaller than the 4096 default, so KV cache uses less RAM. |
-| `num_thread 8` | Per-model override of the global `OLLAMA_NUM_THREAD`. Locks the tuned model to the best physical-core count. |
-| `num_gpu 0` | Force CPU-only inference. On this laptop Vulkan cannot offload to the shared-memory iGPU, so forcing CPU avoids any GPU-fallback overhead. |
-| `temperature 0.2` | Deterministic enough for reproducible JSON/patch output without being too rigid. |
+| `num_ctx 2048` | Enough for the short prompts of the [demo](#running-the-demo), and half the 4096 default, so the KV cache uses less RAM. Real tasks with source files need more; see [Which model](#which-model). |
+| `num_thread 8` | Overrides `OLLAMA_NUM_THREAD` for this model. |
+| `num_gpu 0` | CPU only. Vulkan cannot offload to this shared-memory iGPU, so this avoids trying. |
+| `temperature 0.2` | Low enough for repeatable JSON and edits. A role's `options.temperature` overrides it. |
 
-### 3. Use it in `nightshift.toml`
-
-```toml
-[[roles]]
-id = "product-owner"
-provider = "ollama"
-model = "llama3.2:3b-fast"
-options = { temperature = 0.3, max_tokens = 2048 }
-# ...
-```
-
-## Template for other models
-
-You can apply the same pattern to any Ollama model by replacing the `FROM`
-line and the resulting tag:
+For another model, change the `FROM` line and the tag:
 
 ```bash
 cat > /tmp/Modelfile.MODEL.fast <<'EOF'
@@ -90,74 +76,117 @@ EOF
 ollama create <model:tag>-fast -f /tmp/Modelfile.MODEL.fast
 ```
 
-Then set `model = "<model:tag>-fast"` in `nightshift.toml`.
+With a discrete GPU that has its own VRAM, remove `num_gpu 0` or raise it so
+Ollama offloads as many layers as fit. With an integrated GPU that shares
+system RAM, `num_gpu 0` is usually fastest.
 
-If you have a discrete GPU with dedicated VRAM, remove or raise `num_gpu 0` so
-Ollama offloads as many layers as possible. For integrated GPUs that share
-system RAM, `num_gpu 0` is usually the fastest option.
+## 3. Use it in `nightshift.toml`
+
+```toml
+[[roles]]
+id = "product-owner"
+provider = "ollama"
+model = "llama3.2:3b-fast"
+options = { temperature = 0.3, max_tokens = 2048 }
+# ...
+```
+
+## Which model
+
+From a real three-role run (Product Owner, Developer, QA) on the 7730U: a
+rewrite of the copy on a personal website.
+
+| Model | Speed | Result |
+| :---- | :---- | :----- |
+| `llama3.2:3b` | about 3 tokens/s | Wrote placeholders such as `change from '...' to '...'` instead of quoting the file. |
+| `qwen3:4b` | about 2 tokens/s | Spent the whole `max_tokens` (3072) on reasoning and never wrote its reply. |
+| `llama3.1:8b` | about 2 tokens/s | Valid replies and a usable brief. Developer and QA finished on small files. |
+| `gemma3:12b` | about 0.5 to 1 token/s | Not used: too slow for the run. |
+
+With `llama3.1:8b` and a 32k context, reading the prompt took 15 to 20
+minutes and writing the reply 20 to 40 minutes per role. The settings that
+worked:
+
+```text
+FROM llama3.1:8b
+PARAMETER num_ctx 32768
+PARAMETER num_thread 8
+PARAMETER num_gpu 0
+PARAMETER temperature 0.2
+```
+
+| Role | `temperature` | `max_tokens` |
+| :--- | :------------ | :----------- |
+| Product Owner | 0.3 | 2048 to 3072 |
+| Developer | 0.2 | 4096 to 8192 |
+| QA | 0.2 | 1024 to 2048 |
+
+What the run showed:
+
+- `write-file` makes the model write the whole file again. At 2 tokens/s a
+  file over about 10 KB did not finish in 60 minutes. `apply-patch` failed
+  too: the model got the diff's context lines wrong. Use `search-replace`,
+  which sends only the lines that change.
+- Give each job one file when you can. A shorter prompt is read faster.
 
 ## Benchmark summary
 
-Measured on the Ryzen 7 7730U with `llama3.2:3b` / `llama3.2:3b-fast`:
+Measured with `llama3.2:3b` and `llama3.2:3b-fast`:
 
-| Configuration | Warm eval rate | Harness 3-run average |
-| :------------ | :------------- | :-------------------- |
-| `q8_0` KV cache + flash attention | ~11 tok/s | 1m+ (one run timed out at 6m) |
-| 16 threads + keep_alive | ~16 tok/s | ~1m+ with outliers |
-| **8 threads + keep_alive** | **~17.4 tok/s** | **~49s** |
-| **8 threads + `llama3.2:3b-fast`** | **~17.4 tok/s** | **~43–60s** |
+| Configuration | Warm eval rate | Harness, average of 3 runs |
+| :------------ | :------------- | :------------------------- |
+| `q8_0` KV cache + flash attention | about 11 tokens/s | over 1 minute (one run timed out at 6 minutes) |
+| 16 threads + keep_alive | about 16 tokens/s | over 1 minute, with outliers |
+| 8 threads + keep_alive | about 17.4 tokens/s | about 49 s |
+| 8 threads + `llama3.2:3b-fast` | about 17.4 tokens/s | 43 to 60 s |
 
-The `q8_0` KV cache and flash-attention settings are not recommended for
-CPU-only inference. They add overhead when no GPU is available.
+`keep_alive` in this table is the Ollama setting during the measurement.
+Nightshift itself unloads the model after each call, and loading
+`llama3.2:3b` took about 1.3 s.
+
+The `q8_0` KV cache and flash attention are not worth it on a CPU: they add
+work when there is no GPU.
 
 ## Thinking models
 
-Models such as `qwen3` and `deepseek-r1` emit a `<think>…</think>` reasoning
-preamble before the JSON envelope the harness expects. The parser strips only
-the think span that contains the first `{` (draft JSON in the preamble).
-Literal `<think>` text inside a JSON `content` string is left alone, even
-when a preamble was also stripped.
+Models such as `qwen3` and `deepseek-r1` write a `<think>…</think>` block
+before the JSON reply the harness expects. The parser removes only the think
+block that contains the first `{` (a draft of the JSON in the reasoning).
+Literal `<think>` text inside a JSON `content` string is left alone, also
+when a block before it was removed.
 
-`/no_think` is unreliable through Ollama's OpenAI-compatible API, so the
-harness does not depend on it. Thinking models still spend tokens on reasoning
-and can hit `max_tokens` without ever writing JSON — on CPU-only machines
-prefer a non-thinking model such as `llama3.2:3b-fast`.
+`/no_think` does not work reliably through Ollama's OpenAI-compatible API,
+so the harness does not use it. A thinking model can still spend all of
+`max_tokens` on reasoning and never write the reply, as `qwen3:4b` did above.
+On a CPU-only machine, use a non-thinking model.
 
 ## Why the iGPU is not used
 
-`ollama ps` will likely still report `100% CPU` even with
-`OLLAMA_VULKAN=1` and `OLLAMA_IGPU_ENABLE=1`. Ollama's Vulkan backend skips
-integrated GPUs that share system RAM because it cannot reserve the contiguous
-VRAM block it expects. A discrete AMD GPU with dedicated VRAM is required for
-GPU offload.
+`ollama ps` will likely still show `100% CPU` with `OLLAMA_VULKAN=1` and
+`OLLAMA_IGPU_ENABLE=1`. Ollama's Vulkan backend skips integrated GPUs that
+share system RAM, because it cannot reserve the block of VRAM it expects.
+GPU offload needs a discrete GPU with its own VRAM.
 
 ## Probe a model before a full run
 
-Picking a model by running the harness is expensive on CPU (30–60 minutes per
-failed attempt). Run `nightshift bench --model <tag>` first; it takes minutes.
-See [Benchmark a model](configuration.md#benchmark-a-model-nightshift-bench)
-for the tasks, flags, and output.
-
-Results from the no-ai-slop copy rewrite run
-([learning notes](learning-no-ai-slop-copy-rewrite.md)):
-
-| Model | JSON | Quote | Format | Notes |
-| :---- | :--- | :---- | :----- | :---- |
-| `llama3.2:3b` | maybe | fail (placeholders) | fail | too small |
-| `qwen3:4b` | fail (think-only) | — | — | thinking model |
-| `llama3.1:8b` | pass | pass | pass | sweet spot |
+On a CPU, a failed harness run costs 30 to 60 minutes. `nightshift bench
+--model <tag>` takes minutes: see
+[Benchmark a model](configuration.md#benchmark-a-model-nightshift-bench).
 
 ## Running the demo
 
-The repo includes a minimal harness demo config at
-[`harness-demo.toml`](harness-demo.toml). Use it with the test repo below:
+[`harness-demo.toml`](harness-demo.toml) is a small three-role config that
+improves the copy of a one-page site. Its roles use `gather-context`, so
+`codegraph` must be on `PATH`: the first role runs `codegraph init` in the
+test repo. Create the `llama3.2:3b-fast` model (step 2) first.
 
 ```bash
-# create test repo
-cd /tmp
-rm -rf test-repo
-mkdir test-repo
-cd test-repo
+NIGHTSHIFT_SRC=~/src/rs-nightshift   # your checkout of this repo
+
+# a test repo
+rm -rf /tmp/test-repo
+mkdir /tmp/test-repo
+cd /tmp/test-repo
 git init -b main
 cat > index.html <<'EOF'
 <!DOCTYPE html>
@@ -173,11 +202,8 @@ EOF
 git add index.html
 git commit -m "initial"
 
-# create tuned model
-ollama create llama3.2:3b-fast -f /tmp/Modelfile.llama3.2.3b.fast
-
-# run harness
-cp docs/harness-demo.toml /tmp/test-nightshift.toml
+# the run
+cp "$NIGHTSHIFT_SRC/docs/harness-demo.toml" /tmp/test-nightshift.toml
 nightshift harness \
   --config /tmp/test-nightshift.toml \
   --goal "Improve homepage copy" \
@@ -185,7 +211,7 @@ nightshift harness \
   --out /tmp/test-artifacts
 ```
 
-Expected output:
+The report starts with:
 
 ```text
 Status: PASSED
@@ -195,13 +221,12 @@ Roles: product-owner → developer → qa
 
 ## Troubleshooting
 
-- **"model did not return a JSON object"** — make sure the prompt explicitly
-  asks for a JSON object and the model is `llama3.2:3b-fast`. Thinking models
-  like `qwen3:4b` can still fill `max_tokens` with reasoning and never emit
-  JSON; the harness strips `<think>` blocks when they are present, but it
-  cannot invent an envelope that was never produced. See [Thinking models](#thinking-models).
-- **Harness takes 3–6 minutes** — the model is generating long extra sections.
-  This is usually a prompt issue, not Ollama. Verify the prompt says "ONLY 2
-  specific copy improvements" and explicitly forbids additional sections.
-- **10-minute timeout** — the wrong model is selected, `max_tokens` is too low
-  for the prompt, or the model hit the timeout. Switch to `llama3.2:3b-fast`.
+- "model did not return a JSON object": check that the role's prompt asks
+  for a JSON object and that the model is not a thinking model that ran out
+  of `max_tokens` (see [Thinking models](#thinking-models)).
+- The demo takes 3 to 6 minutes: the model is writing long extra sections.
+  This is usually the prompt, not Ollama. Ask for exactly two copy changes
+  and say that nothing else may be added.
+- A role ends with a timeout: the model is too slow for the prompt, or
+  `max_tokens` is too high for the time limit. Use a smaller or tuned model,
+  or raise the role's `timeout_secs` (default 3600 s).
