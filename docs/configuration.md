@@ -288,7 +288,8 @@ itself (`git apply --numstat`), so new, deleted, binary, renamed and copied
 files, and names git writes in quotes, are all checked. A patch that breaks
 this, or that git cannot read, is rejected before anything is applied. So
 is a rename or copy whose old name is in git's quoted form (`rename from
-"caf\303\251.txt"`); write the name as it is (`rename from café.txt`). The diff is
+"caf\303\251.txt"`) or has a control character; write the name as it is
+(`rename from café.txt`). The diff is
 checked with `git apply --check`. When that fails, nightshift fixes
 the line counts in the hunk headers and checks again. When that also fails,
 it tries `git apply --3way`, which stages the result in the index and may

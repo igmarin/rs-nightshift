@@ -32,10 +32,13 @@ fn touched_paths(repo: &Path, patch: &str) -> Result<Vec<PathBuf>, Error> {
         else {
             continue;
         };
-        if source.starts_with('"') {
+        // Git decodes a quoted name, and ends an unquoted one at a control
+        // character such as '\x0b', so either would check a different path
+        // than the one git renames. A name git writes as it is has neither.
+        if source.starts_with('"') || source.chars().any(char::is_control) {
             return Err(ArtifactError::invalid(
                 PATCH_FILE,
-                format!("patch renames or copies a quoted path: {source}"),
+                format!("patch renames or copies a quoted name or one with a control character: {source:?}"),
             )
             .into());
         }
@@ -49,15 +52,20 @@ fn touched_paths(repo: &Path, patch: &str) -> Result<Vec<PathBuf>, Error> {
 }
 
 /// The paths `patch` touches ([`touched_paths`]) pass
-/// [`validate_patch_paths`], and none of them goes through a symlink in
-/// `repo`'s working tree, including the file itself.
+/// [`validate_patch_paths`], and none of them goes through a symlink in the
+/// working tree, including the file itself.
 fn check_patch_paths(repo: &Path, patch: &str) -> Result<(), Error> {
     let paths = touched_paths(repo, patch)?;
     validate_patch_paths(&paths)?;
+    // In a repo, git reads the paths from the top of the working tree, also
+    // when `repo` is a folder inside it; outside a repo, from `repo`.
+    let root = git(repo, &["rev-parse", "--show-toplevel"])
+        .map(|top| PathBuf::from(top.trim_end_matches('\n')))
+        .unwrap_or_else(|_| repo.to_path_buf());
     for path in &paths {
         // Git refuses a path "beyond a symbolic link" itself, except with
         // `--3way` when it does not track the link: it then writes through it.
-        let mut current = repo.to_path_buf();
+        let mut current = root.clone();
         for component in path.components() {
             current.push(component);
             if current
@@ -556,27 +564,47 @@ diff --git a/file.txt b/file.txt
     }
 
     #[test]
-    fn touched_paths_reject_a_quoted_rename_source() {
-        let patch = "diff --git \"a/x\\t.env\" b/plain.txt\nsimilarity index 100%\nrename from \"x\\t.env\"\nrename to plain.txt\n";
-        let err = touched(patch).expect_err("quoted source");
-        assert!(err.to_string().contains("quoted path"), "{err}");
+    fn touched_paths_reject_a_quoted_or_control_char_rename_source() {
+        let patches = [
+            "diff --git \"a/x\\t.env\" b/plain.txt\nsimilarity index 100%\nrename from \"x\\t.env\"\nrename to plain.txt\n",
+            // git would end this name at the vertical tab and rename `.env`
+            "diff --git a/.env b/plain.txt\nsimilarity index 100%\nrename from .env\x0bignored\nrename to plain.txt\n",
+        ];
+        for patch in patches {
+            let err = touched(patch).expect_err(patch);
+            assert!(err.to_string().contains("control character"), "{err}");
+        }
+    }
+
+    #[test]
+    fn touched_paths_reject_a_name_that_is_not_utf8() {
+        // A patch is UTF-8 text, so only git's octal escape can name such a
+        // file; the listing is then not UTF-8 and the check fails closed.
+        let patch = "diff --git \"a/\\377.txt\" \"b/\\377.txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/\\377.txt\"\n@@ -0,0 +1 @@\n+x\n";
+        touched(patch).expect_err("non-UTF-8 name");
     }
 
     #[cfg(unix)]
     #[test]
     fn apply_checked_does_not_write_through_a_symlink() {
         // `git apply --check` refuses this path, but the `--3way` fallback
-        // wrote through a symlink git does not track, outside the repo.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (repo, outside) = (dir.path().join("repo"), dir.path().join("outside"));
-        std::fs::create_dir_all(&repo).expect("repo dir");
-        std::fs::create_dir_all(&outside).expect("outside dir");
-        git(&repo, &["init", "-q", "-b", "main"]).expect("init");
-        std::os::unix::fs::symlink(&outside, repo.join("link")).expect("symlink");
-        let patch = "diff --git a/link/evil.txt b/link/evil.txt\nnew file mode 100644\n--- /dev/null\n+++ b/link/evil.txt\n@@ -0,0 +1 @@\n+pwned\n";
-        let err = apply_checked(&repo, patch).expect_err("through a symlink");
-        assert!(err.to_string().contains("symlink"), "{err}");
-        assert!(!outside.join("evil.txt").exists());
+        // wrote through a symlink git does not track, outside the repo. The
+        // second case runs in a folder of the repo: git still reads the
+        // paths from the top of the working tree.
+        for (workdir, link) in [("", "link"), ("sub", "sub/link")] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (repo, outside) = (dir.path().join("repo"), dir.path().join("outside"));
+            std::fs::create_dir_all(repo.join("sub")).expect("repo dirs");
+            std::fs::create_dir_all(&outside).expect("outside dir");
+            git(&repo, &["init", "-q", "-b", "main"]).expect("init");
+            std::os::unix::fs::symlink(&outside, repo.join(link)).expect("symlink");
+            let patch = format!(
+                "diff --git a/{link}/evil.txt b/{link}/evil.txt\nnew file mode 100644\n--- /dev/null\n+++ b/{link}/evil.txt\n@@ -0,0 +1 @@\n+pwned\n"
+            );
+            let err = apply_checked(&repo.join(workdir), &patch).expect_err(link);
+            assert!(err.to_string().contains("symlink"), "{link}: {err}");
+            assert!(!outside.join("evil.txt").exists(), "{link}");
+        }
     }
 
     #[test]
