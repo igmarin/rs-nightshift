@@ -1,20 +1,25 @@
 [Unit]
-Description=rs-nightshift overnight job
+Description=rs-nightshift goal queue
 Documentation=https://github.com/igmarin/rs-nightshift
-After=network-online.target
+# Ordering only: start after the network and, if it is installed, Ollama.
+After=network-online.target ollama.service
 
 [Service]
 Type=oneshot
 User=nightshift
 Group=nightshift
 NoNewPrivileges=true
-# The binary does not daemonize. Start detached:
+# Runs the jobs in goals.toml one at a time, then exits. The binary does not
+# daemonize, so start it detached:
 #   systemctl start --no-block nightshift.service
-WorkingDirectory=/var/lib/nightshift/repo
+# Each job that edits code needs its own checkout, named by `repo` in
+# goals.toml. Starting the unit again (after a reboot, say) skips the jobs
+# already done. See docs/configuration.md, "Goal queue".
+WorkingDirectory=/var/lib/nightshift
 ExecStartPre=/usr/bin/install -d /var/lib/nightshift/artifacts
-ExecStart=/usr/local/bin/nightshift run --goal "replace this goal" --repo /var/lib/nightshift/repo --out /var/lib/nightshift/artifacts
-StandardOutput=append:/var/lib/nightshift/artifacts/service.log
-StandardError=append:/var/lib/nightshift/artifacts/service.log
+ExecStart=/usr/local/bin/nightshift queue --file /var/lib/nightshift/goals.toml --config /var/lib/nightshift/nightshift.toml --out /var/lib/nightshift/artifacts
+StandardOutput=append:/var/lib/nightshift/artifacts/queue.log
+StandardError=append:/var/lib/nightshift/artifacts/queue.log
 TimeoutStartSec=infinity
 
 [Install]

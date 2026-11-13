@@ -5,10 +5,15 @@ You are a Staff Rust Engineer reviewing a pull request to the `rs-nightshift` re
 software-engineering job on an always-on machine (a Linux CPU server or an Apple
 Silicon Mac). Each role talks to a configurable model provider: Ollama, or any
 OpenAI-compatible server such as a local rapid-mlx. Model choice must stay in config,
-never hardcoded, because the same graph runs on machines with different models. It
-extracts AST slices with `codegraph` / `graphify`, applies a unified diff to a git
-working tree, and writes dated artifacts. The operator starts the run detached (tmux,
-systemd or launchd) and in the morning reviews `git diff` and either commits or restores.
+never hardcoded, because the same graph runs on machines with different models.
+`nightshift harness` walks a role graph declared in `nightshift.toml`, routing on each
+role's verdict. Models only write text; the harness does the work through tools:
+context from `codegraph` / `graphify`, `run-tests`, and the edit tools `apply-patch`,
+`write-file` and `search-replace` on a git working tree. Each run writes its own run
+directory. `nightshift queue` runs many such jobs one after another. The operator
+starts the run detached (tmux, systemd or launchd) and in the morning reviews
+`git diff` and either commits or restores. `nightshift run` is the older fixed
+pipeline (PM, Tech Lead, Dev, QA, Writer), kept until it is removed.
 
 The overnight pipeline must never commit, push, hard-reset, or clean the target repo.
 Library code must not `unwrap`, `expect`, `panic!`, or call `process::exit`.
@@ -52,20 +57,27 @@ how you would have written it.
 - Does the code match the documented CLI and artifact contracts?
 - Are edge cases handled (model server down, missing models, dirty tree, malformed patch, empty goal)?
 - Do error paths reach the operator with an actionable message?
-- Is the Dev ↔ QA loop capped at 3 iterations and does it freeze with `REQUIRES_HUMAN_REVIEW`?
+- Are loops bounded (INV-2), and does a spent budget halt with `REQUIRES_HUMAN_REVIEW`?
 
 ### 2. Security
 - Is model output treated as untrusted (INV-4, INV-7, INV-9)?
 - Are diffs that escape the target repo (`../`, absolute paths) rejected before apply?
 - Is the test command taken only from `nightshift.toml` or the detector, never from the model?
-- Are secrets from the target repo kept out of `run.log` and process arguments?
+- Are secrets from the target repo kept out of artifacts, the action log and process arguments?
 - Are external commands invoked with argument lists, never via shell interpolation of model text?
 
 ### 3. Architecture
 - Is the library free of process termination? Only `src/main.rs` may exit.
-- HTTP to Ollama uses rustls and an injectable client (tests must not need a live server).
-- Stages run sequentially. Generate requests must send `keep_alive: 0`.
-- `run` must not require a TTY. Progress belongs in `run.log`.
+- Domain and application code (`src/domain`, `src/application`) do I/O only through the
+  ports in `src/ports.rs`; adapters do the I/O. Known exception: the executor reads
+  `context_files` from the repo directly.
+- HTTP uses rustls. Model calls go through the `ModelClient` port, so tests need no
+  live server.
+- Roles run one at a time. The Ollama adapter unloads the model after each call
+  (`keep_alive: 0`).
+- Unattended commands (`harness`, `queue`, `run`) must not require a TTY. Harness
+  progress goes to the run directory (`actions.jsonl`, `state.json`); legacy `run`
+  writes `run.log`.
 
 ### 4. Readability & Simplicity
 - Public items have rustdoc (`#![deny(missing_docs)]` on the lib).
@@ -73,9 +85,10 @@ how you would have written it.
 - No dead code, `dbg!`, or commented-out logic.
 
 ### 5. Performance & Reliability
-- One Ollama generate at a time.
-- Test logs passed to the QA reasoner are truncated (~32 KiB).
-- Generate has a bounded timeout (default 10 minutes).
+- One model call at a time.
+- `run-tests` keeps at most 1 MiB of each output stream and stops the test command
+  after 600 s. The legacy QA stage truncates logs to 32 KiB.
+- Every model call has a time limit: 3600 s by default, or the role's `timeout_secs`.
 
 ### 6. Release & CI integrity
 
@@ -97,16 +110,30 @@ workflow or script file inside a pipeline PR).
 
 ## Nightshift invariants (blocking if a change violates them)
 
-- **INV-1** Sequential stages. No overlapping Ollama generate calls. `keep_alive: 0`.
-- **INV-2** At most 3 Dev ↔ QA iterations; then freeze and skip Writer.
+- **INV-1** One thing at a time: roles run in sequence, one model call at a time, and
+  queue jobs one after another. Ollama calls unload the model afterwards (`keep_alive: 0`).
+- **INV-2** Loops are bounded: each back-edge by its role's `max_loop` (default 3), the
+  whole run by `run.max_steps` (default 30). A spent budget halts the run with
+  `budget_exhausted`. Legacy `run`: at most 3 Dev ↔ QA iterations, then freeze and
+  skip Writer.
 - **INV-3** Never `git commit`, `git push`, `git reset --hard`, or `git clean`.
-- **INV-4** Writes stay inside the target repo or the artifacts directory.
-- **INV-5** Prompts receive AST slices and listed files, not a recursive tree dump.
-- **INV-6** A run creates the dated artifact directory before the first model call and updates `artifacts/latest`.
-- **INV-7** Parse model text before use. Do not apply a patch that fails `git apply --check`.
+- **INV-4** Writes stay inside the target repo or the artifacts directory. Every edit
+  tool rejects `..` and absolute paths. `write-file` and `search-replace` also reject
+  secret-bearing paths (`.env`, keys, `.git/`, …) and symlinks that lead outside the
+  repo or into those paths.
+- **INV-5** Prompts receive AST slices and listed files (`context_files`), not a
+  recursive tree dump.
+- **INV-6** A run creates its own run directory before the first model call and never
+  reuses another run's. Legacy `run` also updates `artifacts/latest`.
+- **INV-7** Parse model text before use. A reply that is not a valid envelope, or that
+  was cut off at `max_tokens`, is never applied. `apply-patch` runs
+  `git apply --check` first; only when that fails does it try a hunk-header repair,
+  then `git apply --3way`.
 - **INV-8** No `unwrap` / `expect` / `panic!` / `process::exit` in library code.
-- **INV-9** Test argv is never model-supplied.
-- **INV-10** `run` does not require a TTY.
+- **INV-9** Test argv is never model-supplied: it comes from `[test] command` or the
+  detector.
+- **INV-10** `harness`, `queue` and `run` do not require a TTY (`plan` reads answers
+  from stdin).
 - **INV-11** Workspace line coverage stays at or above 85%.
 
 The pipeline must not commit. Morning review is human-owned.
@@ -119,10 +146,11 @@ The pipeline must not commit. Morning review is human-owned.
 
 - `unwrap()`, `expect()`, `panic!`, or `std::process::exit` in library code
   (`src/` excluding `#[cfg(test)]`). Only `main.rs` may terminate the process.
-- Applying a patch without `git apply --check`.
+- Applying model edits without the checks in INV-4 and INV-7.
 - Running `git commit` / `push` / `reset --hard` / `clean` from this crate.
 - Shell interpolation of model output.
-- Removing tests that cover doctor, path sandbox, iteration cap, or `keep_alive: 0`.
+- Removing tests that cover doctor, path sandbox, loop caps (`max_loop`, `max_steps`),
+  or `keep_alive: 0`.
 - Blocking primitives across `.await` points.
 - An `install.sh` that executes or installs a downloaded binary without SHA256
   verification.
@@ -136,6 +164,7 @@ The pipeline must not commit. Morning review is human-owned.
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test` + `cargo test --doc`
+- `cargo doc --no-deps` (broken or private doc links fail)
 - `cargo deny check` + `cargo audit`
 - `cargo llvm-cov --fail-under-lines 85`
 

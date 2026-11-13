@@ -4,7 +4,8 @@ set -euo pipefail
 # Runs the pre-push gate subset:
 #   cargo fmt --all -- --check,
 #   cargo clippy --all-targets --all-features -- -D warnings,
-#   cargo test, cargo test --doc, cargo audit, cargo deny check
+#   cargo test, cargo test --doc, cargo doc --no-deps, cargo audit,
+#   cargo deny check
 #
 # This intentionally does NOT run the AI review; ocr runs in CI and the pre-commit hook.
 
@@ -42,6 +43,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo test --doc
+cargo doc --no-deps
 cargo audit
 cargo deny check
 
