@@ -199,8 +199,8 @@ and never uses model output as a command or its arguments.
 - `apply-patch`: checks that every path the diff names stays in the repo
   and is not a secret-bearing path, then runs `git apply --check` and
   applies. When the check fails, it repairs the
-  line counts in the hunk headers and checks again. When that fails too, it
-  tries `git apply --3way`. It does not check for uncommitted changes;
+  line counts in the hunk headers and checks again; there is no other
+  fallback. It does not check for uncommitted changes;
   `nightshift queue` skips a job whose repo has them.
 - `write-file`: writes `content` that starts with `file: <path>` as the
   whole file. Creates the file and its directories when they do not exist.
