@@ -1,15 +1,15 @@
 # Architecture
 
-rs-nightshift is a local, overnight, multi-agent engineering harness: you leave
-a goal and a config, and in the morning you review the working tree plus a
-report. It never commits, pushes, resets, or cleans — that stays your call.
+rs-nightshift runs a goal through a graph of model roles while nobody
+watches. In the morning you review the working tree and a report. It never
+commits, pushes, resets or cleans; that stays your call.
 
-The harness is built hexagonally (ADR-007): a pure domain, ports, an
-application layer, and adapters. This page describes that structure and the two
-role-graph commands (`nightshift harness`, `nightshift plan`). For the full
-`nightshift.toml` config schema and design, see
-[docs/role-graph.md](role-graph.md) rather than duplicating it here; for the
-module-by-module guide, see the per-folder READMEs under `src/`.
+The harness is built as ports and adapters (ADR-007): a pure domain, ports,
+an application layer and adapters. This page describes that structure and
+the role-graph commands. The design and its reasons are in
+[role-graph.md](role-graph.md), every config key is in
+[configuration.md](configuration.md), and each folder under `src/` has a
+README for its modules.
 
 ## The hexagon
 
@@ -32,73 +32,86 @@ module-by-module guide, see the per-folder READMEs under `src/`.
                                                   └──────────────────────┘
 ```
 
-- **Domain** (`src/domain/rolegraph/`) — pure data: the `nightshift.toml`
-  schema + validation, the verdict envelope, routing targets, and run-state
-  models. No network, no filesystem.
-- **Ports** (`src/ports.rs`) — the traits the application depends on:
-  `ModelClient`, `ModelClientFactory`, `Clock`, `ArtifactStore`, `StateStore`,
-  `ToolRunner`, `ContextProvider` — each shipping a test double so the
-  application is unit-testable without a network, git, or a filesystem.
-- **Application** (`src/application/`) — the use cases: the role executor, the
-  graph orchestrator, and the terminal report. Orchestration only.
-- **Adapters** (`src/adapters/`) — the implementations: LLM providers + the
-  client factory, capabilities (`run-tests` / `apply-patch` /
-  `write-file` / `search-replace` / `gather-context`), the filesystem artifact
-  and state stores, and the system clock. The only layer that imports
-  `llm-kernel` / `reqwest` or shells out.
+- Domain (`src/domain/rolegraph/`): plain data. The `nightshift.toml` schema
+  and its validation, the verdict envelope, routing targets and run-state
+  types.
+- Ports (`src/ports.rs`): the traits the application depends on
+  (`ModelClient`, `ModelClientFactory`, `Clock`, `ArtifactStore`,
+  `StateStore`, `ToolRunner`, `ContextProvider`) and test doubles for them,
+  so the application is tested without a network, git or a filesystem.
+- Application (`src/application/`): the role executor, the graph
+  orchestrator and the terminal report.
+- Adapters (`src/adapters/`): the model providers and the client factory,
+  the tools (`run-tests`, `apply-patch`, `write-file`, `search-replace`,
+  `gather-context`), the filesystem artifact and state stores, and the
+  system clock. In the role-graph layers, only adapters import `llm-kernel`
+  or `reqwest` or start other programs.
 
-**The rule:** domain and application never do I/O — never `std::net`,
-`reqwest`, `tokio::fs`, or `std::process` directly; every side effect happens
-through a port. The CLI edge (`main.rs`) builds the concrete adapters and
-injects them, so the application never mentions an adapter by name.
+The rule: domain and application code do not use `std::net`, `reqwest`,
+`tokio::fs` or `std::process`; side effects go through a port. Two
+exceptions read files: the config loader in the domain, which the CLI edge
+calls before a run, and the executor, which reads a role's `context_files`
+from the repo. The CLI edge (`main.rs`) builds the adapters and passes them
+in, so the application never names an adapter.
 
-For beta these are modules of one crate; the plan is to fragment into
-`nightshift-core` / `nightshift-engine` / `nightshift-cli` once the boundaries
-stabilise (ADR-007).
+These are modules of one crate. The plan is to split them into
+`nightshift-core`, `nightshift-engine` and `nightshift-cli` crates once the
+boundaries settle (ADR-007).
 
-## The two harness commands
+## The harness commands
 
-Both commands read the same role-graph config (`nightshift.toml` by default)
-and write into a per-run directory `{date}_{slug}-run-{timestamp}` /
-`{date}_{slug}-plan-{timestamp}` under the artifact root (`--out`, default
-`./artifacts`). `nightshift doctor` validates the *configured* role graph
-before a run: the toolchain, `codegraph` / `graphify` on PATH (only when a role
-declares `gather-context`), and Ollama reachability + configured models (only
-when a role uses the `ollama` provider).
+`harness`, `plan` and `queue` read the same role-graph config
+(`nightshift.toml` by default, or `--config`). Each run writes into its own
+directory under `--out` (default `./artifacts`):
+`{date}_{slug}-run-{timestamp}` for `harness` and `queue` jobs,
+`{date}_{slug}-plan-{timestamp}` for `plan`.
 
-### `nightshift harness` — the unattended run
+`nightshift doctor` checks the configured role graph before a run: the
+config itself, the Rust toolchain, `codegraph` and `graphify` (only when a
+role declares `gather-context`), Ollama and its models (only for roles on
+the `ollama` provider), each OpenAI-compatible server and the models the
+roles name, and, on macOS, `caffeinate`. It warns when a role sets
+`num_ctx`, which is not sent.
+
+### `nightshift harness`: the unattended run
 
 ```text
 nightshift harness --goal "add a /health endpoint" --repo ~/projects/my-app \
                    [--config nightshift.toml] [--out ./artifacts] [--name SLUG]
 ```
 
-Walks the role graph from `run.start`, routing **deterministically** on each
-role's verdict (`continue` / `issues` / `questions` / `done` / `fail`) — no
-model decides the next step. Loop-backs count against the role's `max_loop`;
-`run.max_steps` is a global ceiling (safety backstop, not a target). On a
-blocking `questions` verdict (with `on_unclear = "halt"`, the default) or an
-exhausted loop budget the run halts and the report classifies why
-(`ill_defined_task`, `tool_failure`, `version_mismatch`, `budget_exhausted`).
+Walks the role graph from `run.start` and routes on each role's verdict
+(`continue`, `issues`, `questions`, `done`, `fail`); no model decides the
+next step. Loop-backs count against the role's `max_loop`, and
+`run.max_steps` caps the whole run. On a blocking question (with the
+default `on_unclear = "halt"`) or a used-up loop budget, the run stops and
+the report says why (`ill_defined_task`, `tool_failure`,
+`version_mismatch`, `budget_exhausted`).
 
 Exit codes: `0` PASSED, `1` FAILED, `2` REQUIRES_HUMAN_REVIEW.
 
-### `nightshift plan` — the pre-flight Q&A
+### `nightshift queue`: many runs in a row
+
+Runs the jobs of a queue file one after another, each like `harness`, and
+keeps `queue_state.json` and `queue_report.md` under `--out`. See
+[Goal queue](configuration.md#goal-queue-nightshift-queue).
+
+### `nightshift plan`: questions before the run
 
 ```text
 nightshift plan --goal "add a /health endpoint" --repo ~/projects/my-app \
                 [--config nightshift.toml] [--out ./artifacts] [--name SLUG]
 ```
 
-Runs only the entry role and, when it raises clarifying questions, prints them
-and reads your answers from stdin — repeating until no blocking questions
-remain (up to 5 rounds) — then writes the brief artifact. The run directory is
-tagged `-plan-` so a plan never shares a directory with a later harness run.
+Runs only the entry role, with its tools. While the role returns questions,
+it prints them and reads your answers from stdin, for up to 5 rounds or
+until stdin ends. Then it writes the brief. The run directory is tagged
+`-plan-`, so a plan never shares a directory with a later harness run.
 
 ## Providers
 
-Roles select a provider by name; the client factory (`build_model_client`,
-`src/adapters/`) resolves it:
+Roles name a provider; the client factory (`build_model_client` in
+`src/adapters/providers/factory.rs`) builds the client:
 
 | Provider  | Backend           | Default                        | Auth                |
 | :-------- | :---------------- | :----------------------------- | :------------------ |
@@ -107,45 +120,52 @@ Roles select a provider by name; the client factory (`build_model_client`,
 | `kimi`    | OpenAI-compatible | `https://api.moonshot.cn/v1`   | `MOONSHOT_API_KEY`  |
 | custom    | `openai-compatible` | from `[providers.<name>]`    | `api_key_env`, or none for a keyless local server (rapid-mlx) |
 
-- Ollama keeps its `keep_alive: 0` VRAM unload after each call; with
-  `options.think = true` the `:think` model-tag suffix is applied
-  (`phi4` → `phi4:think`).
-- The model tag is passed to the provider verbatim — the config owns the exact
-  tag/variant (e.g. `phi4`, `kimi3`, `deepseek-v4-pro`).
-- Per-role `options` (`temperature`, `max_tokens`, `think`) are applied at the
-  adapter; `num_ctx` is validated but not forwarded (llm-kernel's request has
-  no such field). Unknown option keys are ignored; invalid types are config
-  errors.
-- Base URLs are validated (`http(s)://`, host required, no embedded
-  credentials) and reported redacted.
+- Ollama: after each call, nightshift sends `keep_alive: 0`, which unloads
+  the model. With `options.think = true` it adds the `:think` tag suffix
+  (`phi4` becomes `phi4:think`).
+- The model tag goes to the provider as written; the config owns the exact
+  tag (`qwen2.5-coder:7b`, `qwen3.6-35b-4bit`, `deepseek-v4-pro`).
+- Per-role `options` (`temperature`, `max_tokens`, `think`) are applied in
+  the adapter. `num_ctx` is checked but not sent, because llm-kernel's
+  request has no such field. Unknown keys are ignored; a wrong type is a
+  config error.
+- Base URLs must be `http://` or `https://` with a host, and have no
+  credentials, query or fragment. Plain `http://` and a missing
+  `api_key_env` are allowed only for this machine (loopback). Errors show
+  the URL with credentials removed.
 
-See `src/adapters/providers/README.md` for the full provider rules.
+See [the providers README](../src/adapters/providers/README.md) for the
+details.
 
 ## Capabilities
 
-Models write text + a verdict; the harness performs the dangerous work through
-the capability adapters (`src/adapters/capabilities.rs`), declared per role via
-`tools = [...]`:
+Models return text and a verdict; the harness does the risky work through
+the tools a role declares with `tools = [...]`
+(`src/adapters/capabilities.rs`):
 
-- **`run-tests`** — detect the test command (`cargo test`, `bundle exec rspec`,
-  `mix test`, `pytest`, or `[test] command` in config), run it in the repo with
-  a 600 s wall-clock timeout, and capture the exit code + output. The command
-  gets its own process group; a timeout stops the whole group. Runs as a
-  pre-tool: the results are injected into the role's prompt so it reasons over
-  real results. The command never comes from model output.
-- **`apply-patch`** — validate the diff paths (no `..`, no absolute paths),
-  `git apply --check`, dirty-tree guard, then apply. Runs as a post-tool for
-  `continue` / `done` verdicts. Never commits.
-- **`write-file`** — write `content` that starts with `file: <path>` as the
-  full file, creating it (and its directories) when it does not exist.
-  Post-tool for `continue` / `done`. Path must stay in the repo and must not
-  be a secret-bearing path, also when a symlinked directory is in the way.
-- **`search-replace`** — exact `old:` / `new:` substitutions in existing
-  files. Each `old` snippet must match once (including overlapping matches);
-  not-found and ambiguous matches abort with no writes. Secret-bearing paths
-  are rejected. Post-tool for `continue` / `done`. Never commits.
-- **`gather-context`** — the codegraph + graphify context bundle, injected
-  into the role's prompt as repo context.
+- `run-tests`: picks the test command (`[test] command` in the repo's
+  `nightshift.toml`, else `cargo test`, `bundle exec rspec`, `mix test` or
+  `pytest`), runs it in the repo with a 600 s limit, and keeps the exit code
+  and up to 1 MiB of each output stream. The command runs in its own
+  process group, and the time limit stops the whole group. It runs before
+  the model call, so the role sees real results. The command never comes
+  from model output.
+- `apply-patch`: checks that the diff's paths stay in the repo (no `..`, no
+  absolute paths), runs `git apply --check`, then applies. When the check
+  fails, it repairs the line counts in the hunk headers and checks again;
+  when that fails too, it tries `git apply --3way`. Runs after a `continue`
+  or `done` verdict. Never commits.
+- `write-file`: writes `content` that starts with `file: <path>` as the
+  whole file, creating it and its directories when they do not exist. Runs
+  after `continue` or `done`. The path must stay in the repo and must not
+  be a secret-bearing path, also through a symlinked directory.
+- `search-replace`: exact `old:` / `new:` replacements in existing files.
+  Each `old` must match exactly once, overlapping matches included; no
+  match, or more than one, is an error and nothing is written.
+  Secret-bearing paths are rejected. Runs after `continue` or `done`. Never
+  commits.
+- `gather-context`: the codegraph and graphify context bundle, plus the
+  role's `context_files`, added to the prompt.
 
 ## State & report
 
@@ -161,29 +181,33 @@ Each run persists, under its run directory:
   per-edge loop counters. Written via temp-file + rename so an interruption
   never truncates it.
 
-Role outputs (the `output = "…"` files from config, e.g. `01_brief.md`,
-`02_patch.patch`) land in the same run directory. In the morning,
-`nightshift harness` prints the report rendered from the snapshot and action
-log (`src/application/report.rs`): status, step count, block-reason
-description, and the role trail (`product-owner → developer → qa`).
+Role outputs (the `output = "…"` files from config, such as `01_brief.md`)
+land in the same run directory. At the end, `nightshift harness` prints the
+report built from the snapshot and the action log
+(`src/application/report.rs`): status, steps, retries, block reason, the
+role trail (`product-owner → developer → qa`) and the time per role.
 
 ## Module layout
 
 ```text
 src/
-├── domain/rolegraph/   # pure domain: config, verdict, routing, state (no I/O)
-├── ports.rs            # port traits + test doubles
-├── application/        # executor, orchestrator, report (orchestration only)
-├── adapters/           # the only I/O layer: providers, capabilities, context, stores, clock
-├── cli.rs              # clap parsing: doctor | status | run | harness | plan
-├── main.rs             # CLI edge: wires adapters, owns process exit
-└── legacy pipeline modules, being retired under ADR-006:
-    pipeline.rs, pm.rs, techlead.rs, qa.rs, writer.rs, models.rs,
-    artifacts/, doctor/, ollama.rs, generate.rs, testrun.rs,
-    dev.rs, error.rs
+├── domain/rolegraph/   # config, verdict, routing, state (no I/O)
+├── ports.rs            # port traits and test doubles
+├── application/        # executor, orchestrator, report
+├── adapters/           # providers, tools, context, git, test runner, stores, clock
+├── error/              # the crate-wide Error and its parts (provider, git, config, artifact)
+├── queue.rs            # nightshift queue
+├── bench.rs            # nightshift bench
+├── doctor/             # nightshift doctor checks (does its own I/O)
+├── cli.rs              # clap parsing: doctor, status, run, harness, plan, queue, bench
+├── main.rs             # CLI edge: builds the adapters, owns process exit
+└── legacy pipeline, to be retired (ADR-006):
+    pipeline.rs, pm.rs, techlead.rs, dev.rs, qa.rs, writer.rs,
+    models.rs, artifacts/, generate.rs
 ```
 
 `nightshift run` and `nightshift status` are the legacy fixed-pipeline
-commands, superseded by `harness` / `plan`; the shared primitives they and the
-adapters both use (`ollama.rs`, `generate.rs`, `adapters/context.rs`, `testrun.rs`,
-`dev.rs`) stay until the migration completes.
+commands; `harness`, `plan` and `queue` replace them. The parts both use
+already live in `adapters/` (`ollama.rs`, `kernel_error.rs`, `context.rs`,
+`test.rs`, `git.rs`). `generate.rs` (the `LLMClient` re-export and
+`Origin`) is still shared with the provider adapters.

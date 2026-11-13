@@ -1,28 +1,24 @@
-# src/application — the use cases
+# src/application: the use cases
 
-The application layer implements the role-graph use cases: pure orchestration
-that depends only on `crate::domain` and `crate::ports` (ADR-007). It never
-performs I/O and never imports an adapter — concrete implementations are
-injected by the CLI edge (`main.rs`), which is also where every port is
-satisfied.
+The application layer runs the role graph. It depends only on
+`crate::domain` and `crate::ports` (ADR-007) and never imports an adapter:
+`main.rs` builds the adapters and passes them in. It does no I/O, with one
+exception: the executor reads a role's `context_files` from the repo
+(`read_context_files`, with path and size checks).
 
-| Module         | Use case |
-| :------------- | :------- |
-| `executor.rs`  | run one role: pre-tools (`gather-context`, `run-tests`) inject real results into the prompt; the LLM call goes through the `ModelClient` port; the verdict envelope is parsed; the deliverable is written via `ArtifactStore`; post-tools (`apply-patch`, `write-file`, `search-replace`) run for `continue` / `done` verdicts |
-| `orchestrator.rs` | walk the role graph from `run.start`: route deterministically on each verdict (`continue` / `issues` / `questions` / `done` / `fail`), enforce the global `max_steps` ceiling and per-role `max_loop` back-edge caps, append action-log events and the status snapshot via the `StateStore` / `Clock` ports, and stop at a terminal state |
-| `report.rs`     | render the morning report from the persisted snapshot + action log: status label (`PASSED` / `FAILED` / `REQUIRES_HUMAN_REVIEW`), step count, block-reason description, and the role trail |
+| Module | Use case |
+| :--- | :--- |
+| `executor.rs` | runs one role. Before the model call, the role's tools (`gather-context`, `run-tests`) add real results to the prompt. The call goes through the `ModelClient` port, the reply is parsed into the verdict envelope, the content is written through `ArtifactStore`, and after a `continue` or `done` verdict the edit tools (`apply-patch`, `write-file`, `search-replace`) run. A rejected reply or a failed edit tool is retried (`retries`) |
+| `orchestrator.rs` | walks the role graph from `run.start`. Routes on each verdict, enforces `max_steps` and each role's `max_loop`, writes action-log events and the status snapshot through `StateStore` and `Clock`, and stops at a terminal state |
+| `report.rs` | renders the report from the snapshot and the action log: status (`PASSED`, `FAILED`, `REQUIRES_HUMAN_REVIEW`), steps, retries, block reason, the role trail and the time per role |
 
-Both `executor::execute` and `orchestrator::run_graph` are generic over the
-port traits (`ModelClient`, `ArtifactStore`, `StateStore`, `Clock`,
-`ToolRunner`, `ContextProvider`, `ModelClientFactory`), so tests inject the
-in-memory doubles from `ports.rs` and run with no network or filesystem.
+`executor::execute` and `orchestrator::run_graph` are generic over the port
+traits, so tests pass in the in-memory doubles from `ports.rs` and run with
+no network or filesystem.
 
-Who owns what:
-
-- **The application owns the run** — sequencing, routing, budgets, and the
-  persisted state of a run. It decides *what happens when*, never *how* the
-  outside world is reached.
-- **The application owns the contract with the model** — the system-prompt
-  output contract (`OUTPUT_CONTRACT` in `executor.rs`) that asks a role for a
-  JSON envelope, and the parsing that tolerates markdown fences and prose
-  around it.
+The executor also owns the contract with the model: `OUTPUT_CONTRACT` (and,
+for `search-replace` roles, the edit format) is appended to each role's
+system prompt and asks for one JSON envelope. The parser accepts markdown
+fences, prose around the object, `<think>` blocks from thinking models, and
+common JSON mistakes. A reply that the model did not finish never reaches
+the parser: the provider adapter rejects it, and the executor retries.

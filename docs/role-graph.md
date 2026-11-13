@@ -1,253 +1,283 @@
 # Role-graph harness (design)
 
-Status: **proposed** — locked from user decisions on 2026-08-19. This doc is the
-source of truth for the beta rework; update it before changing behavior.
+This is the design of the role graph as it shipped in the beta
+(`nightshift harness`, `plan` and `queue`). It explains why the graph works
+the way it does. For every config key, see
+[configuration.md](configuration.md).
 
 ## Summary
 
-Replace the hardcoded pipeline — the `Role` enum and the fixed
-PM → TechLead → Dev → QA → Writer sequence in `run()` — with a **config-driven
-role graph**.
+The role graph replaces the fixed pipeline of `nightshift run` (PM → Tech
+Lead → Dev → QA → Writer, with a hardcoded `Role` enum) with roles declared
+in config.
 
-- **Roles are data**, not code: provider + model + options + prompt + output +
+- Roles are data: provider, model, options, prompt, output file, tools and
   routing, declared in `nightshift.toml`.
-- **The harness walks the graph** on a small deterministic *verdict* each role
-  emits. No LLM guesses the next step.
-- **Providers are pluggable** through the already-adopted `llm-kernel` layer.
-- **Capabilities stay in code**: the harness does `git apply`, test runs, and
-  context gathering on the role's behalf; models only write text + a verdict.
+- The harness walks the graph on a small, fixed set of verdicts that each
+  role returns. No model decides the next step.
+- Providers are pluggable through the `llm-kernel` crate.
+- Side effects stay in code. The harness applies edits, runs tests and
+  gathers context for a role; models only return text and a verdict.
+
+The fixed pipeline still exists behind `nightshift run` and
+`nightshift status`. It is retired once the role graph covers it (ADR-006,
+[Migration](#migration)).
 
 ## Hexagonal architecture
 
-The harness follows **ports & adapters** (hexagonal) so domain logic is pure
-and all I/O sits behind traits, mirroring `brigid`'s `brigid-core` (pure domain
-+ traits) / `brigid-pipeline` (orchestration + adapters) split.
+The harness uses ports and adapters (ADR-007), modeled on the `brigid` repo:
+`brigid-core` holds the domain and traits, `brigid-pipeline` the
+orchestration and adapters. Domain logic stays pure, and I/O sits behind
+traits.
 
-Target crate layout (fragmentation is mechanical once these boundaries hold):
+Today it is one crate with the modules `src/domain`, `src/ports.rs`,
+`src/application`, `src/adapters` and the CLI edge (`src/cli.rs`,
+`src/main.rs`). The planned split into crates has not happened yet:
 
-- **`nightshift-core`** — domain + ports, **no I/O**: the role graph (`config`,
-  `verdict`, `routing`), state/report models, and the port traits. Trivially
-  unit-testable; no network or filesystem.
-- **`nightshift-engine`** — application + adapters: the graph orchestrator and
-  role executor (application), plus adapters implementing the ports —
-  llm-kernel clients (Ollama/Deepseek/Kimi), filesystem artifact store, JSONL
-  action log, `git apply` / test-runner / context tools.
-- **`nightshift-cli`** — thin shell: `clap` parsing, `plan`/`run`/`status`/
-  `doctor`, process exit. No business logic.
+- `nightshift-core`: the domain and the ports, no I/O.
+- `nightshift-engine`: the application and the adapters.
+- `nightshift-cli`: argument parsing, the commands, process exit.
 
-For beta these land as modules (`src/domain`, `src/ports`, `src/application`,
-`src/adapters`, `src/cli`) inside the current crate and are split into crates
-when the boundaries stabilise.
+The ports are traits in `src/ports.rs`; the adapters implement them.
 
-Ports (traits the domain defines; adapters implement):
+| Port | What it abstracts | Test double |
+| :--- | :--- | :--- |
+| `ModelClient` | one model call: `generate`, `generate_with_usage` (adds the token counts), `redacted_origin` | `ScriptedModelClient` |
+| `ModelClientFactory` | builds a `ModelClient` from a role's provider, model and options | none; tests define their own |
+| `ToolRunner` | a declared tool: `run-tests`, `apply-patch`, `write-file`, `search-replace` | `StubToolRunner` |
+| `ContextProvider` | repo context for `gather-context` (codegraph, graphify) | `StubContextProvider` |
+| `ArtifactStore` | create a run directory, read and write artifacts | `MemoryArtifactStore` |
+| `StateStore` | append action-log events, write and read the status snapshot | `MemoryStateStore` |
+| `Clock` | the current time, and today's date for the run-directory name | `FixedClock` |
 
-| Port | What it abstracts |
-| :--- | :--- |
-| `ModelClient` | one LLM call (`complete(model, prompt) -> text`) + error mapping |
-| `ToolRunner` | a declared capability (`run-tests`, `apply-patch`, `write-file`, `search-replace`, `gather-context`) |
-| `ArtifactStore` | create run dir, read/write artifacts, `latest` pointer |
-| `StateStore` | append action-log events + write/read the status snapshot |
-| `ContextProvider` | repo context (codegraph/graphify) for context injection |
-| `Clock` | today's date (run-dir slug), deterministic in tests |
+Rules:
 
-Invariants:
-
-- Domain and application code never touch `std::net`, `reqwest`, `tokio::fs`,
-  or `std::process` directly — only through a port.
-- Adapters are the only modules that import `llm-kernel`, `reqwest`, or shell
-  out to `git`/`codegraph`/`graphify`.
-- Every port has a test double (`ScriptedModelClient`, `FakeToolRunner`,
-  `FakeArtifactStore`, `InMemoryStateStore`, `NoneContext`, `FixedClock`).
+- Domain and application code do not use `std::net`, `reqwest`, `tokio::fs`
+  or `std::process`. They go through a port. Two exceptions read files: the
+  config loader in the domain (`load_role_graph_config_from`, which the CLI
+  edge calls before a run) and the executor, which reads a role's
+  `context_files` from the repo with `std::fs`.
+- In the role-graph layers, only adapters import `llm-kernel` or `reqwest`,
+  or run `git`, `codegraph` and `graphify`. The legacy modules
+  (`generate.rs`, `doctor/`) still import them directly.
 
 ## Goals (beta)
 
-- Arbitrary role types (Product Owner, Developer, QA, Researcher, Writer,
-  Editor, …) defined in config — no fixed role enum.
-- Per-role `provider` + `model` + model-specific `options` (think/reasoning,
-  temperature, …).
-- Deterministic routing on a fixed verdict vocabulary.
-- Providers: Ollama (local), Deepseek, Kimi/Moonshot.
-- Append-only action log + resumable status snapshot + context injection
-  ("small RAG": recent actions + prior artifacts, no embeddings).
-- Two modes: `nightshift plan` (pre-flight human loop) and `nightshift run`
-  (unattended overnight).
-- Terminal report that classifies *why* the run blocked.
+- Any role type (Product Owner, Developer, QA, Researcher, Writer, Editor)
+  defined in config, with no fixed role enum.
+- Per-role `provider`, `model` and model-specific `options` (thinking,
+  temperature, output limit).
+- Routing on a fixed verdict vocabulary.
+- Providers: Ollama, Deepseek, Kimi/Moonshot, and any OpenAI-compatible
+  server (rapid-mlx, llama.cpp, LM Studio).
+- An append-only action log, a status snapshot, and context injection: the
+  goal, tool output and earlier artifacts go into each prompt. No
+  embeddings.
+- Two modes: `nightshift plan` (questions before the run) and
+  `nightshift harness` (unattended). `nightshift queue` runs many harness
+  jobs back to back.
+- A report that says why a run stopped.
 
 ## Non-goals (beta)
 
-- Parallel/branching DAGs (fan-out / fan-in / join nodes). The data model must
-  not preclude them later, but beta only ships linear chain + loop-backs.
-- Embedding-based RAG.
-- Cline auth reuse / `@cline/sdk` orchestration (deferred post-beta).
-- Mid-run crash resume (fresh attempt per run).
-- crates.io publish (ADR-001 reaffirmed).
+- Parallel or branching graphs (fan-out, fan-in, joins). The data model must
+  not rule them out, but the beta only ships a linear chain with
+  loop-backs.
+- Embedding-based retrieval.
+- Reusing Cline's auth or `@cline/sdk` orchestration (after the beta).
+- Resuming a run after a crash. Each run starts fresh; `nightshift queue`
+  restarts unfinished jobs from the beginning.
+- Publishing to crates.io (ADR-001).
 
-## Config schema
+## Config shape
 
 ```toml
 [run]
 start       = "product-owner"   # entry role id
 on_unclear  = "halt"            # halt (default) | proceed
-max_steps   = 30                # global role-execution cap (safety backstop)
-
-# Ollama needs no block (defaults to 127.0.0.1:11434); override to move it:
-[providers.ollama]
-base_url    = "http://127.0.0.1:11434"
+max_steps   = 30                # cap on role executions in one run
 
 [providers.deepseek]
 backend     = "openai-compatible"
 base_url    = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 
-[providers.kimi]
-backend     = "openai-compatible"
-base_url    = "https://api.moonshot.cn/v1"
-api_key_env = "MOONSHOT_API_KEY"
-
 [[roles]]
 id        = "product-owner"
 provider  = "deepseek"
 model     = "deepseek-v4-pro"
 options   = { temperature = 0.2 }
-prompt    = "…"                 # the job: template with {{goal}}, {{artifacts}}, {{memory}}
+prompt    = "…"                 # used as the system prompt, as written
 output    = "01_brief.md"       # artifact file it writes
 on        = { continue = "developer", questions = "@halt" }
 
 [[roles]]
 id        = "developer"
-provider  = "kimi"
-model     = "kimi3"
-options   = { think = true }
+provider  = "ollama"
+model     = "qwen2.5-coder:7b"
 prompt    = "…"
-output    = "02_patch.patch"
-tools     = ["apply-patch"]     # harness applies the patch, not the model
-on        = { continue = "qa", questions = "@halt" }
-max_loop  = 3
+output    = "02_change.txt"
+tools     = ["gather-context", "search-replace"]
+on        = { continue = "qa" }
 
 [[roles]]
 id        = "qa"
 provider  = "ollama"
-model     = "phi4"
-options   = { think = true }
+model     = "llama3.1:8b"
 prompt    = "…"
-output    = "03_qa_report.json"
-tools     = ["run-tests"]       # harness runs the test command, not the model
+output    = "03_qa.md"
+tools     = ["run-tests"]       # the harness runs the test command, not the model
 on        = { issues = "developer" }   # loop back with findings
 max_loop  = 3
 ```
 
-- `on` maps a verdict to a target: a role id, `@done`, or `@halt`.
-  `done` and `fail` are implicit terminals and need no `on` entry.
-- `max_loop` caps how many times a *back-edge* (`issues`/`questions` to an
-  earlier role) may fire for that role. Default 3.
-- `retries` is how many extra attempts a role gets when its reply is rejected
-  (invalid envelope, failed edit tool) or the provider request fails.
-  Default 2; see [configuration](configuration.md#per-role-retries).
-- `options` is a provider/model-specific passthrough (temperature,
-  think/reasoning, max_tokens, num_ctx, …) — never hardcoded.
+- `on` maps a verdict to a target: a role id, `@done` or `@halt`. When a
+  verdict has no entry, `continue` goes to `@done`, and `issues` and
+  `questions` go to `@halt`. `done` and `fail` always end the run.
+- `max_loop` caps how many times a role may loop back to the same target.
+  Each edge (`qa:developer`) has its own counter. Default 3.
+- `retries` is how many more attempts a role gets when its reply is
+  rejected or the provider request fails. Default 2; see
+  [Per-role retries](configuration.md#per-role-retries).
+- `options` passes provider and model settings through, so none are
+  hardcoded. `temperature`, `max_tokens` and `think` (Ollama only) are
+  applied; `num_ctx` is accepted but not sent. Other keys are ignored.
+- Profiles let a role name a model slot (`model = "@coder"`) that each
+  machine maps to its own provider and model.
 
 ## Verdicts
 
-Each role returns a small structured envelope plus its artifact text:
+Each role returns one JSON object:
 
 ```json
 {
   "verdict": "continue",
   "summary": "one line",
+  "content": "the artifact text, written to the role's output file",
   "findings": ["…"],
   "questions": [{"text": "…", "blocking": false}],
-  "block_reason": null
+  "block_reason": "none"
 }
 ```
 
-| Verdict    | Meaning | Routing |
-| :--------- | :------ | :------ |
-| `continue` | work accepted, proceed | `on.continue` target (role id or `@done`) |
-| `issues`   | work incomplete / bugs | `on.issues` target (loop-back), carries `findings`; counts against `max_loop` |
-| `questions`| needs clarification | `on.questions` target or `@halt`; each question carries `blocking` |
-| `done`     | finished successfully | terminal — run `PASSED` |
-| `fail`     | hard failure | terminal — run `FAILED`/`REQUIRES_HUMAN_REVIEW`, with `block_reason` |
+| Verdict | Meaning | Routing |
+| :--- | :--- | :--- |
+| `continue` | work accepted | `on.continue` (a role id or `@done`) |
+| `issues` | work incomplete or buggy | `on.issues`, a loop-back that carries `findings` and counts against `max_loop` |
+| `questions` | needs clarification | see [Routing and loop caps](#routing-and-loop-caps) |
+| `done` | finished | ends the run: `PASSED` |
+| `fail` | hard failure | ends the run: `FAILED`, with the role's `block_reason` (`tool_failure` when it gives none) |
 
-`block_reason` (when terminal or when a loop cap is exhausted):
-`ill_defined_task`, `tool_failure`, `version_mismatch`, `budget_exhausted`,
-`none`.
+`block_reason` is one of `ill_defined_task`, `tool_failure`,
+`version_mismatch`, `budget_exhausted` or `none`.
 
-## Routing & loop caps
+## Routing and loop caps
 
-- The harness routes deterministically on `verdict`; it never asks a model
-  "what next".
-- Blocking `questions` in unattended mode → `@halt`: write the blocking report
-  and exit `REQUIRES_HUMAN_REVIEW`. With `on_unclear = "proceed"`, non-blocking
-  questions are recorded and the run continues.
-- When `max_loop` is exhausted on a back-edge, the run halts with
-  `block_reason = "budget_exhausted"` and a report naming the role, the edge,
-  and the last findings — so the morning review says *"X of Y blocked because
-  …"*.
-- `max_steps` is a global safety backstop on total role executions (default 30).
-  It is a ceiling, not a target: a 3-role graph with two `max_loop = 3`
-  back-edges expands to ~9 executions worst case, so 5 would truncate the run
-  mid-loop. 30 gives headroom while still preventing runaway.
+- The harness routes on `verdict` alone and never asks a model what to do
+  next.
+- `questions`: when no question is blocking, the run follows `on.continue`.
+  When one is blocking, it follows `on.questions`. By default that is
+  `@halt`: the run stops as `REQUIRES_HUMAN_REVIEW` with
+  `ill_defined_task`. It can also name a role, which then gets the
+  questions. With `on_unclear = "proceed"`, blocking questions follow
+  `on.continue` too. The questions are not saved anywhere else.
+- When a loop-back would pass `max_loop`, the run stops as
+  `REQUIRES_HUMAN_REVIEW` with `budget_exhausted`. The `halt` event in the
+  action log names the role.
+- `max_steps` caps the role executions in one run (default 30), and stops
+  the run the same way. It is a ceiling, not a target: a 3-role graph with
+  two `max_loop = 3` back-edges needs about 9 executions at worst, so 5
+  would cut a run off in the middle of a loop. 30 leaves room and still
+  stops a runaway.
 
-## Capabilities (code-side tools)
+## Capabilities (tools in code)
 
-The harness exposes a small, fixed set of tools a role may declare. Models
-produce text + verdicts; the harness performs the dangerous work, preserving
-the existing invariants (never commit/push/reset/clean; model output is never
-used as argv).
+A role can declare these tools. Models return text and a verdict; the
+harness does the risky work. It never commits, pushes, resets or cleans,
+and never uses model output as a command or its arguments.
 
-- `apply-patch` — `git apply --check` first, validate patch paths stay in the
-  repo, dirty-tree guard, then apply.
-- `write-file` — write `content` starting with `file: <path>` as the full file;
-  creates the file and its directories when they do not exist.
-- `search-replace` — exact `old:` / `new:` replacements in existing files.
-  Unique match required; not-found and ambiguous matches are errors. Never
-  creates files, never commits.
-- `run-tests` — detect the test command (`cargo test`, `bundle exec rspec`,
-  `mix test`, `pytest`, or from config), run it, capture exit code + tail.
-- `gather-context` — the `codegraph` + `graphify` context bundle (as today).
+- `apply-patch`: checks that the diff's paths stay in the repo, then runs
+  `git apply --check` and applies. When the check fails, it repairs the
+  line counts in the hunk headers and checks again. When that fails too, it
+  tries `git apply --3way`. It does not check for uncommitted changes;
+  `nightshift queue` skips a job whose repo has them.
+- `write-file`: writes `content` that starts with `file: <path>` as the
+  whole file. Creates the file and its directories when they do not exist.
+- `search-replace`: exact `old:` / `new:` replacements in existing files.
+  Each `old` must match exactly once; no match, or more than one, is an
+  error and nothing is written. Never creates files.
+- `run-tests`: picks the test command (`[test] command` in the repo's
+  `nightshift.toml`, else `cargo test`, `bundle exec rspec`, `mix test` or
+  `pytest`), runs it with a 600 s limit, and gives the role the exit code
+  and up to 1 MiB of each output stream.
+- `gather-context`: the codegraph and graphify context bundle, plus the
+  role's `context_files`.
 
-## Providers & auth (beta)
+## Providers and auth
 
-- Ollama: local, default `http://127.0.0.1:11434`, `keep_alive: 0` unload after
-  each call (preserved from today).
-- Deepseek, Kimi/Moonshot: OpenAI-compatible backends via `llm-kernel`, API key
-  from the env var named by `api_key_env`.
-- The model string is passed through verbatim to `llm-kernel`; the operator's
-  config owns the exact tag/variant (e.g. `phi4`, `qwen2.5-coder`, `gemma3`,
-  `kimi3`, `deepseek-v4-pro`).
+- Ollama: local, default `http://127.0.0.1:11434` (`[providers.ollama]
+  base_url` moves it). After each call, nightshift sends `keep_alive: 0`,
+  which unloads the model.
+- Deepseek and Kimi/Moonshot: built-in OpenAI-compatible providers. The API
+  key comes from `DEEPSEEK_API_KEY` or `MOONSHOT_API_KEY`, or from the
+  variable that `api_key_env` names.
+- Any other OpenAI-compatible server: a `[providers.<name>]` block with
+  `backend = "openai-compatible"` and `base_url`. `api_key_env` may be left
+  out only when `base_url` is this machine (a local server such as
+  rapid-mlx). Plain `http://` is also allowed only for this machine.
+- The model string goes to the provider as written. The config owns the
+  exact tag (`qwen2.5-coder:7b`, `qwen3.6-35b-4bit`, `deepseek-v4-pro`).
 
-## State & action log
+## State and action log
 
-- `artifacts/latest/state.json` — resumable snapshot: current role, per-edge
-  loop counters, total steps, last verdict, status (`running|done|blocked|failed`),
-  `block_reason`.
-- `artifacts/latest/actions.jsonl` — append-only, one JSON object per action:
+Each run writes into `<out>/{date}_{slug}-run-{timestamp}/`:
+
+- `state.json`: the status snapshot: current role, loop counters per edge,
+  steps, last verdict, status (`running`, `done`, `blocked`, `failed`) and
+  `block_reason`. It is not used to resume a run.
+- `actions.jsonl`: append-only, one JSON object per event:
   `{ts, event, role, provider, model, verdict, artifact, block_reason, detail, call}`.
-  Events: `role_start`, `llm_call`, `tool_call`, `retry`, `role_end`, `loop`,
-  `halt`, `done`, `fail`. An `llm_call` event's `call` holds `duration_ms`
-  and, when the server reports them, `prompt_tokens` and `completion_tokens`.
-- Context injection: each role's prompt gets the goal, the prior artifacts (or
-  their summaries), and the last N action-log entries as run memory.
+  The events are `role_start`, `llm_call`, `retry`, `role_end`, `loop`,
+  `halt`, `done` and `fail`. An `llm_call` event's `call` holds
+  `duration_ms` and, when the server reports them, `prompt_tokens` and
+  `completion_tokens`. (`tool_call` exists in the schema but is not
+  written.)
+
+Each role's prompt is built from:
+
+- the system prompt: the role's `prompt` as written, then the output
+  contract (plus the search-replace format when the role has that tool);
+- the user prompt: the goal, the output of the role's tools, the findings or
+  questions from a loop-back, the answers given in `plan`, and the full
+  text of the earlier roles' artifacts.
 
 ## Interaction modes
 
-- `nightshift plan --goal "…" [--repo PATH]` — pre-flight: run the entry role,
-  print its clarifying questions, accept answers, repeat until no blocking
-  questions remain, write the brief. Fast, interactive, not overnight.
-- `nightshift run --goal "…" --repo PATH` — unattended: walk the graph, loop
-  within caps, hard-stop + report on a blocking issue, exit
-  `PASSED` / `FAILED` / `REQUIRES_HUMAN_REVIEW`. Review in the morning.
+- `nightshift plan --goal "…" --repo PATH`: runs only the entry role, with
+  its tools. While the role returns `questions`, it prints them and reads
+  your answers from stdin, for up to 5 rounds or until stdin ends. Then it
+  writes the brief.
+- `nightshift harness --goal "…" --repo PATH`: unattended. Walks the graph,
+  loops within the caps, and stops with a report. Exit code 0 is `PASSED`,
+  1 `FAILED`, 2 `REQUIRES_HUMAN_REVIEW`.
+- `nightshift queue --file goals.toml`: runs many harness jobs back to back
+  ([Goal queue](configuration.md#goal-queue-nightshift-queue)).
 
 ## Migration
 
-- Retire the `Role` enum (`models.rs`) and the hardcoded `run()` orchestration
-  (`pipeline.rs`), and the per-stage orchestration in
-  `pm/techlead/dev/qa/writer.rs`.
-- Keep reusable primitives as capabilities: test-command detection, git apply +
-  path validation, `codegraph`/`graphify` context probe, `map_kernel_error`,
-  Ollama unload.
-- `nightshift doctor` validates the *configured* providers/models/tools instead
-  of the fixed seven Ollama tags.
-- Ship example configs: `nightshift.toml.example` (the PO→Dev→QA example) plus a
-  non-engineering example (e.g. Researcher → Writer → Editor) to prove roles are
-  domain-neutral.
+Done:
+
+- The reusable parts of the old pipeline became adapters: test-command
+  detection (`adapters/test.rs`), `git apply` with path checks
+  (`adapters/git.rs`), the codegraph and graphify probe
+  (`adapters/context.rs`), `map_kernel_error` (`adapters/kernel_error.rs`)
+  and the Ollama unload (`adapters/ollama.rs`).
+- `nightshift doctor` checks the configured providers, models and tools
+  instead of seven fixed Ollama tags.
+- `nightshift.toml.example` ships the PO → Dev → QA graph and, commented
+  out, a Researcher → Writer → Editor graph that shows roles are not tied to
+  engineering.
+
+Not done yet: removing the `Role` enum (`models.rs`), the fixed pipeline
+(`pipeline.rs`, `pm.rs`, `techlead.rs`, `dev.rs`, `qa.rs`, `writer.rs`) and
+the `run` and `status` commands that use them.

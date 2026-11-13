@@ -1,35 +1,32 @@
-# src/adapters — the I/O layer
+# src/adapters: the I/O layer
 
-The adapters implement the ports (ADR-007): this is the only layer allowed to
-import `llm-kernel` / `reqwest` or shell out to external tools. Everything the
-application needs from the outside world enters through here, behind the port
-traits in `ports.rs`.
+The adapters implement the ports (ADR-007). In the role-graph layers, this
+is the only place that imports `llm-kernel` or `reqwest` or starts other
+programs. Everything the application needs from outside comes in through
+here, behind the port traits in `ports.rs`.
 
-| File              | Implements                | What it does |
-| :---------------- | :------------------------ | :----------- |
-| `mod.rs`          | `ModelClient`, `ModelClientFactory` | the LLM provider adapters (`OllamaAdapter`, `OpenAICompatibleAdapter`) and the `build_model_client` / `ProviderFactory` wiring — see [`providers/README.md`](providers/README.md) |
-| `capabilities.rs` | `ToolRunner`, `ContextProvider` | `CapabilityRunner` (`run-tests`, `apply-patch`, `write-file`, `search-replace`) and `GraphContextProvider` (codegraph / graphify context) |
-| `context.rs`      | —                        | codegraph / graphify context probe (`PathProbe`, `ContextProbe`, `gather`, `ContextBundle`) plus `extract_paths` and `path_allowed` |
-| `artifact_store.rs` | `ArtifactStore`          | `FsArtifactStore` — creates `{date}_{slug}` run directories under a root (default `./artifacts`) and reads/writes artifacts inside them |
-| `state.rs`        | `StateStore`              | `FsStateStore` — append-only `actions.jsonl` action log plus a `state.json` snapshot (written via temp-file + rename so a crash never truncates it) |
-| `clock.rs`        | `Clock`                   | `SystemClock` — UTC time via the Unix `date` command (this adapter is allowed to shell out) |
+| File | Implements | What it does |
+| :--- | :--- | :--- |
+| `mod.rs` | | declares the modules and re-exports the provider adapters and `build_model_client` / `ProviderFactory` |
+| `providers/` | `ModelClient`, `ModelClientFactory` | the model provider adapters (`OllamaAdapter`, `OpenAICompatibleAdapter`) and the factory; see [`providers/README.md`](providers/README.md) |
+| `ollama.rs` | | `OllamaClient` (completion, then the `keep_alive: 0` unload), Ollama URL checks and redaction, `DEFAULT_GENERATE_TIMEOUT` |
+| `kernel_error.rs` | | maps llm-kernel errors to `ProviderError` (`map_kernel_error`), rejects a reply cut off at the output limit (`complete_text`), and reads the token counts (`usage`) |
+| `capabilities.rs` | `ToolRunner`, `ContextProvider` | `CapabilityRunner` (`run-tests`, `apply-patch`, `write-file`, `search-replace`) and `GraphContextProvider` (codegraph and graphify context) |
+| `context.rs` | | the codegraph and graphify probe (`PathProbe`, `ContextProbe`, `gather`, `ContextBundle`), plus `extract_paths` and `path_allowed` |
+| `git.rs` | | `apply_checked` (path checks, `git apply --check`, hunk-header repair, then `git apply --3way` as a last resort), `working_tree_dirty`, `head_commit` |
+| `test.rs` | | test-command detection (`detect_test_command`) and `ProcessTestRunner`: runs the command in its own process group with a 600 s limit and keeps up to 1 MiB of each output stream |
+| `artifact_store.rs` | `ArtifactStore` | `FsArtifactStore`: creates run directories under a root (default `./artifacts`) and reads and writes artifacts in them |
+| `state.rs` | `StateStore` | `FsStateStore`: the append-only `actions.jsonl` and the `state.json` snapshot, written through a temp file and a rename so a crash never truncates it |
+| `clock.rs` | `Clock` | `SystemClock`: runs the Unix `date` command for UTC timestamps and the local date |
 
-Blocking process I/O (test runs, `git apply`, context gathering, `date`) runs
-on `tokio` blocking threads so the executor never holds a blocking primitive
-across `.await`.
+Blocking process I/O (test runs, `git apply`, context gathering, `date`)
+runs on `tokio` blocking threads, so the executor never holds a blocking
+call across `.await`.
 
-Who owns what:
+The adapters also own the safety checks at the edge: URL validation and
+redaction, the Ollama unload, the patch path checks before `git apply`, the
+secret-path rules for the edit tools, and the per-call completion timeout.
 
-- **The adapters own the outside world** — which provider speaks which
-  protocol, how a test command is detected and run, how a patch is validated
-  and applied, how artifacts and state land on disk, what the current time is.
-- **The adapters own safety details at the boundary** — URL validation and
-  redaction, the `keep_alive: 0` VRAM unload, `git apply --check` before
-  applying, and the per-call completion timeout.
-
-Rules that hold here:
-
-- Domain and application never import from this layer — dependencies point
-  *inward* (adapters depend on `ports` and `domain` types, never the reverse).
-- The CLI edge (`main.rs`) constructs the adapters and injects them; nothing
-  in the application layer mentions them by name.
+Dependencies point inward: adapters use `ports` and `domain` types, and the
+domain and application never import from this layer. `main.rs` builds the
+adapters and passes them in.
