@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `[providers.ollama] keep_loaded = true` leaves the model loaded after each
+  call. By default nightshift still asks Ollama to unload it after every
+  call (`keep_alive: 0`), so every role call loads the model again; with
+  `keep_loaded`, Ollama's own keep-alive decides when an idle model
+  unloads. Setting it on another provider is a config error.
+
 - Time and tokens per model call. Each call writes an `llm_call` event to
   `actions.jsonl` with its time and, when the server reports them (rapid-mlx,
   Ollama and other OpenAI-compatible servers usually do), its prompt and

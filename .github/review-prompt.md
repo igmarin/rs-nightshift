@@ -74,7 +74,7 @@ how you would have written it.
 - HTTP uses rustls. Model calls go through the `ModelClient` port, so tests need no
   live server.
 - Roles run one at a time. The Ollama adapter unloads the model after each call
-  (`keep_alive: 0`).
+  (`keep_alive: 0`) unless `[providers.ollama] keep_loaded = true`.
 - Unattended commands (`harness`, `queue`, `run`) must not require a TTY. Harness
   progress goes to the run directory (`actions.jsonl`, `state.json`); legacy `run`
   writes `run.log`.
@@ -111,7 +111,8 @@ workflow or script file inside a pipeline PR).
 ## Nightshift invariants (blocking if a change violates them)
 
 - **INV-1** One thing at a time: roles run in sequence, one model call at a time, and
-  queue jobs one after another. Ollama calls unload the model afterwards (`keep_alive: 0`).
+  queue jobs one after another. Ollama calls unload the model afterwards (`keep_alive: 0`)
+  unless `[providers.ollama] keep_loaded = true`.
 - **INV-2** Loops are bounded: each back-edge by its role's `max_loop` (default 3), the
   whole run by `run.max_steps` (default 30). A spent budget halts the run with
   `budget_exhausted`. Legacy `run`: at most 3 Dev ↔ QA iterations, then freeze and

@@ -107,8 +107,21 @@ address:
 base_url = "http://10.0.0.5:11434"
 ```
 
-Nightshift asks Ollama to unload the model after every call (`keep_alive:
-0`). `doctor` checks Ollama at `--ollama-url` (or `NIGHTSHIFT_OLLAMA_URL`,
+After every call, nightshift asks Ollama to unload the model (`keep_alive:
+0`), so the next call loads it again. When the models a config uses fit in
+memory together, turn that off:
+
+```toml
+[providers.ollama]
+keep_loaded = true
+```
+
+Ollama then keeps each model loaded for its own keep-alive time
+(`OLLAMA_KEEP_ALIVE`, 5 minutes by default) and unloads an idle model
+itself when it needs the memory for another one. `keep_loaded` on any other
+provider is a config error.
+
+`doctor` checks Ollama at `--ollama-url` (or `NIGHTSHIFT_OLLAMA_URL`,
 default `http://127.0.0.1:11434`), not at this `base_url`, so pass both when
 you move Ollama. For CPU-only machines, see [`ollama.md`](ollama.md).
 

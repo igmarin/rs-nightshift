@@ -16,9 +16,11 @@ profile = "mac"           # the [profiles.*] to use; --profile and NIGHTSHIFT_PR
 backend = "openai-compatible"
 base_url = "http://127.0.0.1:8000/v1"
 
-# Ollama is built in at http://127.0.0.1:11434. To use another address:
+# Ollama is built in at http://127.0.0.1:11434. To use another address, or to
+# keep models loaded between calls when they fit in memory together:
 # [providers.ollama]
 # base_url = "http://10.0.0.5:11434"
+# keep_loaded = true      # default false: unload the model after every call
 
 # One profile per machine. A role names a slot (model = "@coder") and the
 # selected profile maps the slot to a provider, a model and options.
