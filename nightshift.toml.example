@@ -1,122 +1,84 @@
-# rs-nightshift role-graph example — Product Owner → Developer → QA.
-# Copy to `nightshift.toml` and run:
-#   nightshift harness --goal "…" --config nightshift.toml
-# See docs/role-graph.md for the full schema and semantics.
+# A role graph for small code changes: the product owner writes a brief, the
+# developer edits the repo, QA reads the result of the repo's tests and sends
+# the developer back when they fail. Copy to nightshift.toml, then:
+#   nightshift doctor --config nightshift.toml
+#   nightshift harness --goal "..." --repo PATH --config nightshift.toml
+# Every key is described in docs/configuration.md.
 
 [run]
-start = "product-owner"
-# on_unclear = "halt"   # "halt" (default) | "proceed"
-# max_steps = 30        # global cap on total role executions
+start = "product-owner"   # the first role
+max_steps = 12            # most role turns in one run (default 30)
+profile = "mac"           # the [profiles.*] to use; --profile and NIGHTSHIFT_PROFILE override it
 
-# Ollama is built in (default http://127.0.0.1:11434); override to move it:
+# A local OpenAI-compatible server: rapid-mlx on a Mac, llama.cpp, LM Studio.
+# A server on this machine needs no api_key_env.
+[providers.mlx]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+
+# Ollama is built in at http://127.0.0.1:11434. To use another address:
 # [providers.ollama]
-# base_url = "http://127.0.0.1:11434"
+# base_url = "http://10.0.0.5:11434"
 
-# Local OpenAI-compatible server (rapid-mlx on Apple Silicon, llama.cpp,
-# LM Studio). No api_key_env: keyless. See docs/configuration.md.
-# [providers.mlx]
-# backend = "openai-compatible"
-# base_url = "http://127.0.0.1:8000/v1"
+# One profile per machine. A role names a slot (model = "@coder") and the
+# selected profile maps the slot to a provider, a model and options.
+[profiles.mac]
+planner = { provider = "mlx", model = "qwen3.6-35b-4bit", options = { max_tokens = 2048 } }
+coder   = { provider = "mlx", model = "qwen3.6-35b-4bit", options = { max_tokens = 8192 } }
 
-# Machine profiles: roles say `model = "@slot"` (no provider) and each
-# machine picks a profile with --profile, NIGHTSHIFT_PROFILE, or
-# [run] profile. See docs/configuration.md.
-# [profiles.mac]
-# coder = { provider = "mlx", model = "gemma-4-31b-4bit" }
-# [profiles.linux]
-# coder = { provider = "ollama", model = "qwen2.5-coder:7b", options = { think = false } }
-
-[providers.deepseek]
-backend = "openai-compatible"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
-
-[providers.kimi]
-backend = "openai-compatible"
-base_url = "https://api.moonshot.cn/v1"
-api_key_env = "MOONSHOT_API_KEY"
+[profiles.linux]
+planner = { provider = "ollama", model = "llama3.1:8b", options = { max_tokens = 2048 } }
+coder   = { provider = "ollama", model = "qwen2.5-coder:7b", options = { max_tokens = 4096 } }
 
 [[roles]]
 id = "product-owner"
-provider = "deepseek"
-model = "deepseek-v4-pro"        # use `deepseek-reasoner` for the high-thinking variant
-options = { temperature = 0.2 }
-# timeout_secs = 1200            # optional generate timeout; omit for 3600s default. 0 is rejected.
+model = "@planner"
 prompt = """
-You are the Product Owner. Turn the operator's goal into a crisp, testable
-brief. If anything is ambiguous or underspecified, raise blocking questions
-rather than guessing; otherwise write the brief.
-"""
+You are the Product Owner. Write a short brief for the goal: what must change, \
+in which files, and how to tell that it works. Do not ask questions. Set the \
+verdict to continue."""
 output = "01_brief.md"
-on = { continue = "developer", questions = "@halt" }
+on = { continue = "developer" }
 
 [[roles]]
 id = "developer"
-provider = "kimi"
-model = "kimi3"
-options = { think = true }
-# timeout_secs = 3600            # raise for large-file CPU inference; omit for the same default
+model = "@coder"
+timeout_secs = 1800       # limit for one model call of this role (default 3600)
 prompt = """
-You are the Developer. Implement the brief as a patch. If the brief raises
-non-blocking questions, proceed with reasonable assumptions and note them.
-"""
-output = "02_patch.patch"
-tools = ["gather-context", "apply-patch"]
-# For large-file edits, prefer search-replace over apply-patch / write-file:
-# tools = ["gather-context", "search-replace"]
-# content format:
-#   file: path/to/file
-#   old: unique snippet
-#   new: replacement
-# context_files = ["public/index.html"]   # raw file content for non-code files
-#   - requires "gather-context" in tools
-#   - max 10 files; each truncated at 8 KiB (UTF-8-safe)
-#   - secret-bearing paths (.env, *.pem, *.key, .git/*, .ssh/*, .aws/*, .kube/*) are rejected
+You are the Developer. Implement the brief with search-replace blocks. The files \
+you need are in the context below. Keep each old: block short and unique in its \
+file. If QA findings are present, fix them against the files as they are now. \
+Do not ask questions. Set the verdict to continue."""
+output = "02_change.txt"
+# gather-context adds the files in context_files to the prompt (at most 10
+# repo files, 64 KiB each). It also needs codegraph on PATH: it runs
+# `codegraph init` in the repo when there is no index yet.
+# search-replace edits existing files. Other edit tools: write-file (one whole
+# file, can create it) and apply-patch (a unified diff).
+tools = ["gather-context", "search-replace"]
+context_files = ["src/lib.rs"]
 on = { continue = "qa" }
 
 [[roles]]
 id = "qa"
-provider = "ollama"
-model = "phi4"
-options = { think = true }
+model = "@planner"
 prompt = """
-You are QA. Review the change and check for bugs and edge cases. If there are
-no issues, finish; otherwise report findings back to the Developer.
-"""
-output = "03_qa_report.json"
+You are QA. The tool output is the result of the repo's test command. If it \
+passed and the change matches the brief, set the verdict to done. Otherwise set \
+the verdict to issues and list each failure with its message in findings."""
+output = "03_qa.md"
+# run-tests runs the repo's test command before this role's model call: the
+# [test] command in the repo's own nightshift.toml, or else cargo test,
+# bundle exec rspec, mix test or pytest, by the files the repo has.
 tools = ["run-tests"]
-on = { issues = "developer" }
-max_loop = 3
-# retries = 2                    # extra attempts when a reply is rejected (default 2); 0 fails on the first slip
+on = { issues = "developer" }   # back to the developer with the findings,
+max_loop = 3                    # at most 3 times
+# retries = 2                   # extra attempts when a reply is rejected (default 2)
 
-# --- Domain-neutral roles prove the graph is generic (not engineering-only).
-# Swap the `[run]` start and `[[roles]]` blocks above for a
-# Researcher → Writer → Editor pipeline:
-#
-# [run]
-# start = "researcher"
-#
-# [[roles]]
-# id = "researcher"
-# provider = "deepseek"
-# model = "deepseek-v4-pro"
-# prompt = "You are a Researcher. Gather and summarize the facts on the topic."
-# output = "01_notes.md"
-# on = { continue = "writer" }
-#
-# [[roles]]
-# id = "writer"
-# provider = "kimi"
-# model = "kimi3"
-# prompt = "You are a Writer. Turn the notes into a clear draft."
-# output = "02_draft.md"
-# on = { continue = "editor" }
-#
-# [[roles]]
-# id = "editor"
-# provider = "ollama"
-# model = "phi4"
-# prompt = "You are an Editor. Tighten the draft; report issues or finish."
-# output = "03_final.md"
-# on = { issues = "writer" }
-# max_loop = 2
+# A hosted provider: put the key in the environment variable named here, and
+# use the provider in a profile:
+#   planner = { provider = "deepseek", model = "<a model id from the provider>" }
+# [providers.deepseek]
+# backend = "openai-compatible"
+# base_url = "https://api.deepseek.com"
+# api_key_env = "DEEPSEEK_API_KEY"
