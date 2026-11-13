@@ -50,7 +50,9 @@ fn machine_config_path_from(
     if let Some(path) = explicit {
         return Some(path);
     }
+    // XDG: a relative XDG_CONFIG_HOME is invalid; it would load a repo's own file.
     let candidate = config_home
+        .filter(|path| path.is_absolute())
         .or_else(|| home.map(|h| h.join(".config")))
         .map(|h| h.join("nightshift").join("machine.toml"));
     candidate.filter(|p| !matches!(p.try_exists(), Ok(false)))
@@ -569,6 +571,22 @@ model = "m"
         let config_home = tmp.path().join("config");
         let result = machine_config_path_from(None, Some(config_home), None);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn machine_config_path_from_ignores_a_relative_config_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let machine = home.join(".config").join("nightshift").join("machine.toml");
+        std::fs::create_dir_all(machine.parent().expect("parent")).expect("create dir");
+        std::fs::write(&machine, "").expect("write");
+        let result =
+            machine_config_path_from(None, Some(PathBuf::from("relative")), Some(home.clone()));
+        assert_eq!(result, Some(machine));
+        assert_eq!(
+            machine_config_path_from(None, Some(PathBuf::from("relative")), None),
+            None
+        );
     }
 
     #[test]

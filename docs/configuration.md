@@ -224,7 +224,8 @@ prompt = "..."
 
 A machine's own providers and profiles can live outside the repo, in
 `~/.config/nightshift/machine.toml` (`$XDG_CONFIG_HOME/nightshift/machine.toml`
-when `XDG_CONFIG_HOME` is set, or the path in `NIGHTSHIFT_MACHINE_CONFIG`):
+when `XDG_CONFIG_HOME` is set to an absolute path, or the path in
+`NIGHTSHIFT_MACHINE_CONFIG`):
 
 ```toml
 # ~/.config/nightshift/machine.toml on the Linux box
