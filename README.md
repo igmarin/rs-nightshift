@@ -181,6 +181,7 @@ address `harness` uses, or at `--ollama-url` (default
 - [docs/architecture.md](docs/architecture.md): how the code is organized
 - [docs/decisions.md](docs/decisions.md): why things are the way they are
 - [docs/development.md](docs/development.md): checks, CI and the PR workflow
+- [AGENTS.md](AGENTS.md): the same rules in short, for coding agents
 - [docs/release.md](docs/release.md): how to cut a release
 - [docs/legacy-run.md](docs/legacy-run.md): the older `nightshift run` pipeline
 
