@@ -66,9 +66,13 @@ fn repo_with_hello() -> TempDir {
 /// Run the binary off the async runtime so the mock server keeps answering.
 async fn nightshift(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
+        // An empty config dir per run keeps any machine.toml out of the tests.
+        let config_home = tempfile::tempdir().expect("config home");
         Command::new(env!("CARGO_BIN_EXE_nightshift"))
             .args(args)
             .env_remove("NIGHTSHIFT_PROFILE")
+            .env_remove("NIGHTSHIFT_MACHINE_CONFIG")
+            .env("XDG_CONFIG_HOME", config_home.path())
             .output()
             .expect("spawn nightshift")
     })

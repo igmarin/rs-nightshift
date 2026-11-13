@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- A machine file, `~/.config/nightshift/machine.toml` (or
+  `$XDG_CONFIG_HOME/nightshift/machine.toml`, or `NIGHTSHIFT_MACHINE_CONFIG`),
+  holds one machine's `[providers.*]` and `[profiles.*]` outside the repo.
+  It is merged over the repo's `nightshift.toml`; a provider or profile with
+  the same name replaces the repo's. `nightshift doctor` shows which file it
+  loaded (#122).
 - Each run keeps its report in the run directory as `run_report.md`, and
   `nightshift queue` prints each job's report to its log (stderr). Before,
   a queue run kept only `queue_report.md`, so the status, retries, time per

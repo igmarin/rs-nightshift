@@ -20,7 +20,7 @@ use rs_nightshift::doctor::{
     run_doctor, write_report, Check, DoctorReport, HttpModelCatalog, HttpProviderCatalog, PathHost,
 };
 use rs_nightshift::domain::rolegraph::config::{
-    load_role_graph_config_from, read_config, NightshiftConfig,
+    load_role_graph_config_from, read_config, read_machine_config, NightshiftConfig,
 };
 use rs_nightshift::domain::rolegraph::state::RunStatus;
 use rs_nightshift::domain::rolegraph::verdict::{BlockReason, Verdict};
@@ -37,6 +37,48 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
+/// The machine file to load. An explicit path is returned even when it does
+/// not exist, so a wrong `NIGHTSHIFT_MACHINE_CONFIG` fails instead of being
+/// ignored. The default path is skipped only when it does not exist: one that
+/// cannot be checked (an unreadable `~/.config`) or is not a file is returned,
+/// so reading it fails with the path named.
+fn machine_config_path_from(
+    explicit: Option<PathBuf>,
+    config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = explicit {
+        return Some(path);
+    }
+    // XDG: a relative XDG_CONFIG_HOME is invalid; it would load a repo's own file.
+    let candidate = config_home
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.map(|h| h.join(".config")))
+        .map(|h| h.join("nightshift").join("machine.toml"));
+    candidate.filter(|p| !matches!(p.try_exists(), Ok(false)))
+}
+
+/// [`machine_config_path_from`] with `NIGHTSHIFT_MACHINE_CONFIG`,
+/// `XDG_CONFIG_HOME` and `HOME`; an empty variable counts as unset.
+fn machine_config_path() -> Option<PathBuf> {
+    let var = |name| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    machine_config_path_from(
+        var("NIGHTSHIFT_MACHINE_CONFIG"),
+        var("XDG_CONFIG_HOME"),
+        var("HOME"),
+    )
+}
+
+/// Load the repo config with this machine's file merged in, resolved and
+/// validated.
+fn load_config(config: &Path, profile: Option<&str>) -> Result<NightshiftConfig, Error> {
+    load_role_graph_config_from(config, machine_config_path().as_deref(), profile)
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = real_main().await {
@@ -51,7 +93,7 @@ async fn real_main() -> anyhow::Result<()> {
     let profile = cli.profile;
     match cli.command {
         Command::Doctor { config } => {
-            let role_graph = match load_role_graph_config_from(&config, profile.as_deref()) {
+            let role_graph = match load_config(&config, profile.as_deref()) {
                 Ok(config) => config,
                 Err(error) => {
                     let report = DoctorReport {
@@ -103,6 +145,18 @@ async fn real_main() -> anyhow::Result<()> {
                     detail: describe_models(&role_graph),
                 },
             );
+            report.checks.insert(
+                2,
+                Check {
+                    name: "machine-config".into(),
+                    passed: true,
+                    required: false,
+                    detail: machine_config_path().map_or_else(
+                        || "none".to_owned(),
+                        |path| format!("loaded {}", path.display()),
+                    ),
+                },
+            );
             write_report(&report, io::stdout())?;
             process::exit(report.exit_code());
         }
@@ -121,14 +175,26 @@ async fn real_main() -> anyhow::Result<()> {
                 let default = std::path::PathBuf::from("nightshift.toml");
                 default.is_file().then_some(default)
             });
-            let cfg = config.as_deref().map(read_config).transpose()?;
+            let mut cfg = config.as_deref().map(read_config).transpose()?;
+            if let Some(path) = machine_config_path() {
+                let machine = read_machine_config(&path)?;
+                match cfg.as_mut() {
+                    Some(cfg) => cfg.merge_machine(machine),
+                    None => cfg = Some(machine.into()),
+                }
+            }
+            if let Some(cfg) = &cfg {
+                cfg.validate_providers()?;
+            }
             let (provider, model, options) = match model.strip_prefix('@') {
                 Some(slot_name) => {
                     if provider.is_some() {
                         anyhow::bail!("--provider cannot be combined with an @slot model");
                     }
                     let cfg = cfg.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("an @slot model needs a config; pass --config")
+                        anyhow::anyhow!(
+                            "an @slot model needs a config; pass --config or add a machine file"
+                        )
                     })?;
                     let slot = cfg.model_slot(profile.as_deref(), slot_name)?;
                     (
@@ -227,7 +293,7 @@ async fn real_main() -> anyhow::Result<()> {
             name,
             repo,
         } => {
-            let cfg = load_role_graph_config_from(&config, profile.as_deref())?;
+            let cfg = load_config(&config, profile.as_deref())?;
             writeln!(io::stderr(), "{}", describe_models(&cfg))?;
             let entry = cfg
                 .roles
@@ -317,7 +383,7 @@ fn prepare_run(
     out: &Path,
     name: Option<&str>,
 ) -> Result<(NightshiftConfig, PathBuf), Error> {
-    let cfg = load_role_graph_config_from(config, profile)?;
+    let cfg = load_config(config, profile)?;
     writeln!(io::stderr(), "{}", describe_models(&cfg))?;
     let clock = SystemClock;
     let slug = run_slug(&clock, name, goal, "run");
@@ -481,5 +547,69 @@ model = "m"
             doctor_ollama_url(&second, cli_url),
             "http://127.0.0.1:11434"
         );
+    }
+
+    #[test]
+    fn machine_config_path_from_explicit_wins() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let explicit = tmp.path().join("missing.toml");
+        let result = machine_config_path_from(Some(explicit.clone()), None, None);
+        assert_eq!(result, Some(explicit));
+    }
+
+    #[test]
+    fn machine_config_path_from_config_home_returns_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_home = tmp.path().join("config");
+        std::fs::create_dir_all(config_home.join("nightshift")).expect("create dir");
+        let machine = config_home.join("nightshift").join("machine.toml");
+        std::fs::write(&machine, "").expect("write");
+        let result = machine_config_path_from(None, Some(config_home), None);
+        assert_eq!(result, Some(machine));
+    }
+
+    #[test]
+    fn machine_config_path_from_config_home_no_file_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_home = tmp.path().join("config");
+        let result = machine_config_path_from(None, Some(config_home), None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn machine_config_path_from_ignores_a_relative_config_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let machine = home.join(".config").join("nightshift").join("machine.toml");
+        std::fs::create_dir_all(machine.parent().expect("parent")).expect("create dir");
+        std::fs::write(&machine, "").expect("write");
+        let result =
+            machine_config_path_from(None, Some(PathBuf::from("relative")), Some(home.clone()));
+        assert_eq!(result, Some(machine));
+        assert_eq!(
+            machine_config_path_from(None, Some(PathBuf::from("relative")), None),
+            None
+        );
+    }
+
+    #[test]
+    fn machine_config_path_from_returns_a_default_path_that_is_not_a_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let machine = tmp.path().join("nightshift").join("machine.toml");
+        std::fs::create_dir_all(&machine).expect("a directory where the file should be");
+        let result = machine_config_path_from(None, Some(tmp.path().to_path_buf()), None);
+        assert_eq!(result, Some(machine.clone()));
+        assert!(read_machine_config(&machine).is_err());
+    }
+
+    #[test]
+    fn machine_config_path_from_home_returns_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".config").join("nightshift")).expect("create dir");
+        let machine = home.join(".config").join("nightshift").join("machine.toml");
+        std::fs::write(&machine, "").expect("write");
+        let result = machine_config_path_from(None, None, Some(home));
+        assert_eq!(result, Some(machine));
     }
 }
