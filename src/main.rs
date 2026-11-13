@@ -51,21 +51,6 @@ async fn real_main() -> anyhow::Result<()> {
     let profile = cli.profile;
     match cli.command {
         Command::Doctor { config } => {
-            let validated_url = match validate_ollama_url(&ollama_url) {
-                Ok(url) => url,
-                Err(error) => {
-                    let report = DoctorReport {
-                        checks: vec![Check {
-                            name: "ollama-url".into(),
-                            passed: false,
-                            required: true,
-                            detail: error.to_string(),
-                        }],
-                    };
-                    write_report(&report, io::stdout())?;
-                    process::exit(report.exit_code());
-                }
-            };
             let role_graph = match load_role_graph_config_from(&config, profile.as_deref()) {
                 Ok(config) => config,
                 Err(error) => {
@@ -81,6 +66,22 @@ async fn real_main() -> anyhow::Result<()> {
                     process::exit(report.exit_code());
                 }
             };
+            let validated_url =
+                match validate_ollama_url(doctor_ollama_url(&role_graph, &ollama_url)) {
+                    Ok(url) => url,
+                    Err(error) => {
+                        let report = DoctorReport {
+                            checks: vec![Check {
+                                name: "ollama-url".into(),
+                                passed: false,
+                                required: true,
+                                detail: error.to_string(),
+                            }],
+                        };
+                        write_report(&report, io::stdout())?;
+                        process::exit(report.exit_code());
+                    }
+                };
             let catalog = HttpModelCatalog::new(validated_url.as_str())?;
             let providers = HttpProviderCatalog::new()?;
             let mut report = run_doctor(&role_graph, &catalog, &providers, &PathHost).await?;
@@ -424,4 +425,53 @@ fn run_slug(clock: &SystemClock, name: Option<&str>, goal: &str, kind: &str) -> 
     let base = name.map(str::to_string).unwrap_or_else(|| slugify(goal));
     let stamp = clock.now_iso().replace(':', "-");
     format!("{base}-{kind}-{stamp}")
+}
+
+/// The Ollama address doctor checks: the config's [providers.ollama] base_url when it sets one,
+/// because harness calls that address; otherwise --ollama-url.
+fn doctor_ollama_url<'a>(config: &'a NightshiftConfig, cli_url: &'a str) -> &'a str {
+    config
+        .providers
+        .get("ollama")
+        .and_then(|spec| spec.base_url.as_deref())
+        .unwrap_or(cli_url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_ollama_url_prefers_the_config_base_url() {
+        let first: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "m"
+[providers.ollama]
+base_url = "http://10.0.0.5:11434"
+"#,
+        )
+        .expect("config");
+        let second: NightshiftConfig = toml::from_str(
+            r#"
+[run]
+start = "dev"
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "m"
+"#,
+        )
+        .expect("config");
+        let cli_url = "http://127.0.0.1:11434";
+        assert_eq!(doctor_ollama_url(&first, cli_url), "http://10.0.0.5:11434");
+        assert_eq!(
+            doctor_ollama_url(&second, cli_url),
+            "http://127.0.0.1:11434"
+        );
+    }
 }

@@ -121,9 +121,10 @@ Ollama then keeps each model loaded for its own keep-alive time
 itself when it needs the memory for another one. `keep_loaded` on any other
 provider is a config error.
 
-`doctor` checks Ollama at `--ollama-url` (or `NIGHTSHIFT_OLLAMA_URL`,
-default `http://127.0.0.1:11434`), not at this `base_url`, so pass both when
-you move Ollama. For CPU-only machines, see [`ollama.md`](ollama.md).
+`doctor` checks Ollama at this `base_url`, the address the roles use. Only
+when the config sets none does it use `--ollama-url` (or
+`NIGHTSHIFT_OLLAMA_URL`, default `http://127.0.0.1:11434`). For CPU-only
+machines, see [`ollama.md`](ollama.md).
 
 ### Local OpenAI-compatible servers (rapid-mlx, llama.cpp, LM Studio)
 

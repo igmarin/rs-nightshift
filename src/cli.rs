@@ -7,7 +7,8 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "nightshift", version, about)]
 pub struct Cli {
-    /// Ollama HTTP origin used by `doctor` and `run`.
+    /// Ollama HTTP origin used by `run`, and by `doctor` when the config has
+    /// no `[providers.ollama] base_url`.
     #[arg(
         long,
         env = "NIGHTSHIFT_OLLAMA_URL",

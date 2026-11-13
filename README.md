@@ -151,8 +151,9 @@ To keep a queue running with no terminal open:
 (default `./artifacts`). Every command takes `--profile NAME` (or
 `NIGHTSHIFT_PROFILE`) to pick the machine profile.
 
-`doctor` checks Ollama at `--ollama-url` (default `http://127.0.0.1:11434`),
-not at `[providers.ollama] base_url`. If you moved Ollama, pass both.
+`doctor` checks Ollama at the config's `[providers.ollama] base_url`, the
+address `harness` uses, or at `--ollama-url` (default
+`http://127.0.0.1:11434`) when the config sets none.
 
 ## What nightshift does and does not do
 

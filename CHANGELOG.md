@@ -113,6 +113,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- `nightshift doctor` checks Ollama at the config's `[providers.ollama]
+  base_url`, the address `harness` calls. Before, it always checked
+  `--ollama-url`, so with Ollama on another address doctor could pass while
+  the run failed, or the other way round. `--ollama-url` still applies when
+  the config sets no `base_url`.
 - `apply-patch` refuses secret-bearing paths (`.env`, keys, `.git/`, …), as
   `write-file` and `search-replace` already did. It takes the paths from git
   (`git apply --numstat`), so deleted, binary, renamed and copied files and
