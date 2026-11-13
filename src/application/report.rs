@@ -1,6 +1,8 @@
 //! Terminal report: render a run's outcome as a human-readable summary.
 
-use crate::domain::rolegraph::state::{ActionEvent, EventKind, RunStatus, StatusSnapshot};
+use crate::domain::rolegraph::state::{
+    ActionEvent, EventKind, ModelCall, RunStatus, StatusSnapshot,
+};
 use crate::domain::rolegraph::verdict::BlockReason;
 use std::collections::HashMap;
 
@@ -142,6 +144,70 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
             if let Some(&seconds) = role_times.get(role) {
                 lines.push(format!("  {}: {}s", role, seconds));
             }
+        }
+    }
+
+    // One line per role and model from the llm_call events, in first-seen order.
+    let mut calls: Vec<(&str, &str, Vec<&ModelCall>)> = Vec::new();
+    for event in events.iter().filter(|e| e.event == EventKind::LlmCall) {
+        let Some(call) = &event.call else { continue };
+        match calls
+            .iter_mut()
+            .find(|(role, model, _)| *role == event.role && *model == event.model)
+        {
+            Some(entry) => entry.2.push(call),
+            None => calls.push((&event.role, &event.model, vec![call])),
+        }
+    }
+    if !calls.is_empty() {
+        lines.push("Model calls".to_string());
+        for (role, model, role_calls) in &calls {
+            let count = role_calls.len();
+            let word = if count == 1 { "call" } else { "calls" };
+            let ms: u64 = role_calls.iter().map(|c| c.duration_ms).sum();
+            let mut line = format!(
+                "  {role}: {model}, {count} {word}, {:.1}s",
+                ms as f64 / 1000.0
+            );
+            if role_calls
+                .iter()
+                .all(|c| c.prompt_tokens.is_none() && c.completion_tokens.is_none())
+            {
+                line.push_str(", tokens not reported");
+            } else {
+                let prompt: u64 = role_calls
+                    .iter()
+                    .filter_map(|c| c.prompt_tokens)
+                    .map(u64::from)
+                    .sum();
+                let completion: u64 = role_calls
+                    .iter()
+                    .filter_map(|c| c.completion_tokens)
+                    .map(u64::from)
+                    .sum();
+                let completion_ms: u64 = role_calls
+                    .iter()
+                    .filter(|c| c.completion_tokens.is_some())
+                    .map(|c| c.duration_ms)
+                    .sum();
+                let rate = if completion_ms == 0 {
+                    "-".to_string()
+                } else {
+                    format!("{:.1}", completion as f64 * 1000.0 / completion_ms as f64)
+                };
+                line.push_str(&format!(
+                    ", {prompt} prompt tokens, {completion} completion tokens, {rate} tokens/s"
+                ));
+                // A failed call, or a server that sometimes omits usage, makes the totals partial.
+                let reported = role_calls
+                    .iter()
+                    .filter(|c| c.prompt_tokens.is_some() && c.completion_tokens.is_some())
+                    .count();
+                if reported < count {
+                    line.push_str(&format!(" (tokens from {reported} of {count} calls)"));
+                }
+            }
+            lines.push(line);
         }
     }
 
@@ -505,5 +571,154 @@ mod tests {
         }];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
         assert!(!report.contains("Retries:"), "{report}");
+    }
+
+    #[test]
+    fn model_calls_section_with_events() {
+        let events = vec![
+            ActionEvent {
+                ts: "2024-01-15T10:00:00Z".into(),
+                event: EventKind::LlmCall,
+                role: "dev".into(),
+                provider: String::new(),
+                model: "m".into(),
+                verdict: None,
+                artifact: None,
+                block_reason: BlockReason::None,
+                detail: None,
+                call: Some(ModelCall {
+                    duration_ms: 1000,
+                    prompt_tokens: Some(900),
+                    completion_tokens: Some(100),
+                }),
+            },
+            ActionEvent {
+                ts: "2024-01-15T10:01:00Z".into(),
+                event: EventKind::LlmCall,
+                role: "dev".into(),
+                provider: String::new(),
+                model: "m".into(),
+                verdict: None,
+                artifact: None,
+                block_reason: BlockReason::None,
+                detail: None,
+                call: Some(ModelCall {
+                    duration_ms: 1500,
+                    prompt_tokens: Some(1000),
+                    completion_tokens: Some(150),
+                }),
+            },
+            ActionEvent {
+                ts: "2024-01-15T10:02:00Z".into(),
+                event: EventKind::LlmCall,
+                role: "qa".into(),
+                provider: String::new(),
+                model: "m".into(),
+                verdict: None,
+                artifact: None,
+                block_reason: BlockReason::None,
+                detail: None,
+                call: Some(ModelCall {
+                    duration_ms: 700,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                }),
+            },
+        ];
+        let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
+        assert!(report.contains("Model calls"), "{report}");
+        assert!(report.contains("  dev: m, 2 calls, 2.5s, 1900 prompt tokens, 250 completion tokens, 100.0 tokens/s"), "{report}");
+        assert!(
+            report.contains("  qa: m, 1 call, 0.7s, tokens not reported"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn model_calls_rate_is_a_dash_when_the_time_is_zero() {
+        let mut event = event(EventKind::LlmCall, "dev", "2024-01-15T10:00:00Z");
+        event.model = "m".into();
+        event.call = Some(ModelCall {
+            duration_ms: 0,
+            prompt_tokens: Some(5),
+            completion_tokens: Some(1),
+        });
+        let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &[event]);
+        assert!(
+            report.contains(
+                "  dev: m, 1 call, 0.0s, 5 prompt tokens, 1 completion tokens, - tokens/s"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn model_calls_say_when_only_some_calls_reported_tokens() {
+        let mut reported = event(EventKind::LlmCall, "dev", "2024-01-15T10:00:00Z");
+        reported.model = "m".into();
+        reported.call = Some(ModelCall {
+            duration_ms: 1000,
+            prompt_tokens: Some(900),
+            completion_tokens: Some(100),
+        });
+        let mut failed = event(EventKind::LlmCall, "dev", "2024-01-15T10:01:00Z");
+        failed.model = "m".into();
+        failed.call = Some(ModelCall {
+            duration_ms: 500,
+            prompt_tokens: None,
+            completion_tokens: None,
+        });
+        // Only one of the two counts: the totals are partial too.
+        let mut half = event(EventKind::LlmCall, "dev", "2024-01-15T10:02:00Z");
+        half.model = "m".into();
+        half.call = Some(ModelCall {
+            duration_ms: 0,
+            prompt_tokens: Some(50),
+            completion_tokens: None,
+        });
+        let mut other_model = event(EventKind::LlmCall, "dev", "2024-01-15T10:03:00Z");
+        other_model.model = "m2".into();
+        other_model.call = Some(ModelCall {
+            duration_ms: 2000,
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+        });
+        let report = render_report(
+            &snapshot(RunStatus::Done, BlockReason::None),
+            &[reported, failed, half, other_model],
+        );
+        assert!(
+            report.contains(
+                "  dev: m, 3 calls, 1.5s, 950 prompt tokens, 100 completion tokens, \
+                 100.0 tokens/s (tokens from 1 of 3 calls)"
+            ),
+            "{report}"
+        );
+        // Another model in the same role gets its own line.
+        assert!(
+            report.lines().any(|line| {
+                line
+                == "  dev: m2, 1 call, 2.0s, 10 prompt tokens, 20 completion tokens, 10.0 tokens/s"
+            }),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn model_calls_section_absent_when_no_llm_calls() {
+        let events = vec![ActionEvent {
+            ts: "t".into(),
+            event: EventKind::RoleEnd,
+            role: "dev".into(),
+            provider: String::new(),
+            model: String::new(),
+            verdict: Some(Verdict::Done),
+            artifact: None,
+            block_reason: BlockReason::None,
+            detail: None,
+            call: None,
+        }];
+        let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
+        assert!(!report.contains("Model calls"), "{report}");
     }
 }
