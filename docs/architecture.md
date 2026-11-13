@@ -150,8 +150,10 @@ the tools a role declares with `tools = [...]`
   process group, and the time limit stops the whole group. It runs before
   the model call, so the role sees real results. The command never comes
   from model output.
-- `apply-patch`: checks that the diff's paths stay in the repo (no `..`, no
-  absolute paths), runs `git apply --check`, then applies. When the check
+- `apply-patch`: checks every path the diff names, deletes and renames
+  included: it must stay in the repo (no `..`, no absolute paths) and must
+  not be a secret-bearing path. Then it runs `git apply --check` and
+  applies. When the check
   fails, it repairs the line counts in the hunk headers and checks again;
   when that fails too, it tries `git apply --3way`. Runs after a `continue`
   or `done` verdict. Never commits.

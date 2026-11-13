@@ -196,8 +196,9 @@ A role can declare these tools. Models return text and a verdict; the
 harness does the risky work. It never commits, pushes, resets or cleans,
 and never uses model output as a command or its arguments.
 
-- `apply-patch`: checks that the diff's paths stay in the repo, then runs
-  `git apply --check` and applies. When the check fails, it repairs the
+- `apply-patch`: checks that every path the diff names stays in the repo
+  and is not a secret-bearing path, then runs `git apply --check` and
+  applies. When the check fails, it repairs the
   line counts in the hunk headers and checks again. When that fails too, it
   tries `git apply --3way`. It does not check for uncommitted changes;
   `nightshift queue` skips a job whose repo has them.

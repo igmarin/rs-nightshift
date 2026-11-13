@@ -280,8 +280,11 @@ load.
 
 ### apply-patch
 
-Paths in the diff must stay in the repo (no `..`, no absolute paths). The
-diff is checked with `git apply --check`. When that fails, nightshift fixes
+Every path the diff names (the `---` and `+++` lines, and `rename` and
+`copy` lines) must stay in the repo (no `..`, no absolute paths) and must
+not be a secret-bearing path (the [`context_files`](#context_files) list).
+A patch that breaks this is rejected before anything is applied. The diff is
+checked with `git apply --check`. When that fails, nightshift fixes
 the line counts in the hunk headers and checks again. When that also fails,
 it tries `git apply --3way`, which stages the result in the index and may
 leave conflict markers in a file; check `git status` after such a run.

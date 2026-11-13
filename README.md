@@ -159,8 +159,8 @@ not at `[providers.ollama] base_url`. If you moved Ollama, pass both.
 - It never commits, pushes, resets or cleans.
 - Models only write text. Nightshift makes every change itself, through the
   tools a role declares (`search-replace`, `write-file`, `apply-patch`), and
-  only inside the repo. `search-replace` and `write-file` also refuse paths
-  such as `.git/`, `.env` and key files.
+  only inside the repo. They refuse paths such as `.git/`, `.env` and key
+  files.
 - The test command comes from the repo (`cargo test`, `bundle exec rspec`,
   `mix test`, `pytest`, or a `[test]` command in the repo's
   `nightshift.toml`), never from a model.

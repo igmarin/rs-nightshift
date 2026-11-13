@@ -10,25 +10,33 @@ use std::process::Command;
 /// Artifact file name written by the Dev stage.
 pub const PATCH_FILE: &str = "03_diff.patch";
 
-/// Paths named by a unified diff (`+++ b/foo`).
+/// Every path a unified diff touches: the `+++ b/…` and `--- a/…` file lines
+/// (not `/dev/null`) and the `rename`/`copy` `from`/`to` lines, so a delete,
+/// rename or copy is checked too. A path may appear twice.
 #[must_use]
 pub fn patch_paths(patch: &str) -> Vec<PathBuf> {
+    const NAME_PREFIXES: [&str; 4] = ["rename from ", "rename to ", "copy from ", "copy to "];
     let mut paths = Vec::new();
     for line in patch.lines() {
-        let Some(rest) = line.strip_prefix("+++ ") else {
+        let path = if let Some(rest) = line.strip_prefix("+++ ") {
+            let rest = rest.trim();
+            rest.strip_prefix("b/").unwrap_or(rest)
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            let rest = rest.trim();
+            rest.strip_prefix("a/").unwrap_or(rest)
+        } else if let Some(rest) = NAME_PREFIXES.iter().find_map(|p| line.strip_prefix(p)) {
+            rest.trim()
+        } else {
             continue;
         };
-        let rest = rest.trim();
-        if rest == "/dev/null" {
-            continue;
+        if path != "/dev/null" {
+            paths.push(PathBuf::from(path));
         }
-        let path = rest.strip_prefix("b/").unwrap_or(rest);
-        paths.push(PathBuf::from(path));
     }
     paths
 }
 
-/// Reject `..`, absolute paths, and empty paths (INV-4).
+/// Reject `..`, absolute paths, empty paths, and secret-bearing paths (INV-4).
 pub fn validate_patch_paths(paths: &[PathBuf]) -> Result<(), Error> {
     for path in paths {
         let raw = path.to_string_lossy();
@@ -41,6 +49,13 @@ pub fn validate_patch_paths(paths: &[PathBuf]) -> Result<(), Error> {
             return Err(ArtifactError::invalid(
                 PATCH_FILE,
                 format!("patch path escapes the repo: {raw}"),
+            )
+            .into());
+        }
+        if crate::domain::rolegraph::config::is_secret_path(&raw) {
+            return Err(ArtifactError::invalid(
+                PATCH_FILE,
+                format!("patch path is secret-bearing: {raw}"),
             )
             .into());
         }
@@ -89,6 +104,7 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
 /// tried as a last resort — it uses the index for 3-way merge, which
 /// tolerates context-line mismatches that trip up the strict check.
 pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
+    validate_patch_paths(&patch_paths(patch))?;
     match apply_check(repo, patch) {
         Ok(()) => {}
         Err(original) => {
@@ -409,6 +425,50 @@ diff --git a/file.txt b/file.txt
         assert!(
             repaired.contains("\\ No newline at end of file"),
             "marker should be preserved: {repaired}"
+        );
+    }
+
+    #[test]
+    fn validate_patch_paths_rejects_secret_paths() {
+        for secret in [".env", "config/id_rsa", "certs/server.pem"] {
+            let err = validate_patch_paths(&[PathBuf::from(secret)]).expect_err(secret);
+            assert!(err.to_string().contains("secret-bearing"), "{err}");
+        }
+        validate_patch_paths(&[PathBuf::from("src/main.rs")]).expect("a normal path passes");
+    }
+
+    #[test]
+    fn patch_paths_collects_from_delete() {
+        let patch = "--- a/.env\n+++ /dev/null\n";
+        let paths = patch_paths(patch);
+        assert!(paths.contains(&PathBuf::from(".env")));
+    }
+
+    #[test]
+    fn patch_paths_collects_renames() {
+        let patch = "rename from notes.txt\nrename to .env\n";
+        let paths = patch_paths(patch);
+        assert!(paths.contains(&PathBuf::from(".env")));
+        assert!(paths.contains(&PathBuf::from("notes.txt")));
+    }
+
+    #[test]
+    fn apply_checked_rejects_secret() {
+        // The path check runs before git, so no repo is needed: without it,
+        // the `--3way` fallback used to apply a patch whose check had failed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let patch = "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+TOKEN=x\n";
+        let err = apply_checked(dir.path(), patch).expect_err("secret path");
+        assert!(err.to_string().contains("secret-bearing"), "{err}");
+        assert!(!dir.path().join(".env").exists());
+    }
+
+    #[test]
+    fn patch_paths_skips_dev_null_and_strips_prefixes() {
+        let patch = "--- a/src/old.rs\n+++ b/src/new.rs\n--- /dev/null\n+++ /dev/null\n";
+        assert_eq!(
+            patch_paths(patch),
+            [PathBuf::from("src/old.rs"), PathBuf::from("src/new.rs")]
         );
     }
 }

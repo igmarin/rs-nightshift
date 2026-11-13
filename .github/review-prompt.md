@@ -118,9 +118,10 @@ workflow or script file inside a pipeline PR).
   skip Writer.
 - **INV-3** Never `git commit`, `git push`, `git reset --hard`, or `git clean`.
 - **INV-4** Writes stay inside the target repo or the artifacts directory. Every edit
-  tool rejects `..` and absolute paths. `write-file` and `search-replace` also reject
-  secret-bearing paths (`.env`, keys, `.git/`, …) and symlinks that lead outside the
-  repo or into those paths.
+  tool rejects `..`, absolute paths and secret-bearing paths (`.env`, keys, `.git/`, …).
+  `apply-patch` checks every path the diff names (`+++`, `---`, rename and copy lines)
+  before any `git apply`, including its `--3way` fallback. `write-file` and
+  `search-replace` also reject symlinks that lead outside the repo or into those paths.
 - **INV-5** Prompts receive AST slices and listed files (`context_files`), not a
   recursive tree dump.
 - **INV-6** A run creates its own run directory before the first model call and never
