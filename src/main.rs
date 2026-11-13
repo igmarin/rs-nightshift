@@ -172,8 +172,12 @@ async fn real_main() -> anyhow::Result<()> {
                 default.is_file().then_some(default)
             });
             let mut cfg = config.as_deref().map(read_config).transpose()?;
-            if let (Some(cfg), Some(machine)) = (cfg.as_mut(), machine_config_path()) {
-                cfg.merge_machine(read_machine_config(&machine)?);
+            if let Some(path) = machine_config_path() {
+                let machine = read_machine_config(&path)?;
+                match cfg.as_mut() {
+                    Some(cfg) => cfg.merge_machine(machine),
+                    None => cfg = Some(machine.into()),
+                }
             }
             let (provider, model, options) = match model.strip_prefix('@') {
                 Some(slot_name) => {
@@ -181,7 +185,9 @@ async fn real_main() -> anyhow::Result<()> {
                         anyhow::bail!("--provider cannot be combined with an @slot model");
                     }
                     let cfg = cfg.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("an @slot model needs a config; pass --config")
+                        anyhow::anyhow!(
+                            "an @slot model needs a config; pass --config or add a machine file"
+                        )
                     })?;
                     let slot = cfg.model_slot(profile.as_deref(), slot_name)?;
                     (

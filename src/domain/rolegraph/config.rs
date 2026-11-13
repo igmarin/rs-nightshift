@@ -165,6 +165,24 @@ pub struct MachineConfig {
     pub profiles: BTreeMap<String, BTreeMap<String, ModelSlot>>,
 }
 
+impl From<MachineConfig> for NightshiftConfig {
+    /// A config with no roles, only the machine file's providers and
+    /// profiles: what `nightshift bench` needs when there is no repo config.
+    fn from(machine: MachineConfig) -> Self {
+        Self {
+            run: RunOptions {
+                start: String::new(),
+                on_unclear: OnUnclear::default(),
+                max_steps: default_max_steps(),
+                profile: None,
+            },
+            providers: machine.providers,
+            profiles: machine.profiles,
+            roles: Vec::new(),
+        }
+    }
+}
+
 fn default_max_steps() -> u32 {
     DEFAULT_MAX_STEPS
 }
@@ -1344,6 +1362,26 @@ coder = { provider = "mlx", model = "qwen3.6-35b-4bit" }
         let config = load_role_graph_config_from(&repo_path, Some(&machine_path), Some("mac"))
             .expect("load");
         assert_eq!(config.roles[1].model, "qwen3.6-35b-4bit");
+    }
+
+    #[test]
+    fn a_machine_file_alone_serves_slots_and_providers() {
+        let machine: MachineConfig = toml::from_str(
+            r#"
+[providers.mlx]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+
+[profiles.mac]
+coder = { provider = "mlx", model = "qwen3.6-35b-4bit" }
+"#,
+        )
+        .expect("machine file");
+        let config = NightshiftConfig::from(machine);
+        assert!(config.providers.contains_key("mlx"));
+        let slot = config.model_slot(Some("mac"), "coder").expect("slot");
+        assert_eq!(slot.model, "qwen3.6-35b-4bit");
+        assert!(config.model_slot(None, "coder").is_err());
     }
 
     #[test]
