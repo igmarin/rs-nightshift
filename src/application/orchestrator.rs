@@ -522,12 +522,15 @@ where
         let started = std::time::Instant::now();
         let reply = self.inner.generate_with_usage(request).await;
         let usage = reply.as_ref().ok().and_then(|(_, usage)| *usage);
-        (self.log)(ModelCall {
+        let logged = (self.log)(ModelCall {
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             prompt_tokens: usage.map(|u| u.prompt_tokens),
             completion_tokens: usage.map(|u| u.completion_tokens),
-        })?;
-        reply
+        });
+        // The model's error comes first; a failed log write fails a call that succeeded.
+        let reply = reply?;
+        logged?;
+        Ok(reply)
     }
 
     fn redacted_origin(&self) -> Option<String> {
