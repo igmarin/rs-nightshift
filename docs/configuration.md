@@ -512,5 +512,9 @@ Three files under `--out` track the queue:
 - `queue_report.md`: the same as a table, rewritten after every job.
 - `queue.lock`: the lock described above. It is safe to leave in place.
 
-The command prints the report at the end and exits 0 only when every job is
-`done`; otherwise it exits 1.
+After each job, the queue prints that job's run report (status, steps,
+retries, time per role, model calls) to stderr, next to its progress lines;
+the same report is in the job's run directory as `run_report.md`.
+
+The command prints the queue report at the end and exits 0 only when every
+job is `done`; otherwise it exits 1.

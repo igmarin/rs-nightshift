@@ -109,6 +109,7 @@ changes `artifacts`, `--name` changes the slug):
 
 | File | What it holds |
 | :--- | :--- |
+| `run_report.md` | the report `harness` prints at the end: status, steps, retries, time per role, model calls with tokens |
 | `01_brief.md`, `02_change.txt`, … | each role's `output` file from the config |
 | `actions.jsonl` | one line per event: role start and end, each model call with its time and tokens, retries, loops, the end of the run |
 | `state.json` | the last status: current role, steps, loop counts, block reason |
@@ -126,7 +127,9 @@ A failed job does not stop the queue, and running the same command again
 skips the jobs already done. Nightshift never commits, so give each job that
 edits code its own clean checkout: a job whose repo has uncommitted changes
 is skipped as `blocked: dirty_tree`. Progress is in `queue_report.md` under
-`--out`. See [Goal queue](docs/configuration.md#goal-queue-nightshift-queue).
+`--out`, and each job's run report is in its run directory
+(`run_report.md`) and in the queue's log (stderr). See
+[Goal queue](docs/configuration.md#goal-queue-nightshift-queue).
 
 To keep a queue running with no terminal open:
 

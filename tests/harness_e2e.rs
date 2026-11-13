@@ -227,6 +227,10 @@ async fn harness_runs_three_roles_retries_a_bad_reply_and_edits_the_repo() {
             .expect("state JSON");
     assert_eq!(state["status"], "done");
     assert_eq!(state["steps"], 3);
+    // The printed report is also kept in the run directory.
+    let report = fs::read_to_string(run.join("run_report.md")).expect("run report");
+    assert!(report.contains("Status: PASSED"), "{report}");
+    assert!(report.contains("Model calls"), "{report}");
 
     // The retry sent the rejection back to the model, on the slot's model.
     let requests = server.received_requests().await.expect("requests");
@@ -411,6 +415,12 @@ async fn queue_keeps_going_blocks_dirty_repos_and_skips_done_jobs_on_restart() {
 
     let first = nightshift(args()).await;
     assert_eq!(first.status.code(), Some(1), "{}", text(&first.stderr));
+    // Each finished job's run report goes to the queue's log.
+    assert!(
+        text(&first.stderr).contains("Status: PASSED"),
+        "{}",
+        text(&first.stderr)
+    );
     let statuses = queue_statuses(&out);
     let labels: Vec<&str> = statuses.iter().map(|(status, _)| status.as_str()).collect();
     assert_eq!(labels, ["done", "failed", "blocked", "done"]);

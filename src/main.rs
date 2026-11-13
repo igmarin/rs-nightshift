@@ -351,8 +351,14 @@ async fn execute_run(
     .await?;
     let snapshot = state.read_snapshot(run_dir)?;
     let events = state.read_actions(run_dir)?;
-    Ok((result, render_report(&snapshot, &events)))
+    let report = render_report(&snapshot, &events);
+    // Kept with the run: a queue run prints it only to its log.
+    std::fs::write(run_dir.join(RUN_REPORT_FILE), format!("{report}\n"))?;
+    Ok((result, report))
 }
+
+/// The run report's file name in each run directory.
+const RUN_REPORT_FILE: &str = "run_report.md";
 
 /// Runs each queue job through the harness, exactly like `nightshift harness`.
 struct HarnessHost {
@@ -384,7 +390,9 @@ impl JobHost for HarnessHost {
                 Err(error) => return failed(error, None),
             };
         match execute_run(&cfg, &run_dir, &job.repo, &job.goal, &self.out).await {
-            Ok((result, _report)) => {
+            Ok((result, report)) => {
+                // Next to the queue's own progress lines, which go to stderr.
+                eprintln!("{report}");
                 let status = match result.status {
                     RunStatus::Done => JobStatus::Done,
                     RunStatus::Blocked => JobStatus::Blocked,
