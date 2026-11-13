@@ -220,6 +220,34 @@ prompt = "..."
   the same line before the run starts. `nightshift bench --model @coder`
   benchmarks whatever the selected profile maps `coder` to.
 
+### Machine file
+
+A machine's own providers and profiles can live outside the repo, in
+`~/.config/nightshift/machine.toml` (`$XDG_CONFIG_HOME/nightshift/machine.toml`
+when `XDG_CONFIG_HOME` is set, or the path in `NIGHTSHIFT_MACHINE_CONFIG`):
+
+```toml
+# ~/.config/nightshift/machine.toml on the Linux box
+[providers.ollama]
+base_url = "http://127.0.0.1:11434"
+keep_loaded = true
+
+[profiles.linux]
+planner = { provider = "ollama", model = "llama3.1:8b" }
+coder   = { provider = "ollama", model = "qwen2.5-coder:7b" }
+```
+
+- It may hold only `[providers.*]` and `[profiles.*]`; any other table is
+  a config error.
+- It is merged over the repo config before the profile is resolved. A
+  provider or profile with the same name replaces the repo's one whole, so a
+  machine `[profiles.linux]` must define every slot the roles use.
+- A missing default file is ignored. A missing `NIGHTSHIFT_MACHINE_CONFIG`
+  file is an error.
+- `harness`, `plan`, `queue`, `doctor` and `bench` all read it.
+  `nightshift doctor` shows which file it loaded (`[ok] machine-config -
+  loaded …`, or `none`).
+
 ## Per-role generate timeout
 
 `timeout_secs` limits one model call of the role. Omitted, it is 3600 seconds

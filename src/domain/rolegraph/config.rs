@@ -152,6 +152,19 @@ pub struct NightshiftConfig {
     pub roles: Vec<RoleSpec>,
 }
 
+/// The machine-local config file (`~/.config/nightshift/machine.toml`): the
+/// providers and profiles of one machine, kept out of the repo's config.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineConfig {
+    /// `[providers.*]`, merged over the repo config's providers.
+    #[serde(default)]
+    pub providers: BTreeMap<String, ProviderSpec>,
+    /// `[profiles.*]`, merged over the repo config's profiles.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, BTreeMap<String, ModelSlot>>,
+}
+
 fn default_max_steps() -> u32 {
     DEFAULT_MAX_STEPS
 }
@@ -165,6 +178,14 @@ fn default_max_loop() -> u32 {
 }
 
 impl NightshiftConfig {
+    /// Add the machine file's providers and profiles. A provider or profile
+    /// with the same name replaces the repo's one whole: a machine
+    /// `[profiles.mac]` must define every slot the roles use.
+    pub fn merge_machine(&mut self, machine: MachineConfig) {
+        self.providers.extend(machine.providers);
+        self.profiles.extend(machine.profiles);
+    }
+
     /// Replace every `@slot` model with the provider, model and options the
     /// selected profile maps it to.
     ///
@@ -470,6 +491,15 @@ pub(crate) fn is_secret_path(file: &str) -> bool {
 
 /// Read and parse a config file without resolving profiles or validating.
 pub fn read_config(path: &Path) -> Result<NightshiftConfig, Error> {
+    read_toml::<NightshiftConfig>(path)
+}
+
+/// Read and parse a machine-local config file.
+pub fn read_machine_config(path: &Path) -> Result<MachineConfig, Error> {
+    read_toml::<MachineConfig>(path)
+}
+
+fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Error> {
     let content = std::fs::read_to_string(path).map_err(|error| {
         Error::from(ConfigError {
             path: path.display().to_string(),
@@ -486,11 +516,20 @@ pub fn read_config(path: &Path) -> Result<NightshiftConfig, Error> {
 
 /// Load, parse, resolve `@slot` models against the selected profile (see
 /// [`NightshiftConfig::resolve_profile`]), and validate the role graph.
+///
+/// When `machine` is `Some`, read and merge that machine-local config file
+/// (which may contain only `[providers.*]` and `[profiles.*]`) before
+/// resolving profiles.
 pub fn load_role_graph_config_from(
     path: &Path,
+    machine: Option<&Path>,
     profile: Option<&str>,
 ) -> Result<NightshiftConfig, Error> {
     let mut config = read_config(path)?;
+    if let Some(machine_path) = machine {
+        let machine = read_machine_config(machine_path)?;
+        config.merge_machine(machine);
+    }
     config.resolve_profile(profile)?;
     config.validate()?;
     Ok(config)
@@ -756,7 +795,7 @@ model = "phi4"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nightshift.toml");
         std::fs::write(&path, EXAMPLE).expect("write");
-        let config = load_role_graph_config_from(&path, None).expect("valid config");
+        let config = load_role_graph_config_from(&path, None, None).expect("valid config");
         assert_eq!(config.roles.len(), 3);
     }
 
@@ -765,7 +804,7 @@ model = "phi4"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nightshift.toml");
         std::fs::write(&path, "not = valid = toml\n").expect("write");
-        let err = load_role_graph_config_from(&path, None).expect_err("malformed must fail");
+        let err = load_role_graph_config_from(&path, None, None).expect_err("malformed must fail");
         assert!(err.to_string().contains("config error"), "{err}");
     }
 
@@ -773,8 +812,8 @@ model = "phi4"
     fn shipped_example_config_parses_and_validates() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let example = Path::new(&manifest_dir).join("nightshift.toml.example");
-        let config =
-            load_role_graph_config_from(&example, None).expect("example must parse + validate");
+        let config = load_role_graph_config_from(&example, None, None)
+            .expect("example must parse + validate");
         assert_eq!(config.run.start, "product-owner");
         assert_eq!(config.roles.len(), 3);
     }
@@ -1252,11 +1291,70 @@ model = "phi4"
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("nightshift.toml");
         std::fs::write(&path, PROFILES).expect("write");
-        let config = load_role_graph_config_from(&path, Some("mac")).expect("load");
+        let config = load_role_graph_config_from(&path, None, Some("mac")).expect("load");
         assert_eq!(config.roles[1].model, "gemma-4-31b-4bit");
-        assert!(load_role_graph_config_from(&path, None).is_err());
+        assert!(load_role_graph_config_from(&path, None, None).is_err());
         assert_eq!(read_config(&path).expect("read").roles[1].model, "@coder");
     }
+
+    #[test]
+    fn machine_config_supplies_the_profile_the_repo_lacks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_path = tmp.path().join("nightshift.toml");
+        let machine_path = tmp.path().join("machine.toml");
+        std::fs::write(
+            &repo_path,
+            "[run]\nstart = \"dev\"\n[[roles]]\nid = \"dev\"\nmodel = \"@coder\"\n",
+        )
+        .expect("write repo");
+        std::fs::write(
+            &machine_path,
+            r#"
+[providers.mlx]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+
+[profiles.mac]
+coder = { provider = "mlx", model = "qwen3.6-35b-4bit" }
+"#,
+        )
+        .expect("write machine");
+        let config = load_role_graph_config_from(&repo_path, Some(&machine_path), Some("mac"))
+            .expect("load");
+        assert_eq!(config.roles[0].provider, "mlx");
+        assert_eq!(config.roles[0].model, "qwen3.6-35b-4bit");
+        assert!(load_role_graph_config_from(&repo_path, None, Some("mac")).is_err());
+    }
+
+    #[test]
+    fn machine_config_model_wins_when_both_define() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_path = tmp.path().join("nightshift.toml");
+        let machine_path = tmp.path().join("machine.toml");
+        std::fs::write(&repo_path, PROFILES).expect("write repo");
+        std::fs::write(
+            &machine_path,
+            r#"
+[profiles.mac]
+planner = { provider = "mlx", model = "qwen3.8-27b-4bit" }
+coder = { provider = "mlx", model = "qwen3.6-35b-4bit" }
+"#,
+        )
+        .expect("write machine");
+        let config = load_role_graph_config_from(&repo_path, Some(&machine_path), Some("mac"))
+            .expect("load");
+        assert_eq!(config.roles[1].model, "qwen3.6-35b-4bit");
+    }
+
+    #[test]
+    fn read_machine_config_fails_on_unknown_fields() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("machine.toml");
+        std::fs::write(&path, "[run]\nstart = \"dev\"\n").expect("write");
+        let err = read_machine_config(&path).expect_err("unknown fields must fail");
+        assert!(err.to_string().contains("config error"), "{err}");
+    }
+
     #[test]
     fn retries_defaults_to_two_and_can_be_turned_off() {
         let base = "[run]\nstart = \"po\"\n[[roles]]\nid = \"po\"\nprovider = \"ollama\"\nmodel = \"phi4\"\n";

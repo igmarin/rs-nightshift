@@ -69,6 +69,9 @@ async fn nightshift(args: Vec<String>) -> Output {
         Command::new(env!("CARGO_BIN_EXE_nightshift"))
             .args(args)
             .env_remove("NIGHTSHIFT_PROFILE")
+            // Keep the developer's own ~/.config/nightshift/machine.toml out of the tests.
+            .env_remove("NIGHTSHIFT_MACHINE_CONFIG")
+            .env("XDG_CONFIG_HOME", env!("CARGO_TARGET_TMPDIR"))
             .output()
             .expect("spawn nightshift")
     })
