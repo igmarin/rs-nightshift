@@ -960,6 +960,81 @@ model = "phi4"
         assert!(detail.contains("JSON"), "{detail}");
     }
 
+    /// Replies with fixed token counts, or fails when `fail` is set.
+    struct UsageClient {
+        usage: Option<crate::ports::Usage>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::ModelClient for UsageClient {
+        async fn generate(&self, request: &crate::ports::GenerateRequest) -> Result<String, Error> {
+            Ok(self.generate_with_usage(request).await?.0)
+        }
+
+        async fn generate_with_usage(
+            &self,
+            _request: &crate::ports::GenerateRequest,
+        ) -> Result<(String, Option<crate::ports::Usage>), Error> {
+            if self.fail {
+                return Err(Error::Context("server down".into()));
+            }
+            Ok(("reply".into(), self.usage))
+        }
+    }
+
+    #[tokio::test]
+    async fn metered_logs_token_counts_and_failed_calls() {
+        let logged = Mutex::new(Vec::new());
+        let log = |call: ModelCall| -> Result<(), Error> {
+            logged.lock().expect("log").push(call);
+            Ok(())
+        };
+        let request = crate::ports::GenerateRequest {
+            model: "m".into(),
+            system: None,
+            prompt: "p".into(),
+            temperature: 0.2,
+            timeout: None,
+        };
+        let reporting = UsageClient {
+            usage: Some(crate::ports::Usage {
+                prompt_tokens: 12,
+                completion_tokens: 3,
+            }),
+            fail: false,
+        };
+        let failing = UsageClient {
+            usage: None,
+            fail: true,
+        };
+
+        let reply = Metered {
+            inner: &reporting,
+            log: &log,
+        }
+        .generate(&request)
+        .await;
+        assert_eq!(reply.expect("reply"), "reply");
+        let reply = Metered {
+            inner: &failing,
+            log: &log,
+        }
+        .generate(&request)
+        .await;
+        assert!(reply
+            .expect_err("fails")
+            .to_string()
+            .contains("server down"));
+
+        let logged = logged.into_inner().expect("log");
+        let tokens: Vec<_> = logged
+            .iter()
+            .map(|c| (c.prompt_tokens, c.completion_tokens))
+            .collect();
+        assert_eq!(tokens, [(Some(12), Some(3)), (None, None)]);
+    }
+
     #[tokio::test]
     async fn llm_call_events_are_logged() {
         let cfg = config(TWO_ROLE);
