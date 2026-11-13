@@ -222,9 +222,10 @@ used as argv).
   loop counters, total steps, last verdict, status (`running|done|blocked|failed`),
   `block_reason`.
 - `artifacts/latest/actions.jsonl` — append-only, one JSON object per action:
-  `{ts, event, role, provider, model, verdict, artifact, block_reason, detail}`.
+  `{ts, event, role, provider, model, verdict, artifact, block_reason, detail, call}`.
   Events: `role_start`, `llm_call`, `tool_call`, `retry`, `role_end`, `loop`,
-  `halt`, `done`, `fail`.
+  `halt`, `done`, `fail`. An `llm_call` event's `call` holds `duration_ms`
+  and, when the server reports them, `prompt_tokens` and `completion_tokens`.
 - Context injection: each role's prompt gets the goal, the prior artifacts (or
   their summaries), and the last N action-log entries as run memory.
 

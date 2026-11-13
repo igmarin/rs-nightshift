@@ -203,6 +203,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "t".into(),
@@ -214,6 +215,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
@@ -280,6 +282,7 @@ mod tests {
             artifact: None,
             block_reason: BlockReason::None,
             detail: None,
+            call: None,
         }
     }
 
@@ -312,6 +315,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "2024-01-15T10:01:30Z".into(),
@@ -323,6 +327,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
@@ -343,6 +348,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "2024-01-15T10:00:30Z".into(),
@@ -354,6 +360,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "2024-01-15T10:01:00Z".into(),
@@ -365,6 +372,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "2024-01-15T10:01:15Z".into(),
@@ -376,6 +384,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
@@ -396,6 +405,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "2024-01-16T00:00:30Z".into(),
@@ -407,6 +417,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
@@ -427,6 +438,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "also_invalid".into(),
@@ -438,6 +450,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
@@ -457,6 +470,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
             ActionEvent {
                 ts: "t".into(),
@@ -468,6 +482,7 @@ mod tests {
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
         ];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
@@ -486,6 +501,7 @@ mod tests {
             artifact: None,
             block_reason: BlockReason::None,
             detail: None,
+            call: None,
         }];
         let report = render_report(&snapshot(RunStatus::Done, BlockReason::None), &events);
         assert!(!report.contains("Retries:"), "{report}");

@@ -107,6 +107,7 @@ where
                 artifact: None,
                 block_reason: BlockReason::None,
                 detail: None,
+                call: None,
             },
         )?;
 
@@ -142,6 +143,7 @@ where
                     artifact: None,
                     block_reason: BlockReason::None,
                     detail: Some(format!("attempt {attempt} rejected: {error}")),
+                    call: None,
                 },
             )
         };
@@ -197,6 +199,7 @@ where
                 artifact: outcome.artifact.clone(),
                 block_reason: outcome.output.block_reason,
                 detail: None,
+                call: None,
             },
         )?;
         state.write_snapshot(
@@ -226,6 +229,7 @@ where
                         artifact: outcome.artifact,
                         block_reason: reason,
                         detail: None,
+                        call: None,
                     },
                 )?;
                 state.write_snapshot(
@@ -281,6 +285,7 @@ where
                         artifact: None,
                         block_reason: BlockReason::None,
                         detail: None,
+                        call: None,
                     },
                 )?;
                 context = RoleContext {
@@ -399,6 +404,7 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
             artifact: None,
             block_reason: reason,
             detail: None,
+            call: None,
         },
     )?;
     state.write_snapshot(
@@ -443,6 +449,7 @@ fn record_failure<S: StateStore, K: Clock>(
             artifact: None,
             block_reason: reason,
             detail: None,
+            call: None,
         },
     )?;
     state.write_snapshot(
