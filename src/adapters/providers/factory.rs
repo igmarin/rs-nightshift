@@ -104,7 +104,8 @@ fn build_ollama(
     let base_url = spec
         .and_then(|s| s.base_url.clone())
         .unwrap_or_else(|| DEFAULT_OLLAMA_BASE_URL.to_string());
-    let inner = OllamaClient::new(base_url)?;
+    let keep_loaded = spec.is_some_and(|s| s.keep_loaded);
+    let inner = OllamaClient::new(base_url)?.unload_after_call(!keep_loaded);
     Ok(Box::new(OllamaAdapter::with_options(
         inner,
         options.think,
@@ -227,6 +228,7 @@ mod tests {
             backend: None,
             base_url: Some(format!("{}/v1", server.uri())),
             api_key_env: None,
+            keep_loaded: false,
         };
         let client = build_model_client("kimi", Some(&spec), &options(&[])).expect("client");
         let text = client.generate(&request("kimi3")).await.expect("reply");
@@ -307,6 +309,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn factory_ollama_keep_loaded_skips_the_unload() {
+        let server = MockServer::start().await;
+        mount_chat(&server, &chat_response("local answer")).await;
+        let mut spec = spec_with(&server.uri(), "unused");
+        spec.keep_loaded = true;
+
+        let client = build_model_client("ollama", Some(&spec), &options(&[])).expect("client");
+        let text = client.generate(&request("phi4")).await.expect("reply");
+        assert_eq!(text, "local answer");
+
+        let unloads = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .filter(|r| r.url.path() == "/api/generate")
+            .count();
+        assert_eq!(unloads, 0, "keep_loaded must not send an unload request");
+    }
+
+    #[tokio::test]
     async fn factory_custom_openai_compatible_backend() {
         let _guard = EnvGuard::set("RS_NIGHTSHIFT_TEST_ACME_KEY", "sk-acme");
         let server = MockServer::start().await;
@@ -316,6 +339,7 @@ mod tests {
             backend: Some("openai-compatible".into()),
             base_url: Some(format!("{}/v1", server.uri())),
             api_key_env: Some("RS_NIGHTSHIFT_TEST_ACME_KEY".into()),
+            keep_loaded: false,
         };
         let client = build_model_client("acme", Some(&spec), &options(&[])).expect("client");
         let text = client
@@ -342,6 +366,7 @@ mod tests {
             backend: Some("openai-compatible".into()),
             base_url: Some(format!("{}/v1", server.uri())),
             api_key_env: None,
+            keep_loaded: false,
         };
         let client = build_model_client("mlx", Some(&spec), &options(&[])).expect("client");
         let text = client
@@ -357,6 +382,7 @@ mod tests {
             backend: Some("openai-compatible".into()),
             base_url: Some("https://llm.example.test/v1".into()),
             api_key_env: None,
+            keep_loaded: false,
         };
         let err = match build_model_client("remote", Some(&spec), &options(&[])) {
             Ok(_) => panic!("a remote provider without api_key_env must fail"),
@@ -397,6 +423,7 @@ mod tests {
             backend: Some("anthropic".into()),
             base_url: Some("http://127.0.0.1:9".into()),
             api_key_env: Some("X".into()),
+            keep_loaded: false,
         };
         let err = match build_model_client("acme", Some(&spec), &options(&[])) {
             Ok(_) => panic!("must fail"),
@@ -429,6 +456,7 @@ mod tests {
             backend: None,
             base_url: None,
             api_key_env: Some("RS_NIGHTSHIFT_TEST_DEEPSEEK_DEFAULT_KEY".into()),
+            keep_loaded: false,
         };
         let client = build_model_client("deepseek", Some(&spec), &options(&[])).expect("client");
         assert_eq!(
@@ -444,6 +472,7 @@ mod tests {
             backend: None,
             base_url: None,
             api_key_env: Some("RS_NIGHTSHIFT_TEST_KIMI_KEY".into()),
+            keep_loaded: false,
         };
         let client = build_model_client("kimi", Some(&spec), &options(&[])).expect("client");
         assert_eq!(

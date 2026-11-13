@@ -217,7 +217,7 @@ and never uses model output as a command or its arguments.
 
 - Ollama: local, default `http://127.0.0.1:11434` (`[providers.ollama]
   base_url` moves it). After each call, nightshift sends `keep_alive: 0`,
-  which unloads the model.
+  which unloads the model; `keep_loaded = true` turns that off.
 - Deepseek and Kimi/Moonshot: built-in OpenAI-compatible providers. The API
   key comes from `DEEPSEEK_API_KEY` or `MOONSHOT_API_KEY`, or from the
   variable that `api_key_env` names.

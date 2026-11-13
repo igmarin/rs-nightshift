@@ -133,6 +133,8 @@ pub struct OllamaClient {
     generate_lock: Mutex<()>,
     /// Per-completion timeout (used for `tokio::time::timeout` wrapping).
     timeout: Duration,
+    /// Send the `keep_alive: 0` unload after each completion (default).
+    unload_after_call: bool,
 }
 
 #[derive(Serialize)]
@@ -184,7 +186,16 @@ impl OllamaClient {
             redacted_base_url,
             generate_lock: Mutex::new(()),
             timeout,
+            unload_after_call: true,
         })
+    }
+
+    /// Whether to unload the model after each completion (`true` by default).
+    /// With `false`, Ollama's own keep-alive decides when the model unloads.
+    #[must_use]
+    pub fn unload_after_call(mut self, unload: bool) -> Self {
+        self.unload_after_call = unload;
+        self
     }
 
     /// Redacted origin used for operator-facing run logs.
@@ -229,7 +240,8 @@ impl OllamaClient {
         Ok(())
     }
 
-    /// Complete with an explicit wall-clock timeout, then unload the model.
+    /// Complete with an explicit wall-clock timeout, then unload the model
+    /// unless [`Self::unload_after_call`] turned that off.
     ///
     /// Completions stay serialized on the internal mutex (INV-1).
     pub async fn complete_with_timeout(
@@ -250,7 +262,9 @@ impl OllamaClient {
             .await
             .map_err(|_| KernelError::Timeout(timeout.as_secs()))??;
         // Best-effort unload: a failure here does not fail the completion.
-        let _ = self.unload(&model_for_unload).await;
+        if self.unload_after_call {
+            let _ = self.unload(&model_for_unload).await;
+        }
         Ok(response)
     }
 }
@@ -366,6 +380,30 @@ mod tests {
             serde_json::from_slice(&generate_requests[0].body).expect("unload body JSON");
         assert_eq!(body["keep_alive"], 0);
         assert_eq!(body["model"], "qwen2.5-coder:7b");
+    }
+
+    #[tokio::test]
+    async fn complete_without_unload_sends_no_unload_request() {
+        let server = MockServer::start().await;
+        mount_chat(&server, &chat_response("hello")).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = OllamaClient::new(server.uri())
+            .expect("client")
+            .unload_after_call(false);
+        let request = LLMRequest {
+            model: Some("qwen2.5-coder:7b".to_string()),
+            messages: vec![llm_kernel::llm::ChatMessage::user("say hi")],
+            ..LLMRequest::default()
+        };
+        let response = client.complete(request).await.expect("complete");
+        assert_eq!(response.content, "hello");
+        // `expect(0)` is checked when `server` drops.
     }
 
     #[tokio::test]

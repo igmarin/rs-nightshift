@@ -77,6 +77,10 @@ pub struct ProviderSpec {
     /// Environment variable holding the API key.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Ollama only: leave the model loaded after each call instead of
+    /// unloading it (`keep_alive: 0`), so Ollama's own keep-alive applies.
+    #[serde(default)]
+    pub keep_loaded: bool,
 }
 
 /// One role definition under `[[roles]]`.
@@ -282,6 +286,15 @@ impl NightshiftConfig {
         }
         if self.run.max_steps == 0 {
             return Err(Error::RoleGraph("max_steps must be at least 1".into()));
+        }
+        if let Some((name, _)) = self
+            .providers
+            .iter()
+            .find(|(name, spec)| spec.keep_loaded && name.as_str() != "ollama")
+        {
+            return Err(Error::RoleGraph(format!(
+                "provider {name:?}: keep_loaded applies only to [providers.ollama]"
+            )));
         }
         for role in &self.roles {
             if role.timeout_secs == Some(0) {
@@ -663,6 +676,36 @@ model = "deepseek-chat"
         .expect("parse");
         let err = config.validate().expect_err("unknown provider must fail");
         assert!(err.to_string().contains("unknown provider"), "{err}");
+    }
+
+    #[test]
+    fn keep_loaded_is_only_for_ollama() {
+        let config = |provider: &str| -> NightshiftConfig {
+            toml::from_str(&format!(
+                r#"
+[run]
+start = "dev"
+[providers.{provider}]
+backend = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+keep_loaded = true
+[[roles]]
+id = "dev"
+provider = "{provider}"
+model = "m"
+"#
+            ))
+            .expect("parse")
+        };
+        config("ollama")
+            .validate()
+            .expect("ollama may keep models loaded");
+        let err = config("mlx").validate().expect_err("mlx must fail");
+        assert!(
+            err.to_string()
+                .contains("keep_loaded applies only to [providers.ollama]"),
+            "{err}"
+        );
     }
 
     #[test]

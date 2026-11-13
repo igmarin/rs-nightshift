@@ -8,8 +8,10 @@ AMD Ryzen 7 7730U laptop (8 cores, integrated Radeon graphics).
 
 - One completion at a time.
 - After each completion, nightshift asks Ollama to unload the model
-  (`keep_alive: 0`), so every role call loads it again. `OLLAMA_KEEP_ALIVE`
-  does not change this: it only affects other clients, such as `ollama run`.
+  (`keep_alive: 0`), so every role call loads it again. To keep models
+  loaded between calls, set `keep_loaded = true` under `[providers.ollama]`
+  ([configuration](configuration.md#ollama)); `OLLAMA_KEEP_ALIVE` then
+  decides how long an idle model stays loaded.
 - Each call has a time limit: 3600 s by default, or the role's
   `timeout_secs` (see [configuration](configuration.md)).
 - A role's `options` can set `temperature`, `max_tokens` and `think`.

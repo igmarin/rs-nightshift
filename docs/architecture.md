@@ -121,7 +121,7 @@ Roles name a provider; the client factory (`build_model_client` in
 | custom    | `openai-compatible` | from `[providers.<name>]`    | `api_key_env`, or none for a keyless local server (rapid-mlx) |
 
 - Ollama: after each call, nightshift sends `keep_alive: 0`, which unloads
-  the model. With `options.think = true` it adds the `:think` tag suffix
+  the model, unless `[providers.ollama] keep_loaded = true`. With `options.think = true` it adds the `:think` tag suffix
   (`phi4` becomes `phi4:think`).
 - The model tag goes to the provider as written; the config owns the exact
   tag (`qwen2.5-coder:7b`, `qwen3.6-35b-4bit`, `deepseek-v4-pro`).

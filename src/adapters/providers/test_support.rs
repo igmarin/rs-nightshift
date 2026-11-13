@@ -49,6 +49,7 @@ pub(crate) fn spec_with(base_url: &str, api_key_env: &str) -> ProviderSpec {
         backend: None,
         base_url: Some(base_url.into()),
         api_key_env: Some(api_key_env.into()),
+        keep_loaded: false,
     }
 }
 

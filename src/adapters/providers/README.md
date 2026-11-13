@@ -16,7 +16,8 @@ model server.
 ## Adapters
 
 - `OllamaAdapter` wraps `OllamaClient` (`src/adapters/ollama.rs`), which
-  sends `keep_alive: 0` after each call to unload the model. With
+  sends `keep_alive: 0` after each call to unload the model (not when
+  `[providers.ollama] keep_loaded = true`). With
   `options.think = true` it adds the `:think` tag suffix (`phi4` becomes
   `phi4:think`); a tag that already ends in `:think` is left as it is. Ollama
   needs no API key, so a placeholder goes to llm-kernel's client.
