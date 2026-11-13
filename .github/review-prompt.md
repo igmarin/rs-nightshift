@@ -119,8 +119,9 @@ workflow or script file inside a pipeline PR).
 - **INV-3** Never `git commit`, `git push`, `git reset --hard`, or `git clean`.
 - **INV-4** Writes stay inside the target repo or the artifacts directory. Every edit
   tool rejects `..`, absolute paths and secret-bearing paths (`.env`, keys, `.git/`, …).
-  `apply-patch` checks every path the diff names (`+++`, `---`, rename and copy lines)
-  before any `git apply`, including its `--3way` fallback. `write-file` and
+  `apply-patch` gets the paths from `git apply --numstat` (plus `rename from` /
+  `copy from` lines) and checks them before any `git apply`, including its `--3way`
+  fallback. `write-file` and
   `search-replace` also reject symlinks that lead outside the repo or into those paths.
 - **INV-5** Prompts receive AST slices and listed files (`context_files`), not a
   recursive tree dump.

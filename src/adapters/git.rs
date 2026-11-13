@@ -10,27 +10,51 @@ use std::process::Command;
 /// Artifact file name written by the Dev stage.
 pub const PATCH_FILE: &str = "03_diff.patch";
 
-/// Every path a unified diff touches: the `+++ b/…` and `--- a/…` file lines
-/// (not `/dev/null`) and the `rename`/`copy` `from`/`to` lines, so a delete,
-/// rename or copy is checked too. A path may appear twice.
-#[must_use]
-pub fn patch_paths(patch: &str) -> Vec<PathBuf> {
-    const NAME_PREFIXES: [&str; 4] = ["rename from ", "rename to ", "copy from ", "copy to "];
-    let mut paths = Vec::new();
+/// Every path `patch` touches, read the way `git apply` reads it
+/// (`git apply --numstat -z`, which applies nothing): changed, new, deleted
+/// and binary files, with quoted names decoded, and the new name of a renamed
+/// or copied file. Git leaves out the old name, so the `rename from` and
+/// `copy from` header lines add it. A patch git cannot parse is an error.
+fn touched_paths(repo: &Path, patch: &str) -> Result<Vec<PathBuf>, Error> {
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
+    std::fs::write(tmp.path(), patch)
+        .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
+    let tmp_path = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| GitError::new("patch path".to_string()))?;
+    let mut paths = numstat_paths(&git(repo, &["apply", "--numstat", "-z", tmp_path])?);
     for line in patch.lines() {
-        let path = if let Some(rest) = line.strip_prefix("+++ ") {
-            let rest = rest.trim();
-            rest.strip_prefix("b/").unwrap_or(rest)
-        } else if let Some(rest) = line.strip_prefix("--- ") {
-            let rest = rest.trim();
-            rest.strip_prefix("a/").unwrap_or(rest)
-        } else if let Some(rest) = NAME_PREFIXES.iter().find_map(|p| line.strip_prefix(p)) {
-            rest.trim()
-        } else {
+        // A hunk line starts with ' ', '+', '-' or '\', never with these words.
+        let Some(source) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("copy from "))
+        else {
             continue;
         };
-        if path != "/dev/null" {
-            paths.push(PathBuf::from(path));
+        if source.starts_with('"') {
+            return Err(ArtifactError::invalid(
+                PATCH_FILE,
+                format!("patch renames or copies a quoted path: {source}"),
+            )
+            .into());
+        }
+        paths.push(PathBuf::from(source));
+    }
+    Ok(paths)
+}
+
+/// Paths in `git apply --numstat -z` output: `added\tdeleted\tpath\0` per
+/// file (`-` counts for a binary file), or for a rename an empty path
+/// followed by the old and the new path as two more fields.
+fn numstat_paths(listing: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut fields = listing.split('\0');
+    while let Some(field) = fields.next() {
+        match field.splitn(3, '\t').nth(2) {
+            Some("") => paths.extend(fields.by_ref().take(2).map(PathBuf::from)),
+            Some(path) => paths.push(PathBuf::from(path)),
+            None => {} // the empty field after the last NUL
         }
     }
     paths
@@ -79,7 +103,7 @@ pub fn head_commit(repo: &Path) -> Result<String, Error> {
 /// This is the safe preflight used by `apply_checked` and
 /// `crate::dev::write_and_apply_patch`. It never modifies the working tree.
 pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
-    validate_patch_paths(&patch_paths(patch))?;
+    validate_patch_paths(&touched_paths(repo, patch)?)?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
     std::fs::write(tmp.path(), patch)
         .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
@@ -103,14 +127,23 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
 /// fallback before the apply. If that also fails, `git apply --3way` is
 /// tried as a last resort — it uses the index for 3-way merge, which
 /// tolerates context-line mismatches that trip up the strict check.
+/// Every attempt checks the paths first ([`validate_patch_paths`]).
 pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
-    validate_patch_paths(&patch_paths(patch))?;
     match apply_check(repo, patch) {
         Ok(()) => {}
         Err(original) => {
             let repaired = repair_hunk_headers(patch);
             if repaired != patch && apply_check(repo, &repaired).is_ok() {
                 return apply_raw(repo, &repaired);
+            }
+            // `original` may be the path check itself, and `--3way` checks
+            // nothing, so check the paths again. A patch git cannot parse
+            // cannot be applied with `--3way` either.
+            if touched_paths(repo, patch)
+                .and_then(|paths| validate_patch_paths(&paths))
+                .is_err()
+            {
+                return Err(original);
             }
             // Last resort: 3-way merge uses the index to resolve context
             // mismatches. This handles the common case where the model got
@@ -438,37 +471,93 @@ diff --git a/file.txt b/file.txt
     }
 
     #[test]
-    fn patch_paths_collects_from_delete() {
-        let patch = "--- a/.env\n+++ /dev/null\n";
-        let paths = patch_paths(patch);
-        assert!(paths.contains(&PathBuf::from(".env")));
-    }
-
-    #[test]
-    fn patch_paths_collects_renames() {
-        let patch = "rename from notes.txt\nrename to .env\n";
-        let paths = patch_paths(patch);
-        assert!(paths.contains(&PathBuf::from(".env")));
-        assert!(paths.contains(&PathBuf::from("notes.txt")));
-    }
-
-    #[test]
-    fn apply_checked_rejects_secret() {
-        // The path check runs before git, so no repo is needed: without it,
-        // the `--3way` fallback used to apply a patch whose check had failed.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let patch = "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+TOKEN=x\n";
-        let err = apply_checked(dir.path(), patch).expect_err("secret path");
-        assert!(err.to_string().contains("secret-bearing"), "{err}");
-        assert!(!dir.path().join(".env").exists());
-    }
-
-    #[test]
-    fn patch_paths_skips_dev_null_and_strips_prefixes() {
-        let patch = "--- a/src/old.rs\n+++ b/src/new.rs\n--- /dev/null\n+++ /dev/null\n";
-        assert_eq!(
-            patch_paths(patch),
-            [PathBuf::from("src/old.rs"), PathBuf::from("src/new.rs")]
+    fn numstat_paths_reads_files_binaries_and_split_renames() {
+        let listing = concat!(
+            "1\t0\t.env\0",
+            "-\t-\tkey.pem\0",
+            "0\t0\t\0old.txt\0new.txt\0"
         );
+        let expected = [".env", "key.pem", "old.txt", "new.txt"].map(PathBuf::from);
+        assert_eq!(numstat_paths(listing), expected);
+    }
+
+    /// `touched_paths` for `patch`, in a directory that is not a repo
+    /// (`git apply --numstat` reads only the patch).
+    fn touched(patch: &str) -> Result<Vec<PathBuf>, Error> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touched_paths(dir.path(), patch)
+    }
+
+    #[test]
+    fn touched_paths_follow_git_not_the_hunk_text() {
+        let cases = [
+            // a delete
+            (
+                "diff --git a/.env b/.env\ndeleted file mode 100644\n--- a/.env\n+++ /dev/null\n@@ -1 +0,0 @@\n-S=1\n",
+                vec![".env"],
+            ),
+            // a new empty file: no ---/+++ lines at all
+            (
+                "diff --git a/.env b/.env\nnew file mode 100644\nindex 0000000..e69de29\n",
+                vec![".env"],
+            ),
+            // a quoted name (a tab in a directory name), decoded by git
+            (
+                "diff --git \"a/x\\tdir/.env\" \"b/x\\tdir/.env\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/x\\tdir/.env\"\n@@ -0,0 +1 @@\n+T\n",
+                vec!["x\tdir/.env"],
+            ),
+            // a rename: git lists the new name, the header gives the old one
+            (
+                "diff --git a/.env b/plain.txt\nsimilarity index 100%\nrename from .env\nrename to plain.txt\n",
+                vec!["plain.txt", ".env"],
+            ),
+            // deleting the line `-- .env` is an edit to q.sql only
+            (
+                "diff --git a/q.sql b/q.sql\n--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1 @@\n SELECT 1;\n--- .env\n",
+                vec!["q.sql"],
+            ),
+        ];
+        for (patch, expected) in cases {
+            let expected: Vec<PathBuf> = expected.into_iter().map(PathBuf::from).collect();
+            assert_eq!(touched(patch).expect(patch), expected, "{patch}");
+        }
+    }
+
+    #[test]
+    fn touched_paths_reject_a_quoted_rename_source() {
+        let patch = "diff --git \"a/x\\t.env\" b/plain.txt\nsimilarity index 100%\nrename from \"x\\t.env\"\nrename to plain.txt\n";
+        let err = touched(patch).expect_err("quoted source");
+        assert!(err.to_string().contains("quoted path"), "{err}");
+    }
+
+    #[test]
+    fn apply_checked_still_repairs_wrong_hunk_counts() {
+        // Git cannot parse the original (its counts are wrong), so the first
+        // path check fails; the repaired patch must still be checked and applied.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]).expect("init");
+        std::fs::write(repo.join("notes.txt"), "a\nb\nc\n").expect("write");
+        let patch = "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,9 +1,9 @@\n a\n-b\n+B\n c\n";
+        apply_checked(repo, patch).expect("repaired patch applies");
+        let text = std::fs::read_to_string(repo.join("notes.txt")).expect("read");
+        assert_eq!(text, "a\nB\nc\n");
+    }
+
+    #[test]
+    fn apply_checked_rejects_secret_paths_before_any_apply() {
+        // The path check runs before git applies anything, so no repo is
+        // needed. Before, the `--3way` fallback applied such a patch.
+        let patches = [
+            "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+TOKEN=x\n",
+            "diff --git \"a/x\\tdir/.env\" \"b/x\\tdir/.env\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/x\\tdir/.env\"\n@@ -0,0 +1 @@\n+T\n",
+        ];
+        for patch in patches {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let err = apply_checked(dir.path(), patch).expect_err(patch);
+            assert!(err.to_string().contains("secret-bearing"), "{err}");
+            assert!(!dir.path().join(".env").exists());
+            assert!(!dir.path().join("x\tdir").exists());
+        }
     }
 }
