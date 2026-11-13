@@ -1,6 +1,6 @@
 //! Ollama [`ModelClient`] adapter preserving `keep_alive: 0` unload.
 
-use crate::adapters::kernel_error::{complete_text, map_kernel_error};
+use crate::adapters::kernel_error::{complete_text, map_kernel_error, usage};
 use crate::adapters::ollama::OllamaClient;
 use crate::error::Error;
 use crate::generate::Origin;
@@ -62,6 +62,13 @@ impl OllamaAdapter {
 #[async_trait]
 impl ModelClient for OllamaAdapter {
     async fn generate(&self, request: &GenerateRequest) -> Result<String, Error> {
+        Ok(self.generate_with_usage(request).await?.0)
+    }
+
+    async fn generate_with_usage(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<(String, Option<crate::ports::Usage>), Error> {
         let timeout = request.timeout.unwrap_or(self.timeout);
         let model = resolve_ollama_model(&request.model, self.think);
         let llm_request = LLMRequest {
@@ -73,7 +80,9 @@ impl ModelClient for OllamaAdapter {
             .complete_with_timeout(llm_request, timeout)
             .await
             .map_err(|error| map_kernel_error(error, &request.model))?;
-        Ok(complete_text(response)?)
+        let usage = usage(&response);
+        let text = complete_text(response)?;
+        Ok((text, usage))
     }
 
     fn redacted_origin(&self) -> Option<String> {

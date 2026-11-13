@@ -1,6 +1,6 @@
 //! OpenAI-compatible [`ModelClient`] adapter (Deepseek, Kimi, custom).
 
-use crate::adapters::kernel_error::{complete_text, map_kernel_error};
+use crate::adapters::kernel_error::{complete_text, map_kernel_error, usage};
 use crate::error::{ConfigError, Error, ProviderError};
 use crate::ports::{GenerateRequest, ModelClient};
 use async_trait::async_trait;
@@ -181,6 +181,13 @@ impl OpenAICompatibleAdapter {
 #[async_trait]
 impl ModelClient for OpenAICompatibleAdapter {
     async fn generate(&self, request: &GenerateRequest) -> Result<String, Error> {
+        Ok(self.generate_with_usage(request).await?.0)
+    }
+
+    async fn generate_with_usage(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<(String, Option<crate::ports::Usage>), Error> {
         let timeout = request.timeout.unwrap_or(self.timeout);
         let response = tokio::time::timeout(
             timeout,
@@ -192,7 +199,9 @@ impl ModelClient for OpenAICompatibleAdapter {
         .and_then(|result| {
             result.map_err(|error| Error::from(map_kernel_error(error, &request.model)))
         })?;
-        Ok(complete_text(response)?)
+        let usage = usage(&response);
+        let text = complete_text(response)?;
+        Ok((text, usage))
     }
 
     fn redacted_origin(&self) -> Option<String> {
@@ -236,6 +245,43 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["messages"][1]["content"], "review the patch");
         assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[tokio::test]
+    async fn openai_generate_with_usage_returns_token_counts() {
+        let server = MockServer::start().await;
+        mount_chat(&server, &chat_response("ok")).await;
+
+        let client = OpenAICompatibleAdapter::new(format!("{}/v1", server.uri()), "sk-test")
+            .expect("client");
+        let (text, usage) = client
+            .generate_with_usage(&request("m"))
+            .await
+            .expect("reply");
+        assert_eq!(text, "ok");
+        let u = usage.expect("usage");
+        assert_eq!(u.prompt_tokens, 1);
+        assert_eq!(u.completion_tokens, 1);
+    }
+
+    #[tokio::test]
+    async fn openai_generate_with_usage_returns_none_when_no_usage_field() {
+        let server = MockServer::start().await;
+        let body = chat_response("ok").replace(
+            r#","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}"#,
+            "",
+        );
+        assert!(!body.contains("usage"), "{body}");
+        mount_chat(&server, &body).await;
+
+        let client = OpenAICompatibleAdapter::new(format!("{}/v1", server.uri()), "sk-test")
+            .expect("client");
+        let (text, usage) = client
+            .generate_with_usage(&request("m"))
+            .await
+            .expect("reply");
+        assert_eq!(text, "ok");
+        assert!(usage.is_none());
     }
 
     #[tokio::test]
