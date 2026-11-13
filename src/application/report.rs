@@ -198,6 +198,14 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
                 line.push_str(&format!(
                     ", {prompt} prompt tokens, {completion} completion tokens, {rate} tokens/s"
                 ));
+                // A failed call, or a server that sometimes omits usage, makes the totals partial.
+                let reported = role_calls
+                    .iter()
+                    .filter(|c| c.prompt_tokens.is_some() || c.completion_tokens.is_some())
+                    .count();
+                if reported < count {
+                    line.push_str(&format!(" (tokens from {reported} of {count} calls)"));
+                }
             }
             lines.push(line);
         }
@@ -639,6 +647,35 @@ mod tests {
         assert!(
             report.contains(
                 "  dev: m, 1 call, 0.0s, 5 prompt tokens, 1 completion tokens, - tokens/s"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn model_calls_say_when_only_some_calls_reported_tokens() {
+        let mut reported = event(EventKind::LlmCall, "dev", "2024-01-15T10:00:00Z");
+        reported.model = "m".into();
+        reported.call = Some(ModelCall {
+            duration_ms: 1000,
+            prompt_tokens: Some(900),
+            completion_tokens: Some(100),
+        });
+        let mut failed = event(EventKind::LlmCall, "dev", "2024-01-15T10:01:00Z");
+        failed.model = "m".into();
+        failed.call = Some(ModelCall {
+            duration_ms: 500,
+            prompt_tokens: None,
+            completion_tokens: None,
+        });
+        let report = render_report(
+            &snapshot(RunStatus::Done, BlockReason::None),
+            &[reported, failed],
+        );
+        assert!(
+            report.contains(
+                "  dev: m, 2 calls, 1.5s, 900 prompt tokens, 100 completion tokens, \
+                 100.0 tokens/s (tokens from 1 of 2 calls)"
             ),
             "{report}"
         );
