@@ -147,15 +147,15 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
         }
     }
 
-    // One line per role from the llm_call events, in first-seen order.
+    // One line per role and model from the llm_call events, in first-seen order.
     let mut calls: Vec<(&str, &str, Vec<&ModelCall>)> = Vec::new();
     for event in events.iter().filter(|e| e.event == EventKind::LlmCall) {
         let Some(call) = &event.call else { continue };
-        match calls.iter_mut().find(|(role, _, _)| *role == event.role) {
-            Some(entry) => {
-                entry.1 = &event.model;
-                entry.2.push(call);
-            }
+        match calls
+            .iter_mut()
+            .find(|(role, model, _)| *role == event.role && *model == event.model)
+        {
+            Some(entry) => entry.2.push(call),
             None => calls.push((&event.role, &event.model, vec![call])),
         }
     }
@@ -201,7 +201,7 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
                 // A failed call, or a server that sometimes omits usage, makes the totals partial.
                 let reported = role_calls
                     .iter()
-                    .filter(|c| c.prompt_tokens.is_some() || c.completion_tokens.is_some())
+                    .filter(|c| c.prompt_tokens.is_some() && c.completion_tokens.is_some())
                     .count();
                 if reported < count {
                     line.push_str(&format!(" (tokens from {reported} of {count} calls)"));
@@ -668,15 +668,38 @@ mod tests {
             prompt_tokens: None,
             completion_tokens: None,
         });
+        // Only one of the two counts: the totals are partial too.
+        let mut half = event(EventKind::LlmCall, "dev", "2024-01-15T10:02:00Z");
+        half.model = "m".into();
+        half.call = Some(ModelCall {
+            duration_ms: 0,
+            prompt_tokens: Some(50),
+            completion_tokens: None,
+        });
+        let mut other_model = event(EventKind::LlmCall, "dev", "2024-01-15T10:03:00Z");
+        other_model.model = "m2".into();
+        other_model.call = Some(ModelCall {
+            duration_ms: 2000,
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+        });
         let report = render_report(
             &snapshot(RunStatus::Done, BlockReason::None),
-            &[reported, failed],
+            &[reported, failed, half, other_model],
         );
         assert!(
             report.contains(
-                "  dev: m, 2 calls, 1.5s, 900 prompt tokens, 100 completion tokens, \
-                 100.0 tokens/s (tokens from 1 of 2 calls)"
+                "  dev: m, 3 calls, 1.5s, 950 prompt tokens, 100 completion tokens, \
+                 100.0 tokens/s (tokens from 1 of 3 calls)"
             ),
+            "{report}"
+        );
+        // Another model in the same role gets its own line.
+        assert!(
+            report.lines().any(|line| {
+                line
+                == "  dev: m2, 1 call, 2.0s, 10 prompt tokens, 20 completion tokens, 10.0 tokens/s"
+            }),
             "{report}"
         );
     }
