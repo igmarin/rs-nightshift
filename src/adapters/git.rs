@@ -51,38 +51,6 @@ fn touched_paths(repo: &Path, patch: &str) -> Result<Vec<PathBuf>, Error> {
     Ok(paths)
 }
 
-/// The paths `patch` touches ([`touched_paths`]) pass
-/// [`validate_patch_paths`], and none of them goes through a symlink in the
-/// working tree, including the file itself.
-fn check_patch_paths(repo: &Path, patch: &str) -> Result<(), Error> {
-    let paths = touched_paths(repo, patch)?;
-    validate_patch_paths(&paths)?;
-    // In a repo, git reads the paths from the top of the working tree, also
-    // when `repo` is a folder inside it; outside a repo, from `repo`.
-    let root = git(repo, &["rev-parse", "--show-toplevel"])
-        .map(|top| PathBuf::from(top.trim_end_matches('\n')))
-        .unwrap_or_else(|_| repo.to_path_buf());
-    for path in &paths {
-        // Git refuses a path "beyond a symbolic link" itself, except with
-        // `--3way` when it does not track the link: it then writes through it.
-        let mut current = root.clone();
-        for component in path.components() {
-            current.push(component);
-            if current
-                .symlink_metadata()
-                .is_ok_and(|meta| meta.file_type().is_symlink())
-            {
-                return Err(ArtifactError::invalid(
-                    PATCH_FILE,
-                    format!("patch path goes through a symlink: {}", path.display()),
-                )
-                .into());
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Paths in `git apply --numstat -z` output: `added\tdeleted\tpath\0` per
 /// file (`-` counts for a binary file), or for a rename an empty path
 /// followed by the old and the new path as two more fields.
@@ -137,12 +105,14 @@ pub fn head_commit(repo: &Path) -> Result<String, Error> {
     git(repo, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
 }
 
-/// Validate patch paths and run `git apply --check` in `repo`.
+/// Validate patch paths ([`touched_paths`], [`validate_patch_paths`]) and
+/// run `git apply --check` in `repo`, which also refuses a path through a
+/// symlink in the working tree.
 ///
 /// This is the safe preflight used by `apply_checked` and
 /// `crate::dev::write_and_apply_patch`. It never modifies the working tree.
 pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
-    check_patch_paths(repo, patch)?;
+    validate_patch_paths(&touched_paths(repo, patch)?)?;
     let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
     std::fs::write(tmp.path(), patch)
         .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
@@ -159,39 +129,22 @@ pub(crate) fn apply_check(repo: &Path, patch: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// `git apply --check` then `git apply`. Never add/commit/push/reset/clean.
+/// Check the paths and run `git apply --check`, then `git apply`. Never
+/// add/commit/push/reset/clean.
 ///
-/// If the initial check fails due to incorrect hunk-header line counts (a
-/// common model output defect), [`repair_hunk_headers`] is tried as a
-/// fallback before the apply. If that also fails, `git apply --3way` is
-/// tried as a last resort — it uses the index for 3-way merge, which
-/// tolerates context-line mismatches that trip up the strict check.
-/// Every attempt checks the paths first ([`validate_patch_paths`]).
+/// When the check fails, [`repair_hunk_headers`] fixes wrong hunk line
+/// counts (a common model mistake) and the repaired patch is checked and
+/// applied. There is no other fallback: a patch whose context lines do not
+/// match the file fails, and the role gets the error.
 pub fn apply_checked(repo: &Path, patch: &str) -> Result<(), Error> {
-    match apply_check(repo, patch) {
-        Ok(()) => {}
-        Err(original) => {
-            let repaired = repair_hunk_headers(patch);
-            if repaired != patch && apply_check(repo, &repaired).is_ok() {
-                return apply_raw(repo, &repaired);
-            }
-            // `original` may be the path check itself, and `--3way` checks
-            // nothing, so check the paths again. A patch git cannot parse
-            // cannot be applied with `--3way` either.
-            if check_patch_paths(repo, patch).is_err() {
-                return Err(original);
-            }
-            // Last resort: 3-way merge uses the index to resolve context
-            // mismatches. This handles the common case where the model got
-            // the line numbers and context lines wrong but the actual
-            // changes (removed/added lines) are correct.
-            match apply_3way(repo, patch) {
-                Ok(()) => return Ok(()),
-                Err(_) => return Err(original),
-            }
-        }
+    let Err(original) = apply_check(repo, patch) else {
+        return apply_raw(repo, patch);
+    };
+    let repaired = repair_hunk_headers(patch);
+    if repaired != patch && apply_check(repo, &repaired).is_ok() {
+        return apply_raw(repo, &repaired);
     }
-    apply_raw(repo, patch)
+    Err(original)
 }
 
 /// Write `patch` to a temp file and run `git apply` (no `--check`).
@@ -203,28 +156,6 @@ fn apply_raw(repo: &Path, patch: &str) -> Result<(), Error> {
         repo,
         &[
             "apply",
-            tmp.path()
-                .to_str()
-                .ok_or_else(|| GitError::new("patch path".to_string()))?,
-        ],
-    )?;
-    Ok(())
-}
-
-/// Write `patch` to a temp file and run `git apply --3way` (3-way merge).
-///
-/// Unlike `apply_raw`, this uses the index as a base for 3-way merge,
-/// which tolerates context-line mismatches that cause strict `--check` to
-/// fail. This is the last-resort fallback in [`apply_checked`].
-fn apply_3way(repo: &Path, patch: &str) -> Result<(), Error> {
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| GitError::new(e.to_string()))?;
-    std::fs::write(tmp.path(), patch)
-        .map_err(|e| GitError::new(format!("failed to write patch: {e}")))?;
-    git(
-        repo,
-        &[
-            "apply",
-            "--3way",
             tmp.path()
                 .to_str()
                 .ok_or_else(|| GitError::new("patch path".to_string()))?,
@@ -587,9 +518,9 @@ diff --git a/file.txt b/file.txt
     #[cfg(unix)]
     #[test]
     fn apply_checked_does_not_write_through_a_symlink() {
-        // `git apply --check` refuses this path, but the `--3way` fallback
-        // wrote through a symlink git does not track, outside the repo. The
-        // second case runs in a folder of the repo: git still reads the
+        // Git refuses a path beyond a symlink, also one it does not track.
+        // (`git apply --3way` did not: it wrote through it, outside the repo.)
+        // The second case runs in a folder of the repo, where git reads the
         // paths from the top of the working tree.
         for (workdir, link) in [("", "link"), ("sub", "sub/link")] {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -602,7 +533,10 @@ diff --git a/file.txt b/file.txt
                 "diff --git a/{link}/evil.txt b/{link}/evil.txt\nnew file mode 100644\n--- /dev/null\n+++ b/{link}/evil.txt\n@@ -0,0 +1 @@\n+pwned\n"
             );
             let err = apply_checked(&repo.join(workdir), &patch).expect_err(link);
-            assert!(err.to_string().contains("symlink"), "{link}: {err}");
+            assert!(
+                err.to_string().contains("beyond a symbolic link"),
+                "{link}: {err}"
+            );
             assert!(!outside.join("evil.txt").exists(), "{link}");
         }
     }
@@ -624,7 +558,7 @@ diff --git a/file.txt b/file.txt
     #[test]
     fn apply_checked_rejects_secret_paths_before_any_apply() {
         // The path check runs before git applies anything, so no repo is
-        // needed. Before, the `--3way` fallback applied such a patch.
+        // needed.
         let patches = [
             "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+TOKEN=x\n",
             "diff --git \"a/x\\tdir/.env\" \"b/x\\tdir/.env\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/x\\tdir/.env\"\n@@ -0,0 +1 @@\n+T\n",

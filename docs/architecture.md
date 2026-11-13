@@ -155,8 +155,8 @@ the tools a role declares with `tools = [...]`
   not be a secret-bearing path. Then it runs `git apply --check` and
   applies. When the check
   fails, it repairs the line counts in the hunk headers and checks again;
-  when that fails too, it tries `git apply --3way`. Runs after a `continue`
-  or `done` verdict. Never commits.
+  there is no other fallback. Runs after a `continue` or `done` verdict.
+  Never commits.
 - `write-file`: writes `content` that starts with `file: <path>` as the
   whole file, creating it and its directories when they do not exist. Runs
   after `continue` or `done`. The path must stay in the repo and must not

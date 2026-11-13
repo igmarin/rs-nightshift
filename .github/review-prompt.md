@@ -121,9 +121,9 @@ workflow or script file inside a pipeline PR).
 - **INV-4** Writes stay inside the target repo or the artifacts directory. Every edit
   tool rejects `..`, absolute paths and secret-bearing paths (`.env`, keys, `.git/`, …).
   `apply-patch` gets the paths from `git apply --numstat` (plus `rename from` /
-  `copy from` lines) and checks them before any `git apply`, including its `--3way`
-  fallback; a path through a symlink in the working tree is refused (`--3way` would
-  write through an untracked one). `write-file` and
+  `copy from` lines) and checks them before any `git apply`; git itself refuses a path
+  through a symlink. Never add `git apply --3way` (or `--unsafe-paths`): `--3way`
+  writes through a symlink git does not track, outside the repo. `write-file` and
   `search-replace` also reject symlinks that lead outside the repo or into those paths.
 - **INV-5** Prompts receive AST slices and listed files (`context_files`), not a
   recursive tree dump.
@@ -132,7 +132,7 @@ workflow or script file inside a pipeline PR).
 - **INV-7** Parse model text before use. A reply that is not a valid envelope, or that
   was cut off at `max_tokens`, is never applied. `apply-patch` runs
   `git apply --check` first; only when that fails does it try a hunk-header repair,
-  then `git apply --3way`.
+  and nothing else.
 - **INV-8** No `unwrap` / `expect` / `panic!` / `process::exit` in library code.
 - **INV-9** Test argv is never model-supplied: it comes from `[test] command` or the
   detector.

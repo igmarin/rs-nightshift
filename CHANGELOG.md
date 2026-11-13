@@ -116,12 +116,13 @@ All notable changes to this project are documented in this file.
 - `apply-patch` refuses secret-bearing paths (`.env`, keys, `.git/`, …), as
   `write-file` and `search-replace` already did. It takes the paths from git
   (`git apply --numstat`), so deleted, binary, renamed and copied files and
-  quoted names are checked too; before, it read only the `+++` lines. The
-  check now runs before every `git apply`: before, when it failed, the
-  `git apply --3way` fallback still applied the patch, so only git's own path
-  rules applied. It also refuses a path through a symlink in the working
-  tree: `git apply --3way` writes through a symlink git does not track, so a
-  patch could write outside the repo.
+  quoted names are checked too; before, it read only the `+++` lines.
+- `apply-patch` no longer falls back to `git apply --3way`. That fallback
+  ran even when the path check had failed, wrote through a symlink git does
+  not track (so a patch could write outside the repo), staged its result in
+  the index, and could leave conflict markers in files. A patch that fails
+  `git apply --check`, also after the hunk-count repair, is now rejected,
+  and the role gets git's error as feedback.
 - A reply that the model did not finish, because it reached `max_tokens`,
   is rejected and retried with that reason. Before, the harness did not look
   at why a reply ended: it repaired the cut-off text and used it, so half an
