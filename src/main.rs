@@ -39,7 +39,9 @@ use std::process;
 
 /// The machine file to load. An explicit path is returned even when it does
 /// not exist, so a wrong `NIGHTSHIFT_MACHINE_CONFIG` fails instead of being
-/// ignored; the default path counts only when the file is there.
+/// ignored. The default path is skipped only when it does not exist: one that
+/// cannot be checked (an unreadable `~/.config`) or is not a file is returned,
+/// so reading it fails with the path named.
 fn machine_config_path_from(
     explicit: Option<PathBuf>,
     config_home: Option<PathBuf>,
@@ -51,7 +53,7 @@ fn machine_config_path_from(
     let candidate = config_home
         .or_else(|| home.map(|h| h.join(".config")))
         .map(|h| h.join("nightshift").join("machine.toml"));
-    candidate.filter(|p| p.is_file())
+    candidate.filter(|p| !matches!(p.try_exists(), Ok(false)))
 }
 
 /// [`machine_config_path_from`] with `NIGHTSHIFT_MACHINE_CONFIG`,
@@ -567,6 +569,16 @@ model = "m"
         let config_home = tmp.path().join("config");
         let result = machine_config_path_from(None, Some(config_home), None);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn machine_config_path_from_returns_a_default_path_that_is_not_a_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let machine = tmp.path().join("nightshift").join("machine.toml");
+        std::fs::create_dir_all(&machine).expect("a directory where the file should be");
+        let result = machine_config_path_from(None, Some(tmp.path().to_path_buf()), None);
+        assert_eq!(result, Some(machine.clone()));
+        assert!(read_machine_config(&machine).is_err());
     }
 
     #[test]
