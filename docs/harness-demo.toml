@@ -1,3 +1,10 @@
+# A small demo for a CPU-only Ollama machine: three roles improve the copy of a
+# one-page site, using llama3.2:3b-fast (see "Running the demo" in
+# docs/ollama.md). The developer rewrites the whole file with write-file, which
+# is fine for a small file.
+# Needs codegraph on PATH: the roles use gather-context, which runs
+# `codegraph init` in the repo when it has no index.
+
 [run]
 start = "product-owner"
 max_steps = 20

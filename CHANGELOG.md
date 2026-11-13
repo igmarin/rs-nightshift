@@ -53,6 +53,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The README and `docs/configuration.md` describe the role graph (`harness`,
+  `queue`, profiles, `bench`) first, and `docs/configuration.md` now lists
+  every `[run]` and role key. The older `nightshift run` pipeline is
+  described in `docs/legacy-run.md`. `nightshift.toml.example` now uses
+  local models, with a `mac` profile (rapid-mlx) and a `linux` profile
+  (Ollama), and a `search-replace` developer.
 - The format note a `search-replace` role gets spells each block out line by
   line (`file:`, `old:`, the old lines, `new:`, the new lines), shows a short
   example, and says never to quote the whole file. Before, it showed
