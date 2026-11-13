@@ -3,11 +3,13 @@
 use crate::application::executor::{self, RoleContext};
 use crate::domain::rolegraph::config::{NightshiftConfig, OnUnclear, RoleSpec};
 use crate::domain::rolegraph::routing::Target;
-use crate::domain::rolegraph::state::{ActionEvent, EventKind, RunStatus, StatusSnapshot};
+use crate::domain::rolegraph::state::{
+    ActionEvent, EventKind, ModelCall, RunStatus, StatusSnapshot,
+};
 use crate::domain::rolegraph::verdict::{BlockReason, Verdict};
 use crate::error::Error;
 use crate::ports::{
-    ArtifactStore, Clock, ContextProvider, ModelClientFactory, StateStore, ToolRunner,
+    ArtifactStore, Clock, ContextProvider, ModelClient, ModelClientFactory, StateStore, ToolRunner,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -147,8 +149,29 @@ where
                 },
             )
         };
+        let log_call = |call: ModelCall| -> Result<(), Error> {
+            state.append_action(
+                request.run,
+                &ActionEvent {
+                    ts: clock.now_iso(),
+                    event: EventKind::LlmCall,
+                    role: current.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    verdict: None,
+                    artifact: None,
+                    block_reason: BlockReason::None,
+                    detail: None,
+                    call: Some(call),
+                },
+            )
+        };
+        let metered = Metered {
+            inner: client.as_ref(),
+            log: log_call,
+        };
         let outcome = match executor::execute(
-            client.as_ref(),
+            &metered,
             store,
             tools,
             context_provider,
@@ -474,6 +497,45 @@ struct FailureCtx {
     provider: String,
     /// Model tag.
     model: String,
+}
+
+/// Wraps the role's [`ModelClient`]: times each call, failed ones too, and passes
+/// the time and the token counts the server reported to `log` (one `llm_call` event).
+struct Metered<'a, L> {
+    inner: &'a dyn ModelClient,
+    log: L,
+}
+
+#[async_trait::async_trait]
+impl<L> ModelClient for Metered<'_, L>
+where
+    L: Fn(ModelCall) -> Result<(), Error> + Send + Sync,
+{
+    async fn generate(&self, request: &crate::ports::GenerateRequest) -> Result<String, Error> {
+        Ok(self.generate_with_usage(request).await?.0)
+    }
+
+    async fn generate_with_usage(
+        &self,
+        request: &crate::ports::GenerateRequest,
+    ) -> Result<(String, Option<crate::ports::Usage>), Error> {
+        let started = std::time::Instant::now();
+        let reply = self.inner.generate_with_usage(request).await;
+        let usage = reply.as_ref().ok().and_then(|(_, usage)| *usage);
+        let logged = (self.log)(ModelCall {
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            prompt_tokens: usage.map(|u| u.prompt_tokens),
+            completion_tokens: usage.map(|u| u.completion_tokens),
+        });
+        // The model's error comes first; a failed log write fails a call that succeeded.
+        let reply = reply?;
+        logged?;
+        Ok(reply)
+    }
+
+    fn redacted_origin(&self) -> Option<String> {
+        self.inner.redacted_origin()
+    }
 }
 
 #[cfg(test)]
@@ -896,5 +958,118 @@ model = "phi4"
         let detail = retries[0].detail.as_deref().expect("detail");
         assert!(detail.starts_with("attempt 1 rejected: "), "{detail}");
         assert!(detail.contains("JSON"), "{detail}");
+    }
+
+    /// Replies with fixed token counts, or fails when `fail` is set.
+    struct UsageClient {
+        usage: Option<crate::ports::Usage>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::ModelClient for UsageClient {
+        async fn generate(&self, request: &crate::ports::GenerateRequest) -> Result<String, Error> {
+            Ok(self.generate_with_usage(request).await?.0)
+        }
+
+        async fn generate_with_usage(
+            &self,
+            _request: &crate::ports::GenerateRequest,
+        ) -> Result<(String, Option<crate::ports::Usage>), Error> {
+            if self.fail {
+                return Err(Error::Context("server down".into()));
+            }
+            Ok(("reply".into(), self.usage))
+        }
+    }
+
+    #[tokio::test]
+    async fn metered_logs_token_counts_and_failed_calls() {
+        let logged = Mutex::new(Vec::new());
+        let log = |call: ModelCall| -> Result<(), Error> {
+            logged.lock().expect("log").push(call);
+            Ok(())
+        };
+        let request = crate::ports::GenerateRequest {
+            model: "m".into(),
+            system: None,
+            prompt: "p".into(),
+            temperature: 0.2,
+            timeout: None,
+        };
+        let reporting = UsageClient {
+            usage: Some(crate::ports::Usage {
+                prompt_tokens: 12,
+                completion_tokens: 3,
+            }),
+            fail: false,
+        };
+        let failing = UsageClient {
+            usage: None,
+            fail: true,
+        };
+
+        let reply = Metered {
+            inner: &reporting,
+            log: &log,
+        }
+        .generate(&request)
+        .await;
+        assert_eq!(reply.expect("reply"), "reply");
+        let reply = Metered {
+            inner: &failing,
+            log: &log,
+        }
+        .generate(&request)
+        .await;
+        assert!(reply
+            .expect_err("fails")
+            .to_string()
+            .contains("server down"));
+
+        let logged = logged.into_inner().expect("log");
+        let tokens: Vec<_> = logged
+            .iter()
+            .map(|c| (c.prompt_tokens, c.completion_tokens))
+            .collect();
+        assert_eq!(tokens, [(Some(12), Some(3)), (None, None)]);
+    }
+
+    #[tokio::test]
+    async fn llm_call_events_are_logged() {
+        let cfg = config(TWO_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"continue","content":"brief"}"#);
+        factory.push(r#"{"verdict":"done","content":"patch"}"#);
+        let state = MemoryStateStore::default();
+        let _result = run_graph(
+            &factory,
+            &MemoryArtifactStore::default(),
+            &state,
+            &clock(),
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &RunRequest {
+                run: Path::new("/tmp/run/x"),
+                repo: Path::new("/repo"),
+                config: &cfg,
+                goal: "goal",
+            },
+        )
+        .await
+        .expect("run");
+        let events = state.events();
+        let llm_calls: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == EventKind::LlmCall)
+            .collect();
+        let roles: Vec<&str> = llm_calls.iter().map(|e| e.role.as_str()).collect();
+        assert_eq!(roles, ["po", "dev"]);
+        // QueueClient reports no usage, so each call has its time and no token counts.
+        for event in llm_calls {
+            let call = event.call.expect("llm_call has call");
+            assert_eq!(call.prompt_tokens, None);
+            assert_eq!(call.completion_tokens, None);
+        }
     }
 }

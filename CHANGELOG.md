@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Time and tokens per model call. Each call writes an `llm_call` event to
+  `actions.jsonl` with its time and, when the server reports them (rapid-mlx,
+  Ollama and other OpenAI-compatible servers usually do), its prompt and
+  completion token counts. The run report ends with a `Model calls`
+  section: per role, the model, the number of calls, the seconds, the
+  tokens and the completion tokens per second, or `tokens not reported`
+  (#113).
 - The run report shows `Retries: N` after the `Steps:` line when the run
   retried a role at least once.
 - The run report ends with a `Time per role` section: the seconds each role

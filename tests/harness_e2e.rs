@@ -209,11 +209,15 @@ async fn harness_runs_three_roles_retries_a_bad_reply_and_edits_the_repo() {
         events,
         [
             "role_start:po",
+            "llm_call:po",
             "role_end:po",
             "role_start:dev",
+            "llm_call:dev",
             "retry:dev",
+            "llm_call:dev",
             "role_end:dev",
             "role_start:qa",
+            "llm_call:qa",
             "role_end:qa",
             "done:qa",
         ]
