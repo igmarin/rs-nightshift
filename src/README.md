@@ -1,59 +1,61 @@
-# src — crate layout
+# src: crate layout
 
-`rs-nightshift` is a single crate: the library (`src/lib.rs`, the module list)
-plus the `nightshift` binary (`src/main.rs`). All business logic lives in the
-library; `main.rs` only parses the CLI, wires the layers together, and owns
-process exit.
+`rs-nightshift` is one crate: the library (`src/lib.rs`, the module list)
+and the `nightshift` binary (`src/main.rs`). The logic lives in the library.
+`main.rs` parses the command line, builds the adapters and owns process exit.
 
-## Hexagonal layering (ADR-007)
+## Layers (ADR-007)
 
-The role-graph harness (`nightshift harness` / `nightshift plan`) follows
-ports & adapters (hexagonal) so domain logic stays pure and every side effect
-sits behind a trait. See `docs/role-graph.md` §Hexagonal architecture and
-ADR-007 (`docs/decisions.md`).
+The role-graph harness (`nightshift harness`, `plan` and `queue`) uses ports
+and adapters, so the domain stays pure and side effects sit behind traits.
+See [Hexagonal architecture](../docs/role-graph.md#hexagonal-architecture)
+and ADR-007 in [decisions.md](../docs/decisions.md).
 
-| Layer       | Location                    | Responsibility                                                        | May do I/O? |
-| :---------- | :-------------------------- | :-------------------------------------------------------------------- | :---------- |
-| domain      | [`domain/`](domain/README.md) | role-graph config, verdicts, routing, run-state — pure data + validation | no       |
-| ports       | [`ports.rs`](ports.rs)      | the traits the application depends on (`ModelClient`, `ModelClientFactory`, `Clock`, `ArtifactStore`, `StateStore`, `ToolRunner`, `ContextProvider`) plus test doubles | no |
-| application | [`application/`](application/README.md) | the use cases: role executor, graph orchestrator, terminal report — orchestration only | no |
-| adapters    | [`adapters/`](adapters/README.md) | implementations of the ports: LLM providers + client factory, capabilities, filesystem stores, system clock | **yes — the only layer allowed** |
-| cli         | [`cli.rs`](cli.rs)          | clap argument parsing for `doctor` / `status` / `run` / `harness` / `plan` | — |
+| Layer | Location | What it holds | Does I/O? |
+| :--- | :--- | :--- | :--- |
+| domain | [`domain/`](domain/README.md) | role-graph config, verdicts, routing, run state, and their validation | no, except the config loader |
+| ports | [`ports.rs`](ports.rs) | the traits the application depends on (`ModelClient`, `ModelClientFactory`, `Clock`, `ArtifactStore`, `StateStore`, `ToolRunner`, `ContextProvider`) and test doubles | no |
+| application | [`application/`](application/README.md) | the role executor, the graph orchestrator, the terminal report | no, except reading `context_files` |
+| adapters | [`adapters/`](adapters/README.md) | the port implementations: providers and client factory, tools, context, git, test runner, file stores, clock | yes |
+| cli | [`cli.rs`](cli.rs) | clap parsing for `doctor`, `status`, `run`, `harness`, `plan`, `queue` and `bench` | no |
 
-### The rule: domain and application never do I/O
+### Domain and application do no I/O
 
-Domain and application code never touch `std::net`, `reqwest`, `tokio::fs`, or
-`std::process` directly — only through a port. Adapters are the only modules
-that import `llm-kernel` / `reqwest` or shell out to external tools (git, test
-runners, `codegraph` / `graphify`, `date`). Every port ships a test double
-(`ScriptedModelClient`, `MemoryArtifactStore`, `MemoryStateStore`,
+Domain and application code do not use `std::net`, `reqwest`, `tokio::fs` or
+`std::process`; they go through a port. Two exceptions read files:
+
+- the config loader `domain::rolegraph::config::load_role_graph_config_from`,
+  which `main.rs` calls before the application runs;
+- `application::executor`, which reads a role's `context_files` from the
+  repo.
+
+Among the role-graph layers, only adapters import `llm-kernel` or `reqwest`
+or start other programs (git, test runners, `codegraph`, `graphify`,
+`date`). Every port except `ModelClientFactory` has a test double in
+`ports.rs` (`ScriptedModelClient`, `MemoryArtifactStore`, `MemoryStateStore`,
 `StubToolRunner`, `StubContextProvider`, `FixedClock`), so the executor and
-orchestrator are unit-testable without a network, git, or a filesystem.
+the orchestrator are tested without a network, git or a filesystem.
 
-The CLI edge (`main.rs`) is where concrete adapters are selected and injected:
-it builds `ProviderFactory`, `FsArtifactStore`, `FsStateStore`, `SystemClock`,
-`CapabilityRunner`, and `GraphContextProvider`, then hands them to the
-application — the application never imports an adapter directly. The one file
-read that lives inside the hexagon is the config loader
-`domain::rolegraph::config::load_role_graph_config_from`, invoked by the edge
-before the application runs; everything else is I/O-free by construction.
+`main.rs` picks the adapters and passes them in: `ProviderFactory`,
+`FsArtifactStore`, `FsStateStore`, `SystemClock`, `CapabilityRunner` and
+`GraphContextProvider`. The application never imports an adapter.
 
-### Beyond the hexagon: legacy pipeline modules
+## Other modules
 
-Modules that predate the role graph and back the legacy
-`nightshift run` / `nightshift status` commands are still present and are being
-retired under ADR-006:
+- `queue.rs`: `nightshift queue`, which runs many harness jobs in a row.
+- `bench.rs`: `nightshift bench`, which checks a model against the harness.
+- `doctor/`: the checks of `nightshift doctor`. It does its own I/O
+  (looking up programs, HTTP requests to model servers).
+- `error/`: the crate-wide `Error` (ADR-005) and its parts:
+  `ProviderError`, `GitError`, `ConfigError` and `ArtifactError`.
 
-- `pipeline.rs`, `pm.rs`, `techlead.rs`, `qa.rs`, `writer.rs` — the fixed
-  PM → TechLead → Dev → QA → Writer orchestration.
-- `models.rs`, `artifacts/`, `doctor/` — legacy role-model config, artifact
-  store + QA-report handling, and host checks (`doctor` now validates the
-  *configured* role graph instead of the fixed model tags).
-- Shared primitives reused by the adapters (and by the legacy pipeline):
-  `ollama.rs` (`OllamaClient` + URL validation/redaction), `generate.rs`
-  (`map_kernel_error`), `adapters/context.rs` (codegraph/graphify gather),
-  `testrun.rs` (test-command detection + runner), `dev.rs` (`apply_checked`).
-- `error.rs` — the single crate-wide `Error` enum (ADR-005).
+The legacy pipeline behind `nightshift run` and `nightshift status` is still
+here, to be retired (ADR-006). It does its own I/O:
 
-These legacy modules do their own I/O; the hexagonal rule applies to the
-role-graph layers (`domain` / `ports` / `application` / `adapters`).
+- `pipeline.rs`, `pm.rs`, `techlead.rs`, `dev.rs`, `qa.rs`, `writer.rs`: the
+  fixed PM → Tech Lead → Dev → QA → Writer stages.
+- `models.rs`: the `Role` enum and the `[role_models]` table.
+- `artifacts/`: the legacy run directory, its `latest` pointer and the QA
+  report.
+- `generate.rs`: text generation over llm-kernel's `LLMClient`. The Ollama
+  provider adapter also uses its `Origin`.
