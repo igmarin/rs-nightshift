@@ -74,6 +74,8 @@ machine, say so in the PR.
    [the PR template](.github/pull_request_template.md). CI runs on drafts.
 5. When CI is green, mark it ready: `gh pr ready`. That starts the ocr review
    (OpenAI `gpt-6-luna`, findings posted inline by `github-actions[bot]`).
+   A PR from a fork gets no secrets, so ocr does not run on it: the owner
+   reviews it by hand.
 6. Fix or answer every critical and high finding, reply on each thread, and
    resolve it. After pushing fixes, review the new head with
    `gh pr ready --undo && gh pr ready`; re-running the old job reviews the
