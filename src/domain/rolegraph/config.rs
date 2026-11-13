@@ -305,6 +305,22 @@ impl NightshiftConfig {
             .collect()
     }
 
+    /// Check the `[providers.*]` settings alone, for `bench`, which has no
+    /// role graph to validate. The URL and API key rules are checked when the
+    /// provider is built.
+    pub fn validate_providers(&self) -> Result<(), Error> {
+        if let Some((name, _)) = self
+            .providers
+            .iter()
+            .find(|(name, spec)| spec.keep_loaded && name.as_str() != "ollama")
+        {
+            return Err(Error::RoleGraph(format!(
+                "provider {name:?}: keep_loaded applies only to [providers.ollama]"
+            )));
+        }
+        Ok(())
+    }
+
     /// Validate the graph's internal consistency.
     ///
     /// Semantic errors use [`Error::RoleGraph`] so the operator gets a clear,
@@ -326,15 +342,7 @@ impl NightshiftConfig {
         if self.run.max_steps == 0 {
             return Err(Error::RoleGraph("max_steps must be at least 1".into()));
         }
-        if let Some((name, _)) = self
-            .providers
-            .iter()
-            .find(|(name, spec)| spec.keep_loaded && name.as_str() != "ollama")
-        {
-            return Err(Error::RoleGraph(format!(
-                "provider {name:?}: keep_loaded applies only to [providers.ollama]"
-            )));
-        }
+        self.validate_providers()?;
         for role in &self.roles {
             if role.timeout_secs == Some(0) {
                 return Err(Error::RoleGraph(format!(
@@ -1382,6 +1390,19 @@ coder = { provider = "mlx", model = "qwen3.6-35b-4bit" }
         let slot = config.model_slot(Some("mac"), "coder").expect("slot");
         assert_eq!(slot.model, "qwen3.6-35b-4bit");
         assert!(config.model_slot(None, "coder").is_err());
+        config.validate_providers().expect("valid providers");
+
+        let machine: MachineConfig = toml::from_str(
+            "[providers.mlx]\nbackend = \"openai-compatible\"\nkeep_loaded = true\n",
+        )
+        .expect("machine file");
+        let err = NightshiftConfig::from(machine)
+            .validate_providers()
+            .expect_err("keep_loaded on mlx");
+        assert!(
+            err.to_string().contains("keep_loaded applies only"),
+            "{err}"
+        );
     }
 
     #[test]

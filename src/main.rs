@@ -183,6 +183,9 @@ async fn real_main() -> anyhow::Result<()> {
                     None => cfg = Some(machine.into()),
                 }
             }
+            if let Some(cfg) = &cfg {
+                cfg.validate_providers()?;
+            }
             let (provider, model, options) = match model.strip_prefix('@') {
                 Some(slot_name) => {
                     if provider.is_some() {
