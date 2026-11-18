@@ -85,8 +85,10 @@ Rules:
   loop-backs.
 - Embedding-based retrieval.
 - Reusing Cline's auth or `@cline/sdk` orchestration (after the beta).
-- Resuming a run after a crash. Each run starts fresh; `nightshift queue`
-  restarts unfinished jobs from the beginning.
+- Resuming a model call midway. `nightshift harness --resume` continues at a
+  role boundary; a role that was running when the process died runs again
+  from its start. `nightshift queue` still restarts unfinished jobs from the
+  beginning.
 - Publishing to crates.io (ADR-001).
 
 ## Config shape
@@ -235,7 +237,8 @@ Each run writes into `<out>/{date}_{slug}-run-{timestamp}/`:
 
 - `state.json`: the status snapshot: current role, loop counters per edge,
   steps, last verdict, status (`running`, `done`, `blocked`, `failed`) and
-  `block_reason`. It is not used to resume a run.
+  `block_reason`. While `running`, it is the checkpoint `harness --resume`
+  continues from (see the architecture doc).
 - `actions.jsonl`: append-only, one JSON object per event:
   `{ts, event, role, provider, model, verdict, artifact, block_reason, detail, call}`.
   The events are `role_start`, `llm_call`, `retry`, `role_end`, `loop`,

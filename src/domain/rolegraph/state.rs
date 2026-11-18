@@ -38,6 +38,8 @@ pub enum EventKind {
     RoleEnd,
     /// A loop back-edge was taken.
     Loop,
+    /// The run was resumed from its last checkpoint after an interruption.
+    Resumed,
     /// The run halted for human review.
     Halt,
     /// The run finished successfully.
@@ -89,10 +91,14 @@ pub struct ModelCall {
     pub completion_tokens: Option<u32>,
 }
 
-/// Resumable snapshot of where a run stands.
+/// Checkpoint of where a run stands, rewritten before each role starts.
+///
+/// While `status` is `running`, `current_role` is the role the run runs next,
+/// and the other fields are what that role starts with, so `--resume` can
+/// continue from it. A finished run records the role that ended it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusSnapshot {
-    /// The role currently executing, or `None` before start / after terminal.
+    /// The role to run next (or the role that ended the run), if any.
     pub current_role: Option<String>,
     /// Total role executions so far.
     pub steps: u32,
@@ -104,7 +110,7 @@ pub struct StatusSnapshot {
     /// Why the run halted/failed, when `status` is `blocked` or `failed`.
     #[serde(default)]
     pub block_reason: BlockReason,
-    /// Hash of the config the run started with, for resume validation.
+    /// Fingerprint of the config the run started with, for resume validation.
     #[serde(default)]
     pub config_hash: String,
     /// Git HEAD of the target repo at the start of the run, for resume validation.
@@ -112,6 +118,66 @@ pub struct StatusSnapshot {
     /// Per back-edge loop counts, keyed by `"role:target"`.
     #[serde(default)]
     pub loop_counters: BTreeMap<String, u32>,
+    /// The operator's goal, so a resume needs no `--goal`.
+    #[serde(default)]
+    pub goal: String,
+    /// Role output files written so far, injected into later prompts.
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    /// Findings a loop-back carries into `current_role`.
+    #[serde(default)]
+    pub findings: Vec<String>,
+    /// Clarifying questions a loop-back carries into `current_role`.
+    #[serde(default)]
+    pub questions: Vec<String>,
+}
+
+impl StatusSnapshot {
+    /// The config and repo state this run recorded when it started.
+    #[must_use]
+    pub fn identity(&self) -> RunIdentity {
+        RunIdentity {
+            config_hash: self.config_hash.clone(),
+            repo_head: self.repo_head.clone(),
+        }
+    }
+}
+
+/// The config and target-repo state a run starts with. A resume must match it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunIdentity {
+    /// Fingerprint of the config (and profile) the run started with.
+    pub config_hash: String,
+    /// The target repo's `HEAD` when the run started, if it has one.
+    pub repo_head: Option<String>,
+}
+
+impl RunIdentity {
+    /// One sentence per way `current` differs from this recorded identity.
+    /// Empty when the run may continue.
+    #[must_use]
+    pub fn mismatches(&self, current: &RunIdentity) -> Vec<String> {
+        let mut found = Vec::new();
+        if self.config_hash.is_empty() {
+            found.push(
+                "the run did not record its config (it started before resume was supported)"
+                    .to_string(),
+            );
+        } else if self.config_hash != current.config_hash {
+            found.push(format!(
+                "the config changed since the run started (recorded hash {}, now {})",
+                self.config_hash, current.config_hash
+            ));
+        }
+        if self.repo_head != current.repo_head {
+            found.push(format!(
+                "the target repo HEAD changed (recorded {}, now {})",
+                self.repo_head.as_deref().unwrap_or("none"),
+                current.repo_head.as_deref().unwrap_or("none")
+            ));
+        }
+        found
+    }
 }
 
 #[cfg(test)]
@@ -220,8 +286,12 @@ mod tests {
             status: RunStatus::Running,
             block_reason: BlockReason::None,
             loop_counters: BTreeMap::from([("qa:developer".into(), 2)]),
-            config_hash: String::new(),
-            repo_head: None,
+            config_hash: "c1".into(),
+            repo_head: Some("abc".into()),
+            goal: "add /health".into(),
+            artifacts: vec!["01_brief.md".into()],
+            findings: vec!["fix the test".into()],
+            questions: vec!["which port?".into()],
         };
         let json = serde_json::to_string(&snap).expect("serialize");
         let round: StatusSnapshot = serde_json::from_str(&json).expect("deserialize");
@@ -230,11 +300,74 @@ mod tests {
 
     #[test]
     fn status_snapshot_without_resume_fields_still_parses() {
-        // A snapshot written before config_hash and repo_head existed.
+        // A snapshot written before the resume fields existed.
         let json = r#"{"current_role":null,"steps":1,"status":"running","block_reason":"none"}"#;
         let snap: StatusSnapshot = serde_json::from_str(json).expect("old snapshot parses");
         assert_eq!(snap.config_hash, "");
         assert_eq!(snap.repo_head, None);
         assert!(snap.loop_counters.is_empty());
+        assert_eq!(snap.goal, "");
+        assert!(snap.artifacts.is_empty());
+        assert!(snap.findings.is_empty());
+        assert!(snap.questions.is_empty());
+    }
+
+    #[test]
+    fn identity_matches_when_config_and_head_are_unchanged() {
+        let recorded = RunIdentity {
+            config_hash: "c1".into(),
+            repo_head: Some("abc".into()),
+        };
+        assert!(recorded.mismatches(&recorded.clone()).is_empty());
+    }
+
+    #[test]
+    fn identity_names_a_changed_config() {
+        let recorded = RunIdentity {
+            config_hash: "c1".into(),
+            repo_head: Some("abc".into()),
+        };
+        let now = RunIdentity {
+            config_hash: "c2".into(),
+            repo_head: Some("abc".into()),
+        };
+        let found = recorded.mismatches(&now);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("config changed"), "{found:?}");
+        assert!(
+            found[0].contains("c1") && found[0].contains("c2"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn identity_names_a_moved_head_and_reports_both_changes() {
+        let recorded = RunIdentity {
+            config_hash: "c1".into(),
+            repo_head: Some("abc".into()),
+        };
+        let now = RunIdentity {
+            config_hash: "c2".into(),
+            repo_head: None,
+        };
+        let found = recorded.mismatches(&now);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[1].contains("HEAD changed"), "{found:?}");
+        assert!(
+            found[1].contains("abc") && found[1].contains("none"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn identity_from_a_run_that_recorded_no_config_is_a_mismatch() {
+        let recorded = RunIdentity::default();
+        let now = RunIdentity {
+            config_hash: "c1".into(),
+            repo_head: None,
+        };
+        let found = recorded.mismatches(&now);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("did not record"), "{found:?}");
     }
 }

@@ -463,3 +463,131 @@ async fn queue_keeps_going_blocks_dirty_repos_and_skips_done_jobs_on_restart() {
         text(&second.stderr)
     );
 }
+
+/// A two-role graph with no tools: `po` writes a brief, `qa` signs it off.
+const TWO_ROLES: &str = r#"
+[run]
+start = "po"
+max_steps = 6
+
+[[roles]]
+id = "po"
+provider = "fake"
+model = "fake-planner"
+prompt = "You are the Product Owner."
+output = "01_brief.md"
+on = { continue = "qa" }
+
+[[roles]]
+id = "qa"
+provider = "fake"
+model = "fake-planner"
+prompt = "You are QA."
+output = "03_qa.md"
+"#;
+
+/// `harness --resume <run dir>` with the same config and repo the run used.
+fn resume_args(run: &Path, config: &Path, repo: &Path) -> Vec<String> {
+    vec![
+        "harness".into(),
+        "--resume".into(),
+        run.display().to_string(),
+        "--config".into(),
+        config.display().to_string(),
+        "--repo".into(),
+        repo.display().to_string(),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_resume_finishes_a_finished_run_and_continues_a_crashed_one() {
+    let server = MockServer::start().await;
+    reply(&server, &envelope("continue", "The brief.")).await;
+    reply(&server, &envelope("done", "Signed off.")).await;
+    // Used only by the resume after the simulated crash.
+    reply(&server, &envelope("done", "Signed off again.")).await;
+
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    let out = work.path().join("artifacts");
+    let config = write_config(work.path(), &server, TWO_ROLES);
+    let original = fs::read_to_string(&config).expect("config");
+
+    let first = nightshift(vec![
+        "harness".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Greet the world".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    assert!(first.status.success(), "{}", text(&first.stderr));
+    let run = run_dir(&out);
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+
+    // A finished run resumes to its status: exit 0, no model call.
+    let finished = nightshift(resume_args(&run, &config, repo.path())).await;
+    assert!(finished.status.success(), "{}", text(&finished.stderr));
+    assert!(
+        text(&finished.stdout).contains("Status: PASSED"),
+        "{}",
+        text(&finished.stdout)
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+
+    // Simulate a crash just before qa: the checkpoint says qa is next, one step done.
+    let state_path = run.join("state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("state")).expect("json");
+    state["status"] = "running".into();
+    state["current_role"] = "qa".into();
+    state["steps"] = 1.into();
+    fs::write(&state_path, state.to_string()).expect("write state");
+
+    // A changed config is refused before any model call.
+    fs::write(&config, format!("{original}\n# edited after the run\n")).expect("edit config");
+    let refused = nightshift(resume_args(&run, &config, repo.path())).await;
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains("config changed"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+
+    // With the config restored, only qa runs.
+    fs::write(&config, &original).expect("restore config");
+    let resumed = nightshift(resume_args(&run, &config, repo.path())).await;
+    assert!(resumed.status.success(), "{}", text(&resumed.stderr));
+    assert!(
+        text(&resumed.stdout).contains("Status: PASSED"),
+        "{}",
+        text(&resumed.stdout)
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 3);
+    let actions = fs::read_to_string(run.join("actions.jsonl")).expect("actions");
+    assert!(actions.contains("\"event\":\"resumed\""), "{actions}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_force_resume_without_resume_is_refused() {
+    let output = nightshift(vec![
+        "harness".into(),
+        "--goal".into(),
+        "x".into(),
+        "--repo".into(),
+        ".".into(),
+        "--force-resume".into(),
+    ])
+    .await;
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stderr).contains("--force-resume only applies with --resume"),
+        "{}",
+        text(&output.stderr)
+    );
+}

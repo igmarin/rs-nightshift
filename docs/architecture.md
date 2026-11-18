@@ -90,6 +90,28 @@ the report says why (`ill_defined_task`, `tool_failure`,
 
 Exit codes: `0` PASSED, `1` FAILED, `2` REQUIRES_HUMAN_REVIEW.
 
+### `nightshift harness --resume`: continue an interrupted run
+
+```text
+nightshift harness --resume artifacts/2026-11-18_add-health-run-x \
+                   --repo ~/projects/my-app [--config nightshift.toml]
+```
+
+Continues a run that a crash, reboot or power cut stopped, from the last
+checkpoint: the next role runs with the same step and loop counters, so
+`run.max_steps` and `max_loop` still hold. The goal comes from the run's
+`state.json`, so `--goal` and `--name` are not accepted. Before it
+continues, it refuses when the config file (its bytes and the profile) or the
+target repo's `HEAD` differs from what the run recorded at its start, and it
+names the difference; `--force-resume` continues anyway. Each resume appends
+a `resumed` event to `actions.jsonl`.
+
+A run that already finished (`done`, `blocked` or `failed`) is not run again:
+the command prints its report and exits `0`, without calling a model. A role
+that was running when the process died runs again from its start. If it had
+already edited the repo before the crash, nothing undoes that edit, and the
+role may fail on the edited tree: check the repo before you resume.
+
 ### `nightshift queue`: many runs in a row
 
 Runs the jobs of a queue file one after another, each like `harness`, and
@@ -174,7 +196,7 @@ the tools a role declares with `tools = [...]`
 Each run persists, under its run directory:
 
 - `actions.jsonl` — the append-only action log, one JSON object per event:
-  `role_start`, `llm_call`, `retry`, `role_end`, `loop`, and the terminal
+  `role_start`, `llm_call`, `retry`, `role_end`, `loop`, `resumed`, and the terminal
   `done` / `fail` / `halt`, carrying timestamp, role, provider/model,
   verdict, artifact, and block reason. A `retry` event also carries `detail`
   (the attempt number and why the reply was rejected). Each model call,
@@ -182,9 +204,11 @@ Each run persists, under its run directory:
   time in milliseconds and, when the server reports them, its prompt and
   completion token counts.
 - `state.json` — the status snapshot: current role, step count, last verdict,
-  status (`running` / `done` / `blocked` / `failed`), block reason, and
-  per-edge loop counters. Written via temp-file + rename so an interruption
-  never truncates it.
+  status (`running` / `done` / `blocked` / `failed`), block reason, per-edge
+  loop counters, the goal, the role outputs so far, the config fingerprint and
+  the repo `HEAD` at the start. While `running` it is rewritten before each
+  role starts, so it is the checkpoint `harness --resume` continues from.
+  Written via temp-file + rename so an interruption never truncates it.
 
 Role outputs (the `output = "…"` files from config, such as `01_brief.md`)
 land in the same run directory. At the end, `nightshift harness` prints the

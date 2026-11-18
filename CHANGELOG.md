@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `nightshift harness --resume <run-dir>` continues a run that a crash,
+  reboot or power cut stopped, from its last completed role, with the same
+  step and loop counters. It refuses when the config or the target repo's
+  `HEAD` changed since the run started (`--force-resume` overrides). A
+  finished run resumed this way prints its report and exits 0 without
+  calling a model. Each run records its config fingerprint and repo `HEAD`
+  in `state.json` from its first role on (#111).
 - A machine file, `~/.config/nightshift/machine.toml` (or
   `$XDG_CONFIG_HOME/nightshift/machine.toml`, or `NIGHTSHIFT_MACHINE_CONFIG`),
   holds one machine's `[providers.*]` and `[profiles.*]` outside the repo.

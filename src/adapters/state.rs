@@ -12,6 +12,23 @@ pub const ACTIONS_FILE: &str = "actions.jsonl";
 /// Status-snapshot file name under the run directory.
 pub const SNAPSHOT_FILE: &str = "state.json";
 
+/// Fingerprint of the config a run starts with: FNV-1a (64-bit) over the config
+/// file's bytes and the profile name. It is stable across builds, so a resume
+/// can compare it. It detects edits; it is not a cryptographic hash.
+#[must_use]
+pub fn config_fingerprint(config: &[u8], profile: Option<&str>) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    let profile_part = format!("\0profile={}", profile.unwrap_or(""));
+    let hash = config
+        .iter()
+        .chain(profile_part.as_bytes())
+        .fold(OFFSET, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+        });
+    format!("{hash:016x}")
+}
+
 /// Append-only JSONL action log plus a JSON status snapshot, under a run dir.
 ///
 /// Each [`append_action`](StateStore::append_action) call appends one line of
@@ -187,9 +204,23 @@ mod tests {
             loop_counters: std::collections::BTreeMap::new(),
             config_hash: String::new(),
             repo_head: None,
+            goal: String::new(),
+            artifacts: Vec::new(),
+            findings: Vec::new(),
+            questions: Vec::new(),
         };
         store.write_snapshot(tmp.path(), &snap).expect("write");
         assert_eq!(store.read_snapshot(tmp.path()).expect("read"), snap);
+    }
+
+    #[test]
+    fn config_fingerprint_is_stable_and_sees_bytes_and_profile() {
+        let base = config_fingerprint(b"[run]\n", Some("mac"));
+        assert_eq!(base, config_fingerprint(b"[run]\n", Some("mac")));
+        assert_ne!(base, config_fingerprint(b"[run] \n", Some("mac")));
+        assert_ne!(base, config_fingerprint(b"[run]\n", Some("linux")));
+        assert_ne!(base, config_fingerprint(b"[run]\n", None));
+        assert_eq!(base.len(), 16, "{base}");
     }
 
     #[test]

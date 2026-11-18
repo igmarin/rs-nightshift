@@ -5,9 +5,9 @@ use rs_nightshift::adapters::artifact_store::FsArtifactStore;
 use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
 use rs_nightshift::adapters::context::PathProbe;
-use rs_nightshift::adapters::git::working_tree_dirty;
+use rs_nightshift::adapters::git::{head_commit, working_tree_dirty};
 use rs_nightshift::adapters::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
-use rs_nightshift::adapters::state::FsStateStore;
+use rs_nightshift::adapters::state::{config_fingerprint, FsStateStore};
 use rs_nightshift::adapters::test::ProcessTestRunner;
 use rs_nightshift::adapters::ProviderFactory;
 use rs_nightshift::application::executor::{execute, ExecuteParams, RoleContext};
@@ -22,7 +22,7 @@ use rs_nightshift::doctor::{
 use rs_nightshift::domain::rolegraph::config::{
     load_role_graph_config_from, read_config, read_machine_config, NightshiftConfig,
 };
-use rs_nightshift::domain::rolegraph::state::RunStatus;
+use rs_nightshift::domain::rolegraph::state::{RunIdentity, RunStatus};
 use rs_nightshift::domain::rolegraph::verdict::{BlockReason, Verdict};
 use rs_nightshift::error::Error;
 use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest};
@@ -259,11 +259,58 @@ async fn real_main() -> anyhow::Result<()> {
             out,
             name,
             repo,
+            resume,
+            force_resume,
         } => {
-            let (cfg, run_dir) =
-                prepare_run(&config, profile.as_deref(), &goal, &out, name.as_deref())?;
-            let (result, report) = execute_run(&cfg, &run_dir, &repo, &goal, &out).await?;
+            if force_resume && resume.is_none() {
+                return Err(anyhow::anyhow!("--force-resume only applies with --resume"));
+            }
+            let (cfg, run_dir, goal, identity, checkpoint) = match resume {
+                Some(run_dir) => {
+                    let checkpoint = FsStateStore::new().read_snapshot(&run_dir)?;
+                    let cfg = load_config(&config, profile.as_deref())?;
+                    let identity = run_identity(&config, profile.as_deref(), &repo)?;
+                    (
+                        cfg,
+                        run_dir,
+                        checkpoint.goal.clone(),
+                        identity,
+                        Some(checkpoint),
+                    )
+                }
+                None => {
+                    let goal = goal.ok_or_else(|| {
+                        anyhow::anyhow!("--goal is required unless --resume is given")
+                    })?;
+                    let (cfg, run_dir, identity) = prepare_run(
+                        &config,
+                        profile.as_deref(),
+                        &goal,
+                        &repo,
+                        &out,
+                        name.as_deref(),
+                    )?;
+                    (cfg, run_dir, goal, identity, None)
+                }
+            };
+            // A run that already finished resumes to its status: no model call, exit 0.
+            let finished = checkpoint
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.status != RunStatus::Running);
+            let request = RunRequest {
+                run: &run_dir,
+                repo: &repo,
+                config: &cfg,
+                goal: &goal,
+                identity,
+                resume: checkpoint,
+                force_resume,
+            };
+            let (result, report) = execute_run(&out, &request).await?;
             writeln!(io::stdout(), "{report}")?;
+            if finished {
+                process::exit(0);
+            }
             process::exit(match result.status {
                 RunStatus::Done => 0,
                 RunStatus::Failed => 1,
@@ -380,25 +427,33 @@ fn prepare_run(
     config: &Path,
     profile: Option<&str>,
     goal: &str,
+    repo: &Path,
     out: &Path,
     name: Option<&str>,
-) -> Result<(NightshiftConfig, PathBuf), Error> {
+) -> Result<(NightshiftConfig, PathBuf, RunIdentity), Error> {
     let cfg = load_config(config, profile)?;
     writeln!(io::stderr(), "{}", describe_models(&cfg))?;
+    let identity = run_identity(config, profile, repo)?;
     let clock = SystemClock;
     let slug = run_slug(&clock, name, goal, "run");
     let run_dir = FsArtifactStore::new(out).create_run(&clock.today(), &slug)?;
-    Ok((cfg, run_dir))
+    Ok((cfg, run_dir, identity))
 }
 
-/// Walk the role graph in `run_dir`; returns the result and the morning report.
-async fn execute_run(
-    cfg: &NightshiftConfig,
-    run_dir: &Path,
-    repo: &Path,
-    goal: &str,
-    out: &Path,
-) -> Result<(RunResult, String), Error> {
+/// The config and target-repo state a run records at its start. A resume
+/// refuses to continue when either has changed.
+fn run_identity(config: &Path, profile: Option<&str>, repo: &Path) -> Result<RunIdentity, Error> {
+    let bytes = std::fs::read(config)?;
+    Ok(RunIdentity {
+        config_hash: config_fingerprint(&bytes, profile),
+        // A repo with no commit yet (or no git at all) has no HEAD to record.
+        repo_head: head_commit(repo).ok(),
+    })
+}
+
+/// Walk the role graph in the request's run directory; returns the result and
+/// the morning report.
+async fn execute_run(out: &Path, request: &RunRequest<'_>) -> Result<(RunResult, String), Error> {
     let state = FsStateStore::new();
     let result = run_graph(
         &ProviderFactory,
@@ -407,19 +462,14 @@ async fn execute_run(
         &SystemClock,
         &CapabilityRunner::new(),
         &GraphContextProvider,
-        &RunRequest {
-            run: run_dir,
-            repo,
-            config: cfg,
-            goal,
-        },
+        request,
     )
     .await?;
-    let snapshot = state.read_snapshot(run_dir)?;
-    let events = state.read_actions(run_dir)?;
+    let snapshot = state.read_snapshot(request.run)?;
+    let events = state.read_actions(request.run)?;
     let report = render_report(&snapshot, &events);
     // Kept with the run: a queue run prints it only to its log.
-    std::fs::write(run_dir.join(RUN_REPORT_FILE), format!("{report}\n"))?;
+    std::fs::write(request.run.join(RUN_REPORT_FILE), format!("{report}\n"))?;
     Ok((result, report))
 }
 
@@ -450,12 +500,27 @@ impl JobHost for HarnessHost {
         };
         let config = job.config.as_deref().unwrap_or(&self.config);
         let profile = job.profile.as_deref().or(self.profile.as_deref());
-        let (cfg, run_dir) =
-            match prepare_run(config, profile, &job.goal, &self.out, job.name.as_deref()) {
-                Ok(prepared) => prepared,
-                Err(error) => return failed(error, None),
-            };
-        match execute_run(&cfg, &run_dir, &job.repo, &job.goal, &self.out).await {
+        let (cfg, run_dir, identity) = match prepare_run(
+            config,
+            profile,
+            &job.goal,
+            &job.repo,
+            &self.out,
+            job.name.as_deref(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return failed(error, None),
+        };
+        let request = RunRequest {
+            run: &run_dir,
+            repo: &job.repo,
+            config: &cfg,
+            goal: &job.goal,
+            identity,
+            resume: None,
+            force_resume: false,
+        };
+        match execute_run(&self.out, &request).await {
             Ok((result, report)) => {
                 // Next to the queue's own progress lines, which go to stderr.
                 eprintln!("{report}");

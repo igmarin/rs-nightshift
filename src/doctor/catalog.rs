@@ -181,6 +181,7 @@ pub(crate) mod tests {
                     }))
                 }
                 Err(Error::RoleGraph(msg)) => Err(Error::RoleGraph(msg.clone())),
+                Err(Error::Resume(msg)) => Err(Error::Resume(msg.clone())),
                 Err(Error::Provider(ProviderError::InvalidOllamaUrl { url })) => {
                     Err(Error::from(ProviderError::InvalidOllamaUrl {
                         url: url.clone(),
