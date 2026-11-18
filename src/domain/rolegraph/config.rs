@@ -95,7 +95,7 @@ pub struct RoleSpec {
     /// Model tag/variant passed through to the provider verbatim, or
     /// `@slot` to take provider, model and options from the selected profile.
     pub model: String,
-    /// Model-specific options (temperature, think, max_tokens, …).
+    /// Model-specific options (temperature, think, `max_tokens`, …).
     #[serde(default)]
     pub options: BTreeMap<String, toml::Value>,
     /// The role's job prompt.

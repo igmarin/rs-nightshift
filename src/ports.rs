@@ -269,7 +269,7 @@ impl StateStore for MemoryStateStore {
 /// about adapters. The adapters layer implements it.
 pub trait ModelClientFactory: Send + Sync {
     /// Build a client for `provider`, honoring `spec` (base URL / key env) and
-    /// `options` (temperature, max_tokens, think, …).
+    /// `options` (temperature, `max_tokens`, think, …).
     fn build(
         &self,
         provider: &str,

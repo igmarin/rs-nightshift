@@ -473,9 +473,9 @@ fn record_failure<S: StateStore, K: Clock>(
         &ActionEvent {
             ts: clock.now_iso(),
             event: EventKind::Fail,
-            role: ctx.current.to_string(),
-            provider: ctx.provider.to_string(),
-            model: ctx.model.to_string(),
+            role: ctx.current.clone(),
+            provider: ctx.provider.clone(),
+            model: ctx.model.clone(),
             verdict: None,
             artifact: None,
             block_reason: reason,
@@ -486,7 +486,7 @@ fn record_failure<S: StateStore, K: Clock>(
     state.write_snapshot(
         run,
         &StatusSnapshot {
-            current_role: Some(ctx.current.to_string()),
+            current_role: Some(ctx.current.clone()),
             steps,
             last_verdict: None,
             status: RunStatus::Failed,

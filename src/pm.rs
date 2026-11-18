@@ -88,20 +88,19 @@ pub async fn write_user_story<G: LLMClient>(
         ROLE_TEMPERATURE,
     )
     .await?;
-    let markdown = match validate_user_story(&draft) {
-        Ok(()) => draft,
-        Err(_) => {
-            let missing = missing_user_story_headings(&draft);
-            let repaired = complete_text(
-                generator,
-                &model_for(Role::Router),
-                &repair_prompt(&draft, &missing),
-                ROLE_TEMPERATURE,
-            )
-            .await?;
-            validate_user_story(&repaired)?;
-            repaired
-        }
+    let markdown = if let Ok(()) = validate_user_story(&draft) {
+        draft
+    } else {
+        let missing = missing_user_story_headings(&draft);
+        let repaired = complete_text(
+            generator,
+            &model_for(Role::Router),
+            &repair_prompt(&draft, &missing),
+            ROLE_TEMPERATURE,
+        )
+        .await?;
+        validate_user_story(&repaired)?;
+        repaired
     };
     std::fs::write(run.path.join(USER_STORY_FILE), markdown)?;
     Ok(())

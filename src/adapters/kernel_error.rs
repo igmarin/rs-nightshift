@@ -20,6 +20,7 @@ use llm_kernel::error::KernelError;
 /// Callers in `Result<_, Error>` contexts lift the returned `ProviderError`
 /// into the top-level [`crate::error::Error`] automatically via `?` (the
 /// `#[from]` impl on `enum@Error`'s `Provider` variant).
+#[must_use]
 pub fn map_kernel_error(error: KernelError, model: &str) -> ProviderError {
     match error {
         KernelError::Timeout(_) => ProviderError::Timeout,
@@ -50,6 +51,7 @@ pub fn complete_text(response: llm_kernel::llm::LLMResponse) -> Result<String, P
 /// Returns `None` when both `prompt_tokens` and `completion_tokens` are zero
 /// (the kernel fills zeros when the server sends no usage information),
 /// otherwise returns `Some` with the reported counts.
+#[must_use]
 pub fn usage(response: &llm_kernel::llm::LLMResponse) -> Option<crate::ports::Usage> {
     if response.usage.prompt_tokens == 0 && response.usage.completion_tokens == 0 {
         None

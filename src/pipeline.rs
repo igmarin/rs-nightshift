@@ -244,6 +244,7 @@ pub fn local_date() -> Result<String, Error> {
 }
 
 /// True when `repo` is an existing directory.
+#[must_use]
 pub fn repo_exists(repo: &Path) -> bool {
     repo.is_dir()
 }

@@ -37,7 +37,7 @@ pub enum Role {
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ModelsConfig {
     /// Role-to-model mappings that override the defaults.
-    /// Format: role_name = "model_tag"
+    /// Format: `role_name` = "`model_tag`"
     #[serde(default)]
     pub role_models: BTreeMap<String, String>,
 }
@@ -59,8 +59,7 @@ fn role_name(role: Role) -> &'static str {
 #[must_use]
 pub fn config_path() -> PathBuf {
     std::env::var("NIGHTSHIFT_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("nightshift.toml"))
+        .map_or_else(|_| PathBuf::from("nightshift.toml"), PathBuf::from)
 }
 
 /// Whether `NIGHTSHIFT_CONFIG` was explicitly set by the operator.
@@ -134,6 +133,7 @@ pub fn model_for_with_config(role: Role, config: &ModelsConfig) -> String {
 }
 
 /// Model tag assigned to a role, reading from nightshift.toml with fallback to defaults.
+#[must_use]
 pub fn model_for(role: Role) -> String {
     model_for_with_config(role, &load_models_config())
 }

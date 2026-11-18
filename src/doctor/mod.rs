@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Run readiness checks against the role graph, injected catalogs, and host.
 ///
-/// `catalog` lists Ollama models; `providers` probes every other (OpenAI-
+/// `catalog` lists Ollama models; `providers` probes every other (`OpenAI`-
 /// compatible) provider a role uses.
 pub async fn run_doctor<C, P, H>(
     config: &NightshiftConfig,
@@ -208,9 +208,10 @@ async fn push_provider_checks<P: ProviderCatalog>(
         );
     };
     // Scheme, host and port only: a path segment could carry a token.
-    let origin = reqwest::Url::parse(&base_url)
-        .map(|url| url.origin().ascii_serialization())
-        .unwrap_or_else(|_| "<invalid base_url>".into());
+    let origin = reqwest::Url::parse(&base_url).map_or_else(
+        |_| "<invalid base_url>".into(),
+        |url| url.origin().ascii_serialization(),
+    );
     // Probe with the same bearer token the run client sends.
     let token = api_key
         .as_deref()
