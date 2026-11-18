@@ -223,7 +223,7 @@ async fn real_main() -> anyhow::Result<()> {
                 "{}",
                 render_bench_report(&report, origin.as_deref())
             )?;
-            process::exit(if report.all_passed() { 0 } else { 1 });
+            process::exit(i32::from(!report.all_passed()));
         }
         Command::Run {
             goal,
@@ -284,7 +284,7 @@ async fn real_main() -> anyhow::Result<()> {
             };
             let state = run_queue(&host, &queue.jobs, &out, stop_on_failure).await?;
             writeln!(io::stdout(), "{}", render_queue_report(&state))?;
-            process::exit(if state.all_done() { 0 } else { 1 });
+            process::exit(i32::from(!state.all_done()));
         }
         Command::Plan {
             goal,
@@ -367,7 +367,7 @@ async fn real_main() -> anyhow::Result<()> {
             };
             writeln!(io::stdout(), "{}", outcome.output.summary)?;
             if let Some(artifact) = &outcome.artifact {
-                writeln!(io::stdout(), "Wrote {}", artifact)?;
+                writeln!(io::stdout(), "Wrote {artifact}")?;
             }
             process::exit(0);
         }
@@ -496,12 +496,12 @@ fn describe_models(cfg: &NightshiftConfig) -> String {
 /// distinguishes `run` from `plan` so a plan never shares a directory with a
 /// later harness run.
 fn run_slug(clock: &SystemClock, name: Option<&str>, goal: &str, kind: &str) -> String {
-    let base = name.map(str::to_string).unwrap_or_else(|| slugify(goal));
+    let base = name.map_or_else(|| slugify(goal), str::to_string);
     let stamp = clock.now_iso().replace(':', "-");
     format!("{base}-{kind}-{stamp}")
 }
 
-/// The Ollama address doctor checks: the config's [providers.ollama] base_url when it sets one,
+/// The Ollama address doctor checks: the config's [providers.ollama] `base_url` when it sets one,
 /// because harness calls that address; otherwise --ollama-url.
 fn doctor_ollama_url<'a>(config: &'a NightshiftConfig, cli_url: &'a str) -> &'a str {
     config

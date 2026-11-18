@@ -198,7 +198,7 @@ pub(crate) fn parse_search_replace(input: &str) -> Result<Vec<SearchReplaceBlock
                  replacements: &mut Vec<SearchReplaceBlock>|
      -> Result<(), Error> {
         match (file.as_ref(), old.take(), new.take()) {
-            (None, None, None) | (Some(_), None, None) => Ok(()),
+            (None | Some(_), None, None) => Ok(()),
             (Some(_), Some(_), None) => Err(Error::from(ArtifactError::artifact(
                 "search-replace: block is missing a new: field",
             ))),
@@ -640,7 +640,7 @@ fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
 
     let n = replacements.len();
     let mut paths: Vec<&str> = replacements.iter().map(|b| b.path.as_str()).collect();
-    paths.sort();
+    paths.sort_unstable();
     paths.dedup();
     Ok(format!("replaced {n} block(s) in {}", paths.join(", ")))
 }

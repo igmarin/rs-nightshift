@@ -86,7 +86,7 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
         .filter(|event| event.event == EventKind::Retry)
         .count();
     if retry_count > 0 {
-        lines.push(format!("Retries: {}", retry_count));
+        lines.push(format!("Retries: {retry_count}"));
     }
     if snapshot.status != RunStatus::Done {
         lines.push(format!(
@@ -142,7 +142,7 @@ pub fn render_report(snapshot: &StatusSnapshot, events: &[ActionEvent]) -> Strin
         lines.push("Time per role".to_string());
         for role in &role_order {
             if let Some(&seconds) = role_times.get(role) {
-                lines.push(format!("  {}: {}s", role, seconds));
+                lines.push(format!("  {role}: {seconds}s"));
             }
         }
     }
@@ -228,6 +228,8 @@ mod tests {
             status,
             block_reason: reason,
             loop_counters: std::collections::BTreeMap::new(),
+            config_hash: String::new(),
+            repo_head: None,
         }
     }
 

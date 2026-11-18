@@ -10,7 +10,7 @@
 //! # Provider rules
 //!
 //! - `ollama` — local, default base URL `DEFAULT_OLLAMA_BASE_URL`; no API key
-//!   (a placeholder is passed to `llm-kernel`'s OpenAI client, mirroring
+//!   (a placeholder is passed to `llm-kernel`'s `OpenAI` client, mirroring
 //!   `OllamaClient`). The `think` option appends the `:think` model-tag suffix
 //!   (Ollama's convention for thinking variants, e.g. `qwen3:think`), so
 //!   `options.think = true` on role `model = "phi4"` calls `phi4:think`.

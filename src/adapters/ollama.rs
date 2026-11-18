@@ -83,23 +83,21 @@ pub fn redact_ollama_url(value: &str) -> String {
 fn redact_unparsed_url(value: &str) -> String {
     let end = value.find(['?', '#']).unwrap_or(value.len());
     let value = &value[..end];
-    let authority_start = match value.find("://") {
-        Some(index) => index + 3,
-        None => {
-            // No scheme separator; conservatively redact anything before
-            // the first @ (up to the first /) so malformed URLs without a
-            // scheme cannot leak userinfo-like credentials.
-            let slash = value.find('/').unwrap_or(value.len());
-            return match value[..slash].rfind('@') {
-                Some(at) => format!("[REDACTED]@{}", &value[at + 1..]),
-                None => value.to_owned(),
-            };
-        }
+    let authority_start = if let Some(index) = value.find("://") {
+        index + 3
+    } else {
+        // No scheme separator; conservatively redact anything before
+        // the first @ (up to the first /) so malformed URLs without a
+        // scheme cannot leak userinfo-like credentials.
+        let slash = value.find('/').unwrap_or(value.len());
+        return match value[..slash].rfind('@') {
+            Some(at) => format!("[REDACTED]@{}", &value[at + 1..]),
+            None => value.to_owned(),
+        };
     };
     let authority_end = value[authority_start..]
         .find('/')
-        .map(|index| authority_start + index)
-        .unwrap_or(value.len());
+        .map_or(value.len(), |index| authority_start + index);
     let authority = &value[authority_start..authority_end];
     let Some(userinfo_end) = authority.rfind('@') else {
         return value.to_owned();
@@ -162,7 +160,7 @@ impl OllamaClient {
         let base_url = validate_ollama_url(&base_url.into())?;
         let redacted_base_url = redact_ollama_url(&base_url);
         // Ollama's OpenAI-compatible endpoint lives at `{origin}/v1`.
-        let chat_base_url = format!("{}/v1", base_url);
+        let chat_base_url = format!("{base_url}/v1");
         // Ollama needs no API key; pass a non-empty placeholder so the
         // OpenAIClient's `Authorization: Bearer <key>` header is well-formed
         // (Ollama ignores it). No reqwest timeout — we wrap completions with

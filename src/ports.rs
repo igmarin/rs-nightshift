@@ -269,7 +269,7 @@ impl StateStore for MemoryStateStore {
 /// about adapters. The adapters layer implements it.
 pub trait ModelClientFactory: Send + Sync {
     /// Build a client for `provider`, honoring `spec` (base URL / key env) and
-    /// `options` (temperature, max_tokens, think, …).
+    /// `options` (temperature, `max_tokens`, think, …).
     fn build(
         &self,
         provider: &str,
@@ -437,6 +437,8 @@ mod tests {
             status: RunStatus::Running,
             block_reason: BlockReason::None,
             loop_counters: std::collections::BTreeMap::new(),
+            config_hash: String::new(),
+            repo_head: None,
         };
         store.write_snapshot(run, &snap).expect("write");
         assert_eq!(store.read_snapshot(run).expect("read"), snap);

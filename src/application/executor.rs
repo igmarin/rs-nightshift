@@ -141,7 +141,9 @@ where
                 // no actual code findings — it confuses small models into
                 // ignoring the output contract.
                 if !text.is_empty() && !is_empty_context(&text) {
-                    tool_output.push_str(&format!("### repo context\n{text}\n\n"));
+                    tool_output.push_str("### repo context\n");
+                    tool_output.push_str(&text);
+                    tool_output.push_str("\n\n");
                 }
                 // Inject raw file content for files the role declared
                 // (non-code files that codegraph/graphify don't index).
@@ -164,7 +166,9 @@ where
                                 ));
                             }
                             Err(warning) => {
-                                tool_output.push_str(&format!("<!-- warning: {warning} -->\n\n"));
+                                tool_output.push_str("<!-- warning: ");
+                                tool_output.push_str(&warning);
+                                tool_output.push_str(" -->\n\n");
                             }
                         }
                     }
@@ -172,7 +176,9 @@ where
             }
             "run-tests" => {
                 let out = tools.run("run-tests", params.repo, "").await?;
-                tool_output.push_str(&format!("### test results\n{out}\n\n"));
+                tool_output.push_str("### test results\n");
+                tool_output.push_str(&out);
+                tool_output.push_str("\n\n");
             }
             _ => {}
         }
@@ -384,17 +390,16 @@ fn user_prompt(context: &RoleContext, artifacts: &[(String, String)], tool_outpu
 pub(crate) fn parse_role_output(text: &str) -> Result<RoleOutput, Error> {
     let json = extract_json_object(text)?;
     // Fast path: strict parse.
-    match serde_json::from_str::<RoleOutput>(&json) {
-        Ok(output) => Ok(output),
-        Err(_) => {
-            // Slow path: parse as raw Value, coerce content to string, retry.
-            let value = sanitize_json_value(&json)?;
-            let repaired = serde_json::to_string(&value).unwrap_or_else(|_| json.clone());
-            serde_json::from_str::<RoleOutput>(&repaired).map_err(|error| {
-                ArtifactError::invalid("role output", format!("not a valid role envelope: {error}"))
-                    .into()
-            })
-        }
+    if let Ok(output) = serde_json::from_str::<RoleOutput>(&json) {
+        Ok(output)
+    } else {
+        // Slow path: parse as raw Value, coerce content to string, retry.
+        let value = sanitize_json_value(&json)?;
+        let repaired = serde_json::to_string(&value).unwrap_or_else(|_| json.clone());
+        serde_json::from_str::<RoleOutput>(&repaired).map_err(|error| {
+            ArtifactError::invalid("role output", format!("not a valid role envelope: {error}"))
+                .into()
+        })
     }
 }
 
@@ -504,23 +509,20 @@ fn remove_think_span_containing_first_brace(text: &str) -> String {
     while i < bytes.len() {
         if let Some(open_len) = match_think_open(&bytes[i..]) {
             let after_open = i + open_len;
-            match find_matching_think_close(&bytes[after_open..]) {
-                Some((rel_start, close_len)) => {
-                    let end = after_open + rel_start + close_len;
-                    if brace >= i && brace < end {
-                        let mut out = String::with_capacity(text.len() - (end - i));
-                        out.push_str(&text[..i]);
-                        out.push_str(&text[end..]);
-                        return out;
-                    }
-                    i = end;
+            if let Some((rel_start, close_len)) = find_matching_think_close(&bytes[after_open..]) {
+                let end = after_open + rel_start + close_len;
+                if brace >= i && brace < end {
+                    let mut out = String::with_capacity(text.len() - (end - i));
+                    out.push_str(&text[..i]);
+                    out.push_str(&text[end..]);
+                    return out;
                 }
-                None => {
-                    if brace >= i {
-                        return text[..i].to_string();
-                    }
-                    break;
+                i = end;
+            } else {
+                if brace >= i {
+                    return text[..i].to_string();
                 }
+                break;
             }
             continue;
         }
@@ -998,8 +1000,7 @@ fn escape_unescaped_quotes_in_strings(input: &str) -> String {
                 while j < chars.len() && chars[j].is_whitespace() {
                     j += 1;
                 }
-                let next_structural =
-                    matches!(chars.get(j), Some(',') | Some('}') | Some(']') | Some(':'));
+                let next_structural = matches!(chars.get(j), Some(',' | '}' | ']' | ':'));
                 if next_structural {
                     in_string = false;
                     out.push(c);
@@ -1097,7 +1098,7 @@ fn backtick_in_value_position(chars: &[char], i: usize) -> bool {
     false
 }
 
-/// Heuristic repair: close truncated JSON that was cut off by max_tokens.
+/// Heuristic repair: close truncated JSON that was cut off by `max_tokens`.
 ///
 /// Models sometimes hit the token limit before closing all strings and
 /// objects. This function tracks open strings and braces, then appends
@@ -1141,9 +1142,9 @@ fn close_truncated_json(input: &str) -> String {
     result
 }
 
-/// Check if the CodeGraph output contains only status noise with no actual
+/// Check if the `CodeGraph` output contains only status noise with no actual
 /// code findings. Suppresses output like "No relevant code found" and
-/// CodeGraph status tables for empty repos.
+/// `CodeGraph` status tables for empty repos.
 fn is_empty_context(text: &str) -> bool {
     text.contains("No relevant code found")
         && !text.contains("fn ")
@@ -1251,7 +1252,7 @@ fn read_context_files(
         }
         // Read at most max_bytes+1 bytes: the +1 lets us detect truncation
         // without loading the entire file into memory.
-        let mut file_handle = match std::fs::File::open(&canonical) {
+        let file_handle = match std::fs::File::open(&canonical) {
             Ok(f) => f,
             Err(error) => {
                 results.push((file.clone(), Err(format!("could not read {file}: {error}"))));
@@ -1261,7 +1262,6 @@ fn read_context_files(
         use std::io::Read;
         let mut buf = Vec::with_capacity(max_bytes + 1);
         if let Err(error) = file_handle
-            .by_ref()
             .take((max_bytes + 1) as u64)
             .read_to_end(&mut buf)
         {
@@ -2461,6 +2461,17 @@ mod tests {
             calls[0].prompt.contains("warning"),
             "prompt should contain warning: {}",
             calls[0].prompt
+        );
+        // The warning comment must close on its own line, or the next section
+        // is swallowed by the comment.
+        let prompt = &calls[0].prompt;
+        let warning = &prompt[prompt.find("<!-- warning: ").expect("warning comment")..];
+        assert!(
+            warning
+                .lines()
+                .next()
+                .is_some_and(|line| line.ends_with(" -->")),
+            "warning comment must close: {warning}"
         );
     }
 

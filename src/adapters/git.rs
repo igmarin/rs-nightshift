@@ -259,11 +259,11 @@ fn format_hunk_header(
     new_count: u32,
 ) -> String {
     let old = match old_start {
-        Some(s) => format!("-{}", s),
+        Some(s) => format!("-{s}"),
         None => "-1".to_string(),
     };
     let new = match new_start {
-        Some(s) => format!("+{}", s),
+        Some(s) => format!("+{s}"),
         None => "+1".to_string(),
     };
     format!("@@ {old},{old_count} {new},{new_count} @@")
