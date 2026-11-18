@@ -168,7 +168,7 @@ where
                             Err(warning) => {
                                 tool_output.push_str("<!-- warning: ");
                                 tool_output.push_str(&warning);
-                                tool_output.push_str("\n\n");
+                                tool_output.push_str(" -->\n\n");
                             }
                         }
                     }
@@ -2461,6 +2461,17 @@ mod tests {
             calls[0].prompt.contains("warning"),
             "prompt should contain warning: {}",
             calls[0].prompt
+        );
+        // The warning comment must close on its own line, or the next section
+        // is swallowed by the comment.
+        let prompt = &calls[0].prompt;
+        let warning = &prompt[prompt.find("<!-- warning: ").expect("warning comment")..];
+        assert!(
+            warning
+                .lines()
+                .next()
+                .is_some_and(|line| line.ends_with(" -->")),
+            "warning comment must close: {warning}"
         );
     }
 

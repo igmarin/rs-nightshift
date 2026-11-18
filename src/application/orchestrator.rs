@@ -35,8 +35,6 @@ pub struct RunRequest<'a> {
     pub config: &'a NightshiftConfig,
     /// The operator's goal.
     pub goal: &'a str,
-    /// If true, resume from a previous interrupted run.
-    pub resume: bool,
 }
 
 /// Walk the role graph from `request.config.run.start`, routing deterministically
@@ -633,7 +631,6 @@ mod tests {
                 repo: Path::new("/repo"),
                 config: cfg,
                 goal: "goal",
-                resume: false,
             },
         )
         .await
@@ -838,7 +835,6 @@ on = { continue = "loop" }
                 repo: Path::new("/repo"),
                 config: cfg,
                 goal: "goal",
-                resume: false,
             },
         )
         .await
@@ -954,7 +950,6 @@ model = "phi4"
                 repo: Path::new("/repo"),
                 config: &cfg,
                 goal: "goal",
-                resume: false,
             },
         )
         .await
@@ -1067,7 +1062,6 @@ model = "phi4"
                 repo: Path::new("/repo"),
                 config: &cfg,
                 goal: "goal",
-                resume: false,
             },
         )
         .await

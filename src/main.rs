@@ -259,8 +259,6 @@ async fn real_main() -> anyhow::Result<()> {
             out,
             name,
             repo,
-            resume: _,
-            force_resume: _,
         } => {
             let (cfg, run_dir) =
                 prepare_run(&config, profile.as_deref(), &goal, &out, name.as_deref())?;
@@ -414,7 +412,6 @@ async fn execute_run(
             repo,
             config: cfg,
             goal,
-            resume: false,
         },
     )
     .await?;
