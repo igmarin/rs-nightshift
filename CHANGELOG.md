@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `write-file` accepts a large file in numbered chunks, each under a
+  `file: <path> chunk: N/M` header. Chunks are kept in the run directory
+  across model calls, and the file is written only once all `M` are present
+  (#99). See [Chunked writes](docs/configuration.md#chunked-writes).
+
 - A machine file, `~/.config/nightshift/machine.toml` (or
   `$XDG_CONFIG_HOME/nightshift/machine.toml`, or `NIGHTSHIFT_MACHINE_CONFIG`),
   holds one machine's `[providers.*]` and `[profiles.*]` outside the repo.

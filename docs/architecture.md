@@ -160,7 +160,9 @@ the tools a role declares with `tools = [...]`
 - `write-file`: writes `content` that starts with `file: <path>` as the
   whole file, creating it and its directories when they do not exist. Runs
   after `continue` or `done`. The path must stay in the repo and must not
-  be a secret-bearing path, also through a symlinked directory.
+  be a secret-bearing path, also through a symlinked directory. A reply of
+  `file: <path> chunk: N/M` sections is buffered under the run directory
+  until all `M` chunks are present ([Chunked writes](configuration.md#chunked-writes)).
 - `search-replace`: exact `old:` / `new:` replacements in existing files.
   Each `old` must match exactly once, overlapping matches included; no
   match, or more than one, is an error and nothing is written.

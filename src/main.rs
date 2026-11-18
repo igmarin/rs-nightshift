@@ -305,10 +305,10 @@ async fn real_main() -> anyhow::Result<()> {
             let factory = ProviderFactory;
             let store = FsArtifactStore::new(&out);
             let clock = SystemClock;
-            let tools = CapabilityRunner::new();
             let context_provider = GraphContextProvider;
             let slug = run_slug(&clock, name.as_deref(), &goal, "plan");
             let run_dir = store.create_run(&clock.today(), &slug)?;
+            let tools = CapabilityRunner::new().with_run_dir(&run_dir);
 
             let client = factory.build(
                 &entry.provider,
@@ -405,7 +405,7 @@ async fn execute_run(
         &FsArtifactStore::new(out),
         &state,
         &SystemClock,
-        &CapabilityRunner::new(),
+        &CapabilityRunner::new().with_run_dir(run_dir),
         &GraphContextProvider,
         &RunRequest {
             run: run_dir,

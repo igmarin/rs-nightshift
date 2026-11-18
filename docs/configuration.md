@@ -318,7 +318,7 @@ load.
 | `gather-context` | Before the model call | Adds codegraph and graphify context, and the `context_files`, to the prompt |
 | `run-tests` | Before the model call | Runs the repo's test command and adds the result to the prompt |
 | `apply-patch` | After `continue` / `done` | Applies the reply's `content` as a unified diff |
-| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the whole file |
+| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the whole file, or buffers `file: <path> chunk: N/M` chunks and writes once all are present |
 | `search-replace` | After `continue` / `done` | Replaces unique `old:` snippets with `new:` text in existing files |
 
 ### apply-patch
@@ -350,6 +350,46 @@ body stops at the next line that starts with `file: `, `<!-- file:` or
 trailing blank lines are dropped; the file ends with one newline. One file
 per reply. Paths must stay in the repo and secret-bearing paths are refused,
 also through a symlinked directory.
+
+#### Chunked writes
+
+A reply can carry a large file in numbered chunks, so that each model call
+stays short enough to finish within the role's `timeout_secs`:
+
+```text
+file: site/index.html chunk: 1/3
+<first part of the file>
+file: site/index.html chunk: 2/3
+<second part>
+file: site/index.html chunk: 3/3
+<last part>
+```
+
+- Each chunk opens with `file: <path> chunk: N/M`: `N` is the chunk number
+  (1 to `M`) and `M` is the total (1 to 1000). A chunk runs until the next
+  header. A reply may carry several chunks of one file, but they must all
+  share the same path and `M`. Blank lines at the end of a chunk are dropped;
+  blank lines inside it are kept.
+- Chunks are kept in the run directory (`<run>/chunks/`), so they survive
+  between model calls of the same run. The repo is not touched until every
+  chunk from 1 to `M` is present. Then the chunks are joined in number order,
+  written as a plain write would be, and the buffer is cleared.
+- Chunks may arrive in any order and in any number of replies. A chunk sent
+  again replaces the one stored before, so the last copy wins.
+- A missing chunk is not an error: the tool succeeds, reports which numbers
+  are missing (`missing 2 of 3`), and writes nothing to the repo. The graph
+  routes on the verdict as usual, so the role runs again only when a route
+  sends it back (for example `issues` to the developer); nothing re-calls it
+  for the missing chunks. Put the format in that role's prompt, because the
+  output contract does not mention chunks.
+- Rejected at once, with nothing stored from that reply: a header that is not
+  `file: <path> chunk: N/M` with whole numbers, `N` outside 1 to `M`, `M`
+  outside 1 to 1000, an empty chunk, a number used twice in one reply, chunks
+  of two files or two totals in one reply, and a path that fails the plain
+  write's path rules. The path is checked on the first chunk.
+- Buffers live in the run directory, so only the runners that `harness`,
+  `queue` and `plan` build (each with its run directory) accept chunked
+  input. Any other runner refuses it with an error.
 
 ### run-tests
 
