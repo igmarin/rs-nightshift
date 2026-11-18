@@ -141,7 +141,9 @@ where
                 // no actual code findings — it confuses small models into
                 // ignoring the output contract.
                 if !text.is_empty() && !is_empty_context(&text) {
-                    tool_output.push_str(&format!("### repo context\n{text}\n\n"));
+                    tool_output.push_str("### repo context\n");
+                    tool_output.push_str(&text);
+                    tool_output.push_str("\n\n");
                 }
                 // Inject raw file content for files the role declared
                 // (non-code files that codegraph/graphify don't index).
@@ -164,7 +166,9 @@ where
                                 ));
                             }
                             Err(warning) => {
-                                tool_output.push_str(&format!("<!-- warning: {warning} -->\n\n"));
+                                tool_output.push_str("<!-- warning: ");
+                                tool_output.push_str(&warning);
+                                tool_output.push_str("\n\n");
                             }
                         }
                     }
@@ -172,7 +176,9 @@ where
             }
             "run-tests" => {
                 let out = tools.run("run-tests", params.repo, "").await?;
-                tool_output.push_str(&format!("### test results\n{out}\n\n"));
+                tool_output.push_str("### test results\n");
+                tool_output.push_str(&out);
+                tool_output.push_str("\n\n");
             }
             _ => {}
         }
@@ -1246,7 +1252,7 @@ fn read_context_files(
         }
         // Read at most max_bytes+1 bytes: the +1 lets us detect truncation
         // without loading the entire file into memory.
-        let mut file_handle = match std::fs::File::open(&canonical) {
+        let file_handle = match std::fs::File::open(&canonical) {
             Ok(f) => f,
             Err(error) => {
                 results.push((file.clone(), Err(format!("could not read {file}: {error}"))));
@@ -1256,7 +1262,6 @@ fn read_context_files(
         use std::io::Read;
         let mut buf = Vec::with_capacity(max_bytes + 1);
         if let Err(error) = file_handle
-            .by_ref()
             .take((max_bytes + 1) as u64)
             .read_to_end(&mut buf)
         {

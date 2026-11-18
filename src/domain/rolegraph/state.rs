@@ -105,7 +105,9 @@ pub struct StatusSnapshot {
     #[serde(default)]
     pub block_reason: BlockReason,
     /// Per back-edge loop counts, keyed by `"role:target"`.
-    ///\n    /// Used for resume validation to track how many times each loop back-edge was taken.\n    #[serde(default)]
+    ///
+    /// Used for resume validation to track how many times each loop back-edge was taken.
+    #[serde(default)]
     pub config_hash: String,
     /// Git HEAD of the target repo at the start of the run, for resume validation.
     pub repo_head: Option<String>,

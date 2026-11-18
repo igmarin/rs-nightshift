@@ -1222,7 +1222,7 @@ model = "phi4"
             .resolve_profile(Some("mac"))
             .expect_err("missing slot");
         assert_eq!(config.roles[0].model, "@planner");
-        assert!(config.roles[0].provider.is_empty());
+        assert_eq!(config.roles[0].provider, "");
         assert_eq!(config.run.profile, None);
     }
 
