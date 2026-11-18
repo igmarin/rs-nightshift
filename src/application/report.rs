@@ -228,6 +228,8 @@ mod tests {
             status,
             block_reason: reason,
             loop_counters: std::collections::BTreeMap::new(),
+            config_hash: String::new(),
+            repo_head: None,
         }
     }
 

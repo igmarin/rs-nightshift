@@ -437,6 +437,8 @@ mod tests {
             status: RunStatus::Running,
             block_reason: BlockReason::None,
             loop_counters: std::collections::BTreeMap::new(),
+            config_hash: String::new(),
+            repo_head: None,
         };
         store.write_snapshot(run, &snap).expect("write");
         assert_eq!(store.read_snapshot(run).expect("read"), snap);

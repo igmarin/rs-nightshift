@@ -105,7 +105,14 @@ pub struct StatusSnapshot {
     #[serde(default)]
     pub block_reason: BlockReason,
     /// Per back-edge loop counts, keyed by `"role:target"`.
+    ///\n    /// Used for resume validation to track how many times each loop back-edge was taken.\n    #[serde(default)]
+    pub config_hash: String,
+    /// Git HEAD of the target repo at the start of the run, for resume validation.
+    pub repo_head: Option<String>,
     #[serde(default)]
+    /// Per back-edge loop counts, keyed by `"role:target"`.
+    ///
+    /// Used for resume validation to track how many times each loop back-edge was taken.
     pub loop_counters: BTreeMap<String, u32>,
 }
 
@@ -215,6 +222,8 @@ mod tests {
             status: RunStatus::Running,
             block_reason: BlockReason::None,
             loop_counters: BTreeMap::from([("qa:developer".into(), 2)]),
+            config_hash: String::new(),
+            repo_head: None,
         };
         let json = serde_json::to_string(&snap).expect("serialize");
         let round: StatusSnapshot = serde_json::from_str(&json).expect("deserialize");

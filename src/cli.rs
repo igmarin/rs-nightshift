@@ -95,6 +95,12 @@ pub enum Command {
         /// Target repo for capabilities (e.g. apply-patch).
         #[arg(long)]
         repo: PathBuf,
+        /// Resume from a previous interrupted run.
+        #[arg(long)]
+        resume: bool,
+        /// Force resume even if config hash or repo HEAD differ from the recorded run.
+        #[arg(long)]
+        force_resume: bool,
     },
     /// Run a list of jobs back to back from a queue file (unattended).
     ///
@@ -379,6 +385,8 @@ mod tests {
                 out,
                 name,
                 repo,
+                resume: _,
+                force_resume: _,
             } => {
                 assert_eq!(goal, "add /health");
                 assert_eq!(config, PathBuf::from("nightshift.toml"));

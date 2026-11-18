@@ -35,6 +35,8 @@ pub struct RunRequest<'a> {
     pub config: &'a NightshiftConfig,
     /// The operator's goal.
     pub goal: &'a str,
+    /// If true, resume from a previous interrupted run.
+    pub resume: bool,
 }
 
 /// Walk the role graph from `request.config.run.start`, routing deterministically
@@ -234,6 +236,8 @@ where
                 status: RunStatus::Running,
                 block_reason: BlockReason::None,
                 loop_counters: loop_counters.clone(),
+                config_hash: String::new(),
+                repo_head: None,
             },
         )?;
 
@@ -264,6 +268,8 @@ where
                         status,
                         block_reason: reason,
                         loop_counters: loop_counters.clone(),
+                        config_hash: String::new(),
+                        repo_head: None,
                     },
                 )?;
                 return Ok(RunResult {
@@ -439,6 +445,8 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
             status: RunStatus::Blocked,
             block_reason: reason,
             loop_counters: loop_counters.clone(),
+            config_hash: String::new(),
+            repo_head: None,
         },
     )?;
     Ok(RunResult {
@@ -484,6 +492,8 @@ fn record_failure<S: StateStore, K: Clock>(
             status: RunStatus::Failed,
             block_reason: reason,
             loop_counters: loop_counters.clone(),
+            config_hash: String::new(),
+            repo_head: None,
         },
     )?;
     Ok(())
@@ -623,6 +633,7 @@ mod tests {
                 repo: Path::new("/repo"),
                 config: cfg,
                 goal: "goal",
+                resume: false,
             },
         )
         .await
@@ -827,6 +838,7 @@ on = { continue = "loop" }
                 repo: Path::new("/repo"),
                 config: cfg,
                 goal: "goal",
+                resume: false,
             },
         )
         .await
@@ -942,6 +954,7 @@ model = "phi4"
                 repo: Path::new("/repo"),
                 config: &cfg,
                 goal: "goal",
+                resume: false,
             },
         )
         .await
@@ -1054,6 +1067,7 @@ model = "phi4"
                 repo: Path::new("/repo"),
                 config: &cfg,
                 goal: "goal",
+                resume: false,
             },
         )
         .await
