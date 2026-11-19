@@ -107,6 +107,11 @@ pub struct StatusSnapshot {
     /// Why the run halted/failed, when `status` is `blocked` or `failed`.
     #[serde(default)]
     pub block_reason: BlockReason,
+    /// Hash of the config the run started with, for resume validation.
+    #[serde(default)]
+    pub config_hash: String,
+    /// Git HEAD of the target repo at the start of the run, for resume validation.
+    pub repo_head: Option<String>,
     /// Per back-edge loop counts, keyed by `"role:target"`.
     #[serde(default)]
     pub loop_counters: BTreeMap<String, u32>,
@@ -218,9 +223,21 @@ mod tests {
             status: RunStatus::Running,
             block_reason: BlockReason::None,
             loop_counters: BTreeMap::from([("qa:developer".into(), 2)]),
+            config_hash: String::new(),
+            repo_head: None,
         };
         let json = serde_json::to_string(&snap).expect("serialize");
         let round: StatusSnapshot = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(round, snap);
+    }
+
+    #[test]
+    fn status_snapshot_without_resume_fields_still_parses() {
+        // A snapshot written before config_hash and repo_head existed.
+        let json = r#"{"current_role":null,"steps":1,"status":"running","block_reason":"none"}"#;
+        let snap: StatusSnapshot = serde_json::from_str(json).expect("old snapshot parses");
+        assert_eq!(snap.config_hash, "");
+        assert_eq!(snap.repo_head, None);
+        assert!(snap.loop_counters.is_empty());
     }
 }

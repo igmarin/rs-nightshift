@@ -103,7 +103,7 @@ pub struct RoleSpec {
     /// Model tag/variant passed through to the provider verbatim, or
     /// `@slot` to take provider, model and options from the selected profile.
     pub model: String,
-    /// Model-specific options (temperature, think, max_tokens, …).
+    /// Model-specific options (temperature, think, `max_tokens`, …).
     #[serde(default)]
     pub options: BTreeMap<String, toml::Value>,
     /// The role's job prompt.
@@ -1243,7 +1243,7 @@ model = "phi4"
             .resolve_profile(Some("mac"))
             .expect_err("missing slot");
         assert_eq!(config.roles[0].model, "@planner");
-        assert!(config.roles[0].provider.is_empty());
+        assert_eq!(config.roles[0].provider, "");
         assert_eq!(config.run.profile, None);
     }
 

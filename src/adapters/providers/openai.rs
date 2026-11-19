@@ -40,9 +40,11 @@ pub(crate) fn validate_chat_base_url(value: &str) -> Result<String, Error> {
     // errors reach the run log and the doctor report.
     let redacted = reqwest::Url::parse(value)
         .ok()
-        .filter(|url| url.has_host())
-        .map(|url| url.origin().ascii_serialization())
-        .unwrap_or_else(|| crate::adapters::ollama::redact_ollama_url(value));
+        .filter(reqwest::Url::has_host)
+        .map_or_else(
+            || crate::adapters::ollama::redact_ollama_url(value),
+            |url| url.origin().ascii_serialization(),
+        );
     let parsed = reqwest::Url::parse(value).map_err(|_| {
         Error::from(ConfigError {
             path: "provider base_url".into(),
