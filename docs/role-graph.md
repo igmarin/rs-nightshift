@@ -242,7 +242,7 @@ Each run writes into `<out>/{date}_{slug}-run-{timestamp}/`:
 - `actions.jsonl`: append-only, one JSON object per event:
   `{ts, event, role, provider, model, verdict, artifact, block_reason, detail, call}`.
   The events are `role_start`, `llm_call`, `retry`, `role_end`, `loop`,
-  `halt`, `done` and `fail`. An `llm_call` event's `call` holds
+  `halt`, `done`, `fail`, `resumed` and `resume_refused`. An `llm_call` event's `call` holds
   `duration_ms` and, when the server reports them, `prompt_tokens` and
   `completion_tokens`. (`tool_call` exists in the schema but is not
   written.)

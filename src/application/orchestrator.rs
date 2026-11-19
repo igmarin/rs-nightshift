@@ -4,12 +4,14 @@ use crate::application::executor::{self, RoleContext};
 use crate::domain::rolegraph::config::{NightshiftConfig, OnUnclear, RoleSpec};
 use crate::domain::rolegraph::routing::Target;
 use crate::domain::rolegraph::state::{
-    ActionEvent, EventKind, ModelCall, RunIdentity, RunStatus, StatusSnapshot,
+    tree_mismatch, ActionEvent, EventKind, ModelCall, RunIdentity, RunStatus, StatusSnapshot,
+    TreeState,
 };
 use crate::domain::rolegraph::verdict::{BlockReason, Verdict};
 use crate::error::Error;
 use crate::ports::{
-    ArtifactStore, Clock, ContextProvider, ModelClient, ModelClientFactory, StateStore, ToolRunner,
+    ArtifactStore, Clock, ContextProvider, ModelClient, ModelClientFactory, RepoState, StateStore,
+    ToolRunner,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -39,9 +41,17 @@ pub struct RunRequest<'a> {
     /// records it, and a resume must match it unless `force_resume` is set.
     pub identity: RunIdentity,
     /// The checkpoint to continue from (`harness --resume`); `None` starts fresh.
+    ///
+    /// A `running` checkpoint (a crash) continues at its role. A `failed` or
+    /// `blocked` one re-runs the role that ended the run, on purpose. A `done`
+    /// one is not resumed: its status is returned and no model is called.
     pub resume: Option<StatusSnapshot>,
-    /// Continue a resume even though the identity no longer matches.
+    /// Continue a resume even though the identity or the target tree no longer
+    /// matches the checkpoint.
     pub force_resume: bool,
+    /// Reads the target working tree before each role starts, so the checkpoint
+    /// records the state the role starts from.
+    pub repo_state: &'a dyn RepoState,
 }
 
 /// What a checkpoint records: the state the next role starts with.
@@ -58,6 +68,9 @@ struct Progress {
     context: RoleContext,
     /// The config and target-repo state the run started with.
     identity: RunIdentity,
+    /// The target working tree when `current` started. `None` when it could
+    /// not be read; a resume then refuses the checkpoint.
+    tree: Option<TreeState>,
 }
 
 impl Progress {
@@ -74,6 +87,7 @@ impl Progress {
                 clarifications: Vec::new(),
             },
             identity: identity.clone(),
+            tree: None,
         }
     }
 
@@ -97,6 +111,7 @@ impl Progress {
             artifacts: self.artifacts.clone(),
             findings: self.context.findings.clone(),
             questions: self.context.questions.clone(),
+            tree: self.tree.clone(),
         }
     }
 }
@@ -106,7 +121,10 @@ impl Progress {
 ///
 /// Before each role starts, a `running` checkpoint is written to the state
 /// store, so a crash during the role resumes from that role (see
-/// [`RunRequest::resume`]). A resumed run appends a `resumed` event.
+/// [`RunRequest::resume`]). A failed or blocked run records the role that ended
+/// it and the state that role started from, so a resume re-runs that role; the
+/// attempt that failed still counts toward `max_steps`. A resumed run appends a
+/// `resumed` event, and a refused resume appends a `resume_refused` event.
 pub async fn run_graph<F, A, S, K, T, P>(
     factory: &F,
     store: &A,
@@ -134,20 +152,46 @@ where
     let mut current: String = request.config.run.start.clone();
     let mut progress = Progress::new(request.goal, &request.identity);
     if let Some(checkpoint) = &request.resume {
-        if checkpoint.status != RunStatus::Running {
+        match checkpoint.status {
             // A finished run has nothing left to do: report its status, call no model.
-            return Ok(RunResult {
-                status: checkpoint.status,
-                block_reason: checkpoint.block_reason,
-                steps: checkpoint.steps,
-            });
+            RunStatus::Done => {
+                return Ok(RunResult {
+                    status: checkpoint.status,
+                    block_reason: checkpoint.block_reason,
+                    steps: checkpoint.steps,
+                });
+            }
+            // A crash leaves `running`; a failed or blocked run is retried on purpose.
+            RunStatus::Running | RunStatus::Failed | RunStatus::Blocked => {}
         }
-        let mismatches = checkpoint.identity().mismatches(&request.identity);
+        let live = request.repo_state.working_tree(request.repo);
+        let tree_problem = tree_mismatch(
+            checkpoint.tree.as_ref(),
+            live.as_ref().map_err(|error| error.to_string()),
+        );
+        let mut mismatches = checkpoint.identity().mismatches(&request.identity);
+        mismatches.extend(tree_problem);
         if !mismatches.is_empty() && !request.force_resume {
+            // Fail closed, and leave the record of the refusal before exiting.
+            let reason = mismatches.join("; ");
+            state.append_action(
+                request.run,
+                &ActionEvent {
+                    ts: clock.now_iso(),
+                    event: EventKind::ResumeRefused,
+                    role: checkpoint.current_role.clone().unwrap_or_default(),
+                    provider: String::new(),
+                    model: String::new(),
+                    verdict: None,
+                    artifact: None,
+                    block_reason: BlockReason::None,
+                    detail: Some(reason.clone()),
+                    call: None,
+                },
+            )?;
             return Err(Error::Resume(format!(
-                "{}: {}; pass --force-resume to continue anyway",
-                request.run.display(),
-                mismatches.join("; ")
+                "{}: {reason}; pass --force-resume to continue anyway",
+                request.run.display()
             )));
         }
         current = checkpoint.current_role.clone().ok_or_else(|| {
@@ -189,6 +233,10 @@ where
     }
 
     loop {
+        // The tree as `current` starts. A checkpoint, a failure and a halt all
+        // record it, so a resume of `current` starts from the same state. A tree
+        // that cannot be read is recorded as none, and a resume refuses it.
+        progress.tree = request.repo_state.working_tree(request.repo).ok();
         if progress.steps >= request.config.run.max_steps {
             return halt_budget_exhausted(state, clock, request.run, &current, &progress);
         }
@@ -602,7 +650,8 @@ mod tests {
     use super::*;
     use crate::error::ArtifactError;
     use crate::ports::{
-        FixedClock, MemoryArtifactStore, MemoryStateStore, StubContextProvider, StubToolRunner,
+        FixedClock, MemoryArtifactStore, MemoryStateStore, StubContextProvider, StubRepoState,
+        StubToolRunner,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -685,6 +734,7 @@ mod tests {
                 identity: RunIdentity::default(),
                 resume: None,
                 force_resume: false,
+                repo_state: &StubRepoState::default(),
             },
         )
         .await
@@ -892,6 +942,7 @@ on = { continue = "loop" }
                 identity: RunIdentity::default(),
                 resume: None,
                 force_resume: false,
+                repo_state: &StubRepoState::default(),
             },
         )
         .await
@@ -1010,6 +1061,7 @@ model = "phi4"
                 identity: RunIdentity::default(),
                 resume: None,
                 force_resume: false,
+                repo_state: &StubRepoState::default(),
             },
         )
         .await
@@ -1125,6 +1177,7 @@ model = "phi4"
                 identity: RunIdentity::default(),
                 resume: None,
                 force_resume: false,
+                repo_state: &StubRepoState::default(),
             },
         )
         .await
@@ -1220,7 +1273,54 @@ on = { issues = "dev" }
             artifacts: Vec::new(),
             findings: Vec::new(),
             questions: Vec::new(),
+            tree: Some(tree_named("clean")),
         }
+    }
+
+    /// A target tree with this fingerprint and no changed files.
+    fn tree_named(fingerprint: &str) -> TreeState {
+        TreeState {
+            fingerprint: fingerprint.into(),
+            status: Vec::new(),
+        }
+    }
+
+    /// The target tree after `file` was created and left uncommitted.
+    fn tree_with_new_file(file: &str) -> TreeState {
+        TreeState {
+            fingerprint: format!("clean plus {file}"),
+            status: vec![format!("?? {file}")],
+        }
+    }
+
+    /// `run_graph` with a scripted target tree and the identity the checkpoints record.
+    async fn drive_with_tree(
+        repo: &StubRepoState,
+        factory: &QueueFactory,
+        state: &MemoryStateStore,
+        cfg: &NightshiftConfig,
+        resume: Option<StatusSnapshot>,
+        force_resume: bool,
+    ) -> Result<RunResult, Error> {
+        run_graph(
+            factory,
+            &MemoryArtifactStore::default(),
+            state,
+            &clock(),
+            &StubToolRunner::default(),
+            &StubContextProvider::default(),
+            &RunRequest {
+                run: Path::new("/tmp/run/x"),
+                repo: Path::new("/repo"),
+                config: cfg,
+                goal: "goal",
+                identity: identity("c1", Some("abc")),
+                resume,
+                force_resume,
+                repo_state: repo,
+            },
+        )
+        .await
     }
 
     async fn drive<S: StateStore>(
@@ -1247,6 +1347,7 @@ on = { issues = "dev" }
                 identity,
                 resume,
                 force_resume,
+                repo_state: &StubRepoState::new(vec![Ok(tree_named("clean"))]),
             },
         )
         .await
@@ -1345,10 +1446,10 @@ on = { issues = "dev" }
             "{message}"
         );
         assert!(message.contains("--force-resume"), "{message}");
-        assert!(
-            state.events().is_empty(),
-            "refused before recording anything"
-        );
+        // Refused before any role ran, and the refusal itself is on record.
+        let events = state.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event, EventKind::ResumeRefused);
     }
 
     #[tokio::test]
@@ -1447,6 +1548,253 @@ on = { issues = "dev" }
             "no reply was consumed"
         );
         assert!(state.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_reruns_a_failed_role_and_counts_the_failed_attempt() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let state = MemoryStateStore::default();
+        let failed = snapshot_at("qa", RunStatus::Failed, 2, &identity("c1", Some("abc")));
+
+        let result = drive_with_tree(
+            &StubRepoState::new(vec![Ok(tree_named("clean"))]),
+            &factory,
+            &state,
+            &cfg,
+            Some(failed),
+            false,
+        )
+        .await
+        .expect("resume");
+
+        assert_eq!(result.status, RunStatus::Done);
+        assert_eq!(result.steps, 3, "the failed attempt is step 2");
+        assert!(
+            factory.replies.lock().expect("queue").is_empty(),
+            "qa ran once"
+        );
+        assert!(state
+            .events()
+            .iter()
+            .any(|e| e.event == EventKind::Resumed && e.role == "qa"));
+    }
+
+    #[tokio::test]
+    async fn resume_reruns_a_blocked_role() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let state = MemoryStateStore::default();
+        let blocked = snapshot_at("qa", RunStatus::Blocked, 2, &identity("c1", Some("abc")));
+
+        let result = drive_with_tree(
+            &StubRepoState::new(vec![Ok(tree_named("clean"))]),
+            &factory,
+            &state,
+            &cfg,
+            Some(blocked),
+            false,
+        )
+        .await
+        .expect("resume");
+
+        assert_eq!(result.status, RunStatus::Done);
+        assert!(factory.replies.lock().expect("queue").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_resumed_role_that_fails_again_leaves_a_failed_checkpoint() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"fail","content":""}"#);
+        let state = MemoryStateStore::default();
+        let failed = snapshot_at("qa", RunStatus::Failed, 2, &identity("c1", Some("abc")));
+
+        let result = drive_with_tree(
+            &StubRepoState::new(vec![Ok(tree_named("clean"))]),
+            &factory,
+            &state,
+            &cfg,
+            Some(failed),
+            false,
+        )
+        .await
+        .expect("resume");
+
+        assert_eq!(result.status, RunStatus::Failed);
+        let recorded = state.read_snapshot(Path::new("/tmp/run/x")).expect("state");
+        assert_eq!(recorded.status, RunStatus::Failed);
+        assert_eq!(recorded.current_role.as_deref(), Some("qa"));
+        assert_eq!(recorded.steps, 3);
+        assert_eq!(recorded.tree, Some(tree_named("clean")));
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_a_failed_run_whose_tree_changed_and_records_the_refusal() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let state = MemoryStateStore::default();
+        let failed = snapshot_at("qa", RunStatus::Failed, 2, &identity("c1", Some("abc")));
+        state
+            .write_snapshot(Path::new("/tmp/run/x"), &failed)
+            .expect("checkpoint");
+
+        let err = drive_with_tree(
+            &StubRepoState::new(vec![Ok(tree_with_new_file("notes.md"))]),
+            &factory,
+            &state,
+            &cfg,
+            Some(failed.clone()),
+            false,
+        )
+        .await
+        .expect_err("refused");
+
+        assert!(matches!(err, Error::Resume(_)), "{err}");
+        let message = err.to_string();
+        assert!(message.contains("notes.md"), "{message}");
+        assert!(message.contains("--force-resume"), "{message}");
+        assert_eq!(
+            factory.replies.lock().expect("queue").len(),
+            1,
+            "no model call"
+        );
+        assert_eq!(
+            state.read_snapshot(Path::new("/tmp/run/x")).expect("state"),
+            failed,
+            "the checkpoint is untouched"
+        );
+        let events = state.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event, EventKind::ResumeRefused);
+        assert_eq!(events[0].role, "qa");
+        assert!(
+            events[0]
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("notes.md"),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_with_force_continues_past_a_changed_tree_and_records_it() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let state = MemoryStateStore::default();
+        let failed = snapshot_at("qa", RunStatus::Failed, 2, &identity("c1", Some("abc")));
+
+        let result = drive_with_tree(
+            &StubRepoState::new(vec![Ok(tree_with_new_file("notes.md"))]),
+            &factory,
+            &state,
+            &cfg,
+            Some(failed),
+            true,
+        )
+        .await
+        .expect("forced resume");
+
+        assert_eq!(result.status, RunStatus::Done);
+        let resumed = state
+            .events()
+            .into_iter()
+            .find(|e| e.event == EventKind::Resumed)
+            .expect("resumed event");
+        let detail = resumed.detail.unwrap_or_default();
+        assert!(detail.contains("forcing past"), "{detail}");
+        assert!(detail.contains("notes.md"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_without_a_tree_is_refused() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let state = MemoryStateStore::default();
+        let mut old = snapshot_at("qa", RunStatus::Running, 2, &identity("c1", Some("abc")));
+        old.tree = None;
+
+        let err = drive_with_tree(
+            &StubRepoState::new(vec![Ok(tree_named("clean"))]),
+            &factory,
+            &state,
+            &cfg,
+            Some(old),
+            false,
+        )
+        .await
+        .expect_err("refused");
+
+        assert!(
+            err.to_string().contains("did not record the target tree"),
+            "{err}"
+        );
+        assert_eq!(
+            factory.replies.lock().expect("queue").len(),
+            1,
+            "no model call"
+        );
+        assert_eq!(state.events()[0].event, EventKind::ResumeRefused);
+    }
+
+    #[tokio::test]
+    async fn a_tree_that_cannot_be_read_refuses_the_resume() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let state = MemoryStateStore::default();
+        let failed = snapshot_at("qa", RunStatus::Failed, 2, &identity("c1", Some("abc")));
+
+        let err = drive_with_tree(
+            &StubRepoState::new(vec![Err("git status failed".into())]),
+            &factory,
+            &state,
+            &cfg,
+            Some(failed),
+            false,
+        )
+        .await
+        .expect_err("refused");
+
+        let message = err.to_string();
+        assert!(message.contains("could not be read"), "{message}");
+        assert!(message.contains("git status failed"), "{message}");
+        assert_eq!(
+            factory.replies.lock().expect("queue").len(),
+            1,
+            "no model call"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_checkpoint_keeps_the_tree_the_failed_role_started_with() {
+        let cfg = config(THREE_ROLE);
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"continue","content":"brief"}"#);
+        factory.push(r#"{"verdict":"continue","content":"patch"}"#);
+        factory.push(r#"{"verdict":"fail","content":""}"#);
+        let state = MemoryStateStore::default();
+        // Reads: before product-owner, developer, qa, and one more that must not be used.
+        let repo = StubRepoState::new(vec![
+            Ok(tree_named("t1")),
+            Ok(tree_named("t2")),
+            Ok(tree_named("t3")),
+            Ok(tree_named("after-qa")),
+        ]);
+
+        let result = drive_with_tree(&repo, &factory, &state, &cfg, None, false)
+            .await
+            .expect("run");
+
+        assert_eq!(result.status, RunStatus::Failed);
+        let recorded = state.read_snapshot(Path::new("/tmp/run/x")).expect("state");
+        assert_eq!(recorded.tree, Some(tree_named("t3")));
     }
 
     #[tokio::test]

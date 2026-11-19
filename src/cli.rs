@@ -81,7 +81,8 @@ pub enum Command {
     /// Run a role-graph job from a config file (the new harness).
     ///
     /// With `--resume <run-dir>`, continue an interrupted run from its last
-    /// checkpoint instead of starting a new one.
+    /// checkpoint instead of starting a new one. A failed or blocked run re-runs
+    /// the role that ended it; a done run prints its status.
     Harness {
         /// Business goal for the run (required unless `--resume`).
         #[arg(long, required_unless_present = "resume")]
@@ -101,8 +102,8 @@ pub enum Command {
         /// Run directory of an interrupted run to continue from its last checkpoint.
         #[arg(long, value_name = "RUN_DIR", conflicts_with_all = ["goal", "name"])]
         resume: Option<PathBuf>,
-        /// With `--resume`: continue even though the config or the repo HEAD
-        /// changed since the run started.
+        /// With `--resume`: continue even though the config, `machine.toml`, the
+        /// repo HEAD or the target working tree changed since the checkpoint.
         #[arg(long)]
         force_resume: bool,
     },

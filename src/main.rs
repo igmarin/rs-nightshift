@@ -5,7 +5,7 @@ use rs_nightshift::adapters::artifact_store::FsArtifactStore;
 use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
 use rs_nightshift::adapters::context::PathProbe;
-use rs_nightshift::adapters::git::{head_commit, working_tree_dirty};
+use rs_nightshift::adapters::git::{head_commit, working_tree_dirty, GitRepoState};
 use rs_nightshift::adapters::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
 use rs_nightshift::adapters::state::{config_fingerprint, FsStateStore};
 use rs_nightshift::adapters::test::ProcessTestRunner;
@@ -293,10 +293,6 @@ async fn real_main() -> anyhow::Result<()> {
                     (cfg, run_dir, goal, identity, None)
                 }
             };
-            // A run that already finished resumes to its status: no model call, exit 0.
-            let finished = checkpoint
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.status != RunStatus::Running);
             let request = RunRequest {
                 run: &run_dir,
                 repo: &repo,
@@ -305,17 +301,13 @@ async fn real_main() -> anyhow::Result<()> {
                 identity,
                 resume: checkpoint,
                 force_resume,
+                repo_state: &GitRepoState,
             };
+            // A finished run resumed here reports its status, with the exit code
+            // a fresh run of that status would give. It calls no model.
             let (result, report) = execute_run(&out, &request).await?;
             writeln!(io::stdout(), "{report}")?;
-            if finished {
-                process::exit(0);
-            }
-            process::exit(match result.status {
-                RunStatus::Done => 0,
-                RunStatus::Failed => 1,
-                RunStatus::Blocked | RunStatus::Running => 2,
-            });
+            process::exit(exit_code(result.status));
         }
         Command::Queue {
             file,
@@ -443,12 +435,43 @@ fn prepare_run(
 /// The config and target-repo state a run records at its start. A resume
 /// refuses to continue when either has changed.
 fn run_identity(config: &Path, profile: Option<&str>, repo: &Path) -> Result<RunIdentity, Error> {
-    let bytes = std::fs::read(config)?;
     Ok(RunIdentity {
-        config_hash: config_fingerprint(&bytes, profile),
+        config_hash: config_identity(config, machine_config_path().as_deref(), profile)?,
         // A repo with no commit yet (or no git at all) has no HEAD to record.
         repo_head: head_commit(repo).ok(),
     })
+}
+
+/// Fingerprint of the repo config bytes, the machine file's bytes (none when
+/// the file does not exist) and the profile name. Loading uses the same files,
+/// so an edit to any of them changes the fingerprint.
+fn config_identity(
+    config: &Path,
+    machine: Option<&Path>,
+    profile: Option<&str>,
+) -> Result<String, Error> {
+    let config_bytes = std::fs::read(config)?;
+    let machine_bytes = match machine.map(std::fs::read) {
+        None => None,
+        Some(Ok(bytes)) => Some(bytes),
+        Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Some(Err(error)) => return Err(error.into()),
+    };
+    Ok(config_fingerprint(
+        &config_bytes,
+        machine_bytes.as_deref(),
+        profile,
+    ))
+}
+
+/// The process exit code for a run's final status: `done` 0, `failed` 1,
+/// `blocked` 2. Automation relies on it, so a finished run keeps it on resume.
+fn exit_code(status: RunStatus) -> i32 {
+    match status {
+        RunStatus::Done => 0,
+        RunStatus::Failed => 1,
+        RunStatus::Blocked | RunStatus::Running => 2,
+    }
 }
 
 /// Walk the role graph in the request's run directory; returns the result and
@@ -519,6 +542,7 @@ impl JobHost for HarnessHost {
             identity,
             resume: None,
             force_resume: false,
+            repo_state: &GitRepoState,
         };
         match execute_run(&self.out, &request).await {
             Ok((result, report)) => {
@@ -676,5 +700,46 @@ model = "m"
         std::fs::write(&machine, "").expect("write");
         let result = machine_config_path_from(None, None, Some(home));
         assert_eq!(result, Some(machine));
+    }
+
+    #[test]
+    fn config_identity_sees_the_machine_file_appear_and_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = tmp.path().join("nightshift.toml");
+        std::fs::write(&config, "[run]\n").expect("write config");
+        let machine = tmp.path().join("machine.toml");
+
+        let absent = config_identity(&config, Some(&machine), Some("mac")).expect("absent");
+        assert_eq!(
+            absent,
+            config_identity(&config, None, Some("mac")).expect("no path"),
+            "a missing machine file counts as no machine file"
+        );
+
+        std::fs::write(&machine, "[providers.x]\n").expect("write machine");
+        let present = config_identity(&config, Some(&machine), Some("mac")).expect("present");
+        assert_ne!(absent, present, "a machine file that appears");
+
+        std::fs::write(&machine, "[providers.y]\n").expect("rewrite machine");
+        let edited = config_identity(&config, Some(&machine), Some("mac")).expect("edited");
+        assert_ne!(present, edited, "a machine file whose bytes change");
+    }
+
+    #[test]
+    fn config_identity_fails_when_the_machine_path_cannot_be_read() {
+        // A directory where the machine file should be is an error, not "absent".
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = tmp.path().join("nightshift.toml");
+        std::fs::write(&config, "[run]\n").expect("write config");
+        let machine = tmp.path().join("machine.toml");
+        std::fs::create_dir(&machine).expect("directory");
+        assert!(config_identity(&config, Some(&machine), None).is_err());
+    }
+
+    #[test]
+    fn exit_code_follows_the_final_status() {
+        assert_eq!(exit_code(RunStatus::Done), 0);
+        assert_eq!(exit_code(RunStatus::Failed), 1);
+        assert_eq!(exit_code(RunStatus::Blocked), 2);
     }
 }

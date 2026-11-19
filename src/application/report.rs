@@ -234,6 +234,7 @@ mod tests {
             artifacts: Vec::new(),
             findings: Vec::new(),
             questions: Vec::new(),
+            tree: None,
         }
     }
 

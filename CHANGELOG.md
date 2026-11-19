@@ -8,11 +8,19 @@ All notable changes to this project are documented in this file.
 
 - `nightshift harness --resume <run-dir>` continues a run that a crash,
   reboot or power cut stopped, from its last completed role, with the same
-  step and loop counters. It refuses when the config or the target repo's
-  `HEAD` changed since the run started (`--force-resume` overrides). A
-  finished run resumed this way prints its report and exits 0 without
-  calling a model. Each run records its config fingerprint and repo `HEAD`
-  in `state.json` from its first role on (#111).
+  step and loop counters. A `failed` or `blocked` run is retried: the resume
+  re-runs the role that ended it, and that failed attempt still counts toward
+  `max_steps`. A `done` run is not run again; the resume prints its report and
+  exits with the code a fresh run of that status gives: `done` 0, `failed` 1,
+  `blocked` 2. This changes the first design, which exited 0 for any finished
+  run. A resume refuses, exit 1 and a `resume_refused` event, when the repo
+  config, `machine.toml`, the profile, the target repo's `HEAD` or the target
+  working tree differs from the checkpoint. The working tree is fingerprinted
+  from `git status`, the diff against `HEAD` and the contents of untracked
+  files, so a crashed role's edits refuse the resume. `--force-resume`
+  overrides any of these and is recorded in the `resumed` event. Each
+  checkpoint records the config fingerprint, the repo `HEAD` and the target
+  tree in `state.json` (#111).
 - A machine file, `~/.config/nightshift/machine.toml` (or
   `$XDG_CONFIG_HOME/nightshift/machine.toml`, or `NIGHTSHIFT_MACHINE_CONFIG`),
   holds one machine's `[providers.*]` and `[profiles.*]` outside the repo.

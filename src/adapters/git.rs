@@ -3,7 +3,9 @@
 //! These functions inspect and mutate a repo working tree, but never add,
 //! commit, push, reset, or clean.
 
+use crate::domain::rolegraph::state::{fingerprint, TreeState};
 use crate::error::{ArtifactError, Error, GitError};
+use crate::ports::RepoState;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -270,7 +272,8 @@ fn format_hunk_header(
 }
 
 /// Run a git command in `repo` and return its stdout as UTF-8.
-fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
+/// Run `git args` in `repo` and return its stdout bytes.
+fn git_output(repo: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
@@ -282,7 +285,71 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
             GitError::new(format!("git {} failed: {}", args.join(" "), stderr.trim())).into(),
         );
     }
-    String::from_utf8(output.stdout).map_err(|e| GitError::new(e.to_string()).into())
+    Ok(output.stdout)
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
+    let stdout = git_output(repo, args)?;
+    String::from_utf8(stdout).map_err(|e| GitError::new(e.to_string()).into())
+}
+
+/// Reads the target repo's working tree with `git status` and `git diff`
+/// only. It never writes to the repo.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GitRepoState;
+
+impl RepoState for GitRepoState {
+    /// Fingerprints `git status --porcelain` (every untracked file listed), the
+    /// diff against `HEAD`, and the bytes of each untracked file, so an edit to
+    /// a file a role created earlier also shows. A repo without a commit has
+    /// no `HEAD` to diff against, so reading it fails.
+    fn working_tree(&self, repo: &Path) -> Result<TreeState, Error> {
+        // `--no-optional-locks` keeps status from rewriting the index.
+        let status = git_output(
+            repo,
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+        )?;
+        let diff = git_output(
+            repo,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "HEAD",
+            ],
+        )?;
+        let status_lines: Vec<String> = String::from_utf8_lossy(&status)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let mut parts = vec![status, diff];
+        for line in &status_lines {
+            let Some(name) = line.strip_prefix("?? ") else {
+                continue;
+            };
+            parts.push(name.as_bytes().to_vec());
+            // A quoted name is not a plain path, and a FIFO would block a read:
+            // both are fingerprinted by name only.
+            let path = repo.join(name);
+            if !name.starts_with('"') && path.is_file() {
+                let bytes = std::fs::read(&path).map_err(|e| {
+                    GitError::new(format!("failed to read {}: {e}", path.display()))
+                })?;
+                parts.push(bytes);
+            }
+        }
+        let slices: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+        Ok(TreeState {
+            fingerprint: fingerprint(&slices),
+            status: status_lines,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -570,5 +637,63 @@ diff --git a/file.txt b/file.txt
             assert!(!dir.path().join(".env").exists());
             assert!(!dir.path().join("x\tdir").exists());
         }
+    }
+
+    /// A repo with one commit, identity set so `git commit` works anywhere.
+    fn repo_with_commit(repo: &Path) {
+        git(repo, &["init", "-q", "-b", "main"]).expect("init");
+        git(repo, &["config", "user.email", "test@example.com"]).expect("email");
+        git(repo, &["config", "user.name", "test"]).expect("name");
+        std::fs::write(repo.join("a.txt"), "one\n").expect("write");
+        git(repo, &["add", "-A"]).expect("add");
+        git(repo, &["commit", "-q", "-m", "init"]).expect("commit");
+    }
+
+    #[test]
+    fn working_tree_fingerprint_follows_edits_and_names_the_changed_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        repo_with_commit(repo);
+        let clean = GitRepoState.working_tree(repo).expect("clean tree");
+        assert!(clean.status.is_empty(), "{clean:?}");
+
+        std::fs::write(repo.join("a.txt"), "two\n").expect("edit");
+        let edited = GitRepoState.working_tree(repo).expect("edited tree");
+        assert_ne!(edited.fingerprint, clean.fingerprint);
+        assert_eq!(edited.status, vec![" M a.txt".to_string()]);
+
+        // The same file changed again: the status line is unchanged, the fingerprint is not.
+        std::fs::write(repo.join("a.txt"), "three\n").expect("edit again");
+        let again = GitRepoState.working_tree(repo).expect("edited again");
+        assert_eq!(again.status, edited.status);
+        assert_ne!(again.fingerprint, edited.fingerprint);
+
+        // Back to the commit: the same fingerprint as the clean tree.
+        std::fs::write(repo.join("a.txt"), "one\n").expect("restore");
+        let restored = GitRepoState.working_tree(repo).expect("restored tree");
+        assert_eq!(restored.fingerprint, clean.fingerprint);
+    }
+
+    #[test]
+    fn working_tree_reads_untracked_files_by_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        repo_with_commit(repo);
+        std::fs::write(repo.join("new.txt"), "first\n").expect("write");
+        let created = GitRepoState.working_tree(repo).expect("created");
+        assert_eq!(created.status, vec!["?? new.txt".to_string()]);
+
+        std::fs::write(repo.join("new.txt"), "second\n").expect("rewrite");
+        let rewritten = GitRepoState.working_tree(repo).expect("rewritten");
+        assert_eq!(rewritten.status, created.status);
+        assert_ne!(rewritten.fingerprint, created.fingerprint);
+    }
+
+    #[test]
+    fn working_tree_of_a_repo_without_a_commit_is_an_error() {
+        // No HEAD to diff against: the caller records no tree, and resume refuses.
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q", "-b", "main"]).expect("init");
+        assert!(GitRepoState.working_tree(dir.path()).is_err());
     }
 }

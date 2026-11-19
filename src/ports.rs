@@ -10,8 +10,10 @@
 //! is driven by real usage.
 
 use crate::domain::rolegraph::config::ProviderSpec;
-use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot};
+use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot, TreeState};
 use crate::error::Error;
+#[cfg(test)]
+use crate::error::GitError;
 #[cfg(test)]
 use crate::error::{ArtifactError, ProviderError};
 use std::collections::BTreeMap;
@@ -294,6 +296,53 @@ pub trait ContextProvider: Send + Sync {
     async fn gather(&self, repo: &Path, goal: &str) -> Result<String, Error>;
 }
 
+/// Reads the target repo's working-tree state. Read-only: an implementation
+/// must never add, commit, reset or clean.
+///
+/// The orchestrator reads it before each role starts, and a resume compares
+/// the live tree with the one the checkpoint recorded.
+pub trait RepoState: Send + Sync {
+    /// The working tree of `repo` now.
+    fn working_tree(&self, repo: &Path) -> Result<TreeState, Error>;
+}
+
+/// Test double for [`RepoState`]: each read returns the next scripted tree,
+/// and the last one repeats. An empty script reads as a clean, empty tree.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct StubRepoState {
+    reads: std::sync::Mutex<std::collections::VecDeque<Result<TreeState, String>>>,
+}
+
+#[cfg(test)]
+impl StubRepoState {
+    /// A stub whose reads return `states` in order, then the last one again.
+    /// An `Err` entry reads as a git failure with that message.
+    #[must_use]
+    pub fn new(states: Vec<Result<TreeState, String>>) -> Self {
+        Self {
+            reads: std::sync::Mutex::new(states.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RepoState for StubRepoState {
+    fn working_tree(&self, _repo: &Path) -> Result<TreeState, Error> {
+        let mut reads = self.reads.lock().expect("stub mutex");
+        let next = if reads.len() > 1 {
+            reads.pop_front()
+        } else {
+            reads.front().cloned()
+        };
+        match next {
+            Some(Ok(tree)) => Ok(tree),
+            Some(Err(message)) => Err(GitError::new(message).into()),
+            None => Ok(TreeState::default()),
+        }
+    }
+}
+
 /// Test double for [`ToolRunner`]: returns a fixed reply for any tool.
 #[cfg(test)]
 #[derive(Debug, Default)]
@@ -443,6 +492,7 @@ mod tests {
             artifacts: Vec::new(),
             findings: Vec::new(),
             questions: Vec::new(),
+            tree: None,
         };
         store.write_snapshot(run, &snap).expect("write");
         assert_eq!(store.read_snapshot(run).expect("read"), snap);

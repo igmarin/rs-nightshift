@@ -573,6 +573,157 @@ async fn harness_resume_finishes_a_finished_run_and_continues_a_crashed_one() {
     assert!(actions.contains("\"event\":\"resumed\""), "{actions}");
 }
 
+/// Set the run's checkpoint to a crash just before `role`, one step done.
+fn simulate_crash_before(run: &Path, role: &str) {
+    let state_path = run.join("state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("state")).expect("json");
+    state["status"] = "running".into();
+    state["current_role"] = role.into();
+    state["steps"] = 1.into();
+    fs::write(&state_path, state.to_string()).expect("write state");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_resume_reruns_a_failed_role_and_exits_by_the_new_status() {
+    let server = MockServer::start().await;
+    reply(&server, &envelope("fail", "Could not finish.")).await;
+    // The resume re-runs the failed first role, then the second one finishes.
+    reply(&server, &envelope("continue", "The brief.")).await;
+    reply(&server, &envelope("done", "Signed off.")).await;
+
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    let out = work.path().join("artifacts");
+    let config = write_config(work.path(), &server, TWO_ROLES);
+
+    let first = nightshift(vec![
+        "harness".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Greet the world".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    assert_eq!(first.status.code(), Some(1), "{}", text(&first.stderr));
+    let run = run_dir(&out);
+
+    let resumed = nightshift(resume_args(&run, &config, repo.path())).await;
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    assert!(
+        text(&resumed.stdout).contains("Status: PASSED"),
+        "{}",
+        text(&resumed.stdout)
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_resume_of_a_failed_run_that_fails_again_exits_1_and_records_it() {
+    let server = MockServer::start().await;
+    reply(&server, &envelope("fail", "Could not finish.")).await;
+    reply(&server, &envelope("fail", "Still could not finish.")).await;
+
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    let out = work.path().join("artifacts");
+    let config = write_config(work.path(), &server, TWO_ROLES);
+
+    let first = nightshift(vec![
+        "harness".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Greet the world".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    assert_eq!(first.status.code(), Some(1), "{}", text(&first.stderr));
+    let run = run_dir(&out);
+
+    // A failed run is retried on purpose: the resume re-runs the failed role,
+    // which fails again, so the exit code and the recorded state stay failed.
+    let again = nightshift(resume_args(&run, &config, repo.path())).await;
+    assert_eq!(again.status.code(), Some(1), "{}", text(&again.stderr));
+    assert!(
+        text(&again.stdout).contains("Status: FAILED"),
+        "{}",
+        text(&again.stdout)
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("state.json")).expect("state"))
+            .expect("json");
+    assert_eq!(state["status"], "failed", "{state}");
+    let actions = fs::read_to_string(run.join("actions.jsonl")).expect("actions");
+    assert!(actions.contains("\"event\":\"resumed\""), "{actions}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_resume_refuses_an_edited_tree_and_records_the_refusal() {
+    let server = MockServer::start().await;
+    reply(&server, &envelope("continue", "The brief.")).await;
+    reply(&server, &envelope("done", "Signed off.")).await;
+    // Used only by the resume after the simulated crash.
+    reply(&server, &envelope("done", "Signed off again.")).await;
+
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    let out = work.path().join("artifacts");
+    let config = write_config(work.path(), &server, TWO_ROLES);
+
+    let first = nightshift(vec![
+        "harness".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Greet the world".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    assert!(first.status.success(), "{}", text(&first.stderr));
+    let run = run_dir(&out);
+    simulate_crash_before(&run, "qa");
+
+    // The crashed role left a file in the target tree after its checkpoint.
+    let stray = repo.path().join("notes.md");
+    fs::write(&stray, "half written\n").expect("stray file");
+    let refused = nightshift(resume_args(&run, &config, repo.path())).await;
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains("notes.md"),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("state.json")).expect("state"))
+            .expect("json");
+    assert_eq!(state["status"], "running", "{state}");
+    assert_eq!(state["current_role"], "qa", "{state}");
+    let actions = fs::read_to_string(run.join("actions.jsonl")).expect("actions");
+    assert!(
+        actions.contains("\"event\":\"resume_refused\""),
+        "{actions}"
+    );
+
+    // Once the tree matches the checkpoint again, only qa runs.
+    fs::remove_file(&stray).expect("remove stray file");
+    let resumed = nightshift(resume_args(&run, &config, repo.path())).await;
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed.stderr));
+    assert_eq!(server.received_requests().await.expect("requests").len(), 3);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn harness_force_resume_without_resume_is_refused() {
     let output = nightshift(vec![

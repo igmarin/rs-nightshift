@@ -97,20 +97,37 @@ nightshift harness --resume artifacts/2026-11-18_add-health-run-x \
                    --repo ~/projects/my-app [--config nightshift.toml]
 ```
 
-Continues a run that a crash, reboot or power cut stopped, from the last
-checkpoint: the next role runs with the same step and loop counters, so
-`run.max_steps` and `max_loop` still hold. The goal comes from the run's
-`state.json`, so `--goal` and `--name` are not accepted. Before it
-continues, it refuses when the config file (its bytes and the profile) or the
-target repo's `HEAD` differs from what the run recorded at its start, and it
-names the difference; `--force-resume` continues anyway. Each resume appends
-a `resumed` event to `actions.jsonl`.
+Continues a run from its last checkpoint, with the same step and loop
+counters, so `run.max_steps` and `max_loop` still hold. The goal comes from
+the run's `state.json`, so `--goal` and `--name` are not accepted.
 
-A run that already finished (`done`, `blocked` or `failed`) is not run again:
-the command prints its report and exits `0`, without calling a model. A role
-that was running when the process died runs again from its start. If it had
-already edited the repo before the crash, nothing undoes that edit, and the
-role may fail on the edited tree: check the repo before you resume.
+What the checkpoint's status decides:
+
+- `running` (a crash): the role that was running runs again from its start.
+- `failed` or `blocked`: the role that ended the run runs again, from the state
+  it started with. The failed attempt still counts toward `max_steps`.
+- `done`: nothing runs and no model is called. The command prints the report
+  and exits with the code a fresh run of that status gives: `0` done, `1`
+  failed, `2` blocked. This changes the first design, which exited `0` for any
+  finished run.
+
+Before it continues, a resume checks four things against the checkpoint and
+refuses on any difference, naming it:
+
+- the repo config file (its bytes), the `machine.toml` bytes (or that it is
+  absent) and the profile name;
+- the target repo's `HEAD`;
+- the target working tree: a fingerprint of `git status --porcelain`, the diff
+  against `HEAD` and the bytes of each untracked file. A role that edited the
+  repo before a crash changes it, so the resume is refused and the message
+  names the files that differ. Revert or inspect those edits, then resume, or
+  pass `--force-resume`. Keep `--out` outside the target repo, or ignored by
+  git: an unignored run directory inside the repo changes the tree at every
+  checkpoint, so its resume is always refused.
+
+A refused resume exits `1`, appends a `resume_refused` event to
+`actions.jsonl`, and leaves `state.json` as it was. `--force-resume` continues
+past the differences, and the `resumed` event records them.
 
 ### `nightshift queue`: many runs in a row
 
@@ -197,7 +214,7 @@ Each run persists, under its run directory:
 
 - `actions.jsonl` — the append-only action log, one JSON object per event:
   `role_start`, `llm_call`, `retry`, `role_end`, `loop`, `resumed`, and the terminal
-  `done` / `fail` / `halt`, carrying timestamp, role, provider/model,
+  `done` / `fail` / `halt`, plus `resumed` and `resume_refused`, carrying timestamp, role, provider/model,
   verdict, artifact, and block reason. A `retry` event also carries `detail`
   (the attempt number and why the reply was rejected). Each model call,
   failed ones too, writes one `llm_call` event whose `call` has the call's
@@ -206,8 +223,9 @@ Each run persists, under its run directory:
 - `state.json` — the status snapshot: current role, step count, last verdict,
   status (`running` / `done` / `blocked` / `failed`), block reason, per-edge
   loop counters, the goal, the role outputs so far, the config fingerprint and
-  the repo `HEAD` at the start. While `running` it is rewritten before each
-  role starts, so it is the checkpoint `harness --resume` continues from.
+  the repo `HEAD` at the start, and the target working tree (fingerprint and
+  `git status` lines) when the current role started. It is rewritten before
+  each role starts, so it is the checkpoint `harness --resume` continues from.
   Written via temp-file + rename so an interruption never truncates it.
 
 Role outputs (the `output = "…"` files from config, such as `01_brief.md`)

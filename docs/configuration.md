@@ -225,7 +225,8 @@ prompt = "..."
 A machine's own providers and profiles can live outside the repo, in
 `~/.config/nightshift/machine.toml` (`$XDG_CONFIG_HOME/nightshift/machine.toml`
 when `XDG_CONFIG_HOME` is set to an absolute path, or the path in
-`NIGHTSHIFT_MACHINE_CONFIG`):
+`NIGHTSHIFT_MACHINE_CONFIG`). A run records the file's bytes when it starts,
+so `harness --resume` refuses to continue if the file changed since then:
 
 ```toml
 # ~/.config/nightshift/machine.toml on the Linux box
