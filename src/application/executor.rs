@@ -3,7 +3,9 @@
 use crate::domain::rolegraph::config::{is_secret_path, RoleSpec, DEFAULT_GENERATE_TIMEOUT_SECS};
 use crate::domain::rolegraph::verdict::{RoleOutput, Verdict};
 use crate::error::{ArtifactError, Error, ProviderError};
-use crate::ports::{ArtifactStore, ContextProvider, GenerateRequest, ModelClient, ToolRunner};
+use crate::ports::{
+    ArtifactStore, ContextProvider, GenerateRequest, ModelClient, PendingChunks, ToolRunner,
+};
 use std::path::Path;
 use std::time::Duration;
 
@@ -72,6 +74,9 @@ pub struct ExecuteOutcome {
     pub output: RoleOutput,
     /// The artifact file written, when the role declares an `output`.
     pub artifact: Option<String>,
+    /// Chunks of a chunked `write-file` still missing when the role ended. The
+    /// run must not move past the role while this is set.
+    pub pending: Option<PendingChunks>,
 }
 
 /// Per-execution inputs (borrowed data; ports are passed separately).
@@ -89,10 +94,21 @@ pub struct ExecuteParams<'a> {
     /// Called before each retry with the rejected attempt number and its
     /// error, so the caller can log it. An `Err` ends the role.
     pub on_retry: &'a dyn Fn(u32, &Error) -> Result<(), Error>,
+    /// How many times the role is called again for the missing chunks of a
+    /// chunked `write-file`, before the role ends with its pending chunks.
+    pub max_chunk_rounds: u32,
+    /// Called once for each buffered chunk write that did not yet assemble
+    /// its file. An `Err` ends the role.
+    pub on_pending: &'a dyn Fn(&PendingChunks) -> Result<(), Error>,
 }
 
 /// An [`ExecuteParams::on_retry`] that logs nothing.
 pub fn ignore_retry(_attempt: u32, _error: &Error) -> Result<(), Error> {
+    Ok(())
+}
+
+/// An [`ExecuteParams::on_pending`] that logs nothing.
+pub fn ignore_pending(_chunks: &PendingChunks) -> Result<(), Error> {
     Ok(())
 }
 
@@ -185,29 +201,58 @@ where
     }
     let prompt = user_prompt(params.context, &contents, &tool_output);
     let mut rejection: Option<String> = None;
+    // Set while a chunked write still lacks chunks: the next call asks for them.
+    let mut chunk_request: Option<String> = None;
+    let mut chunk_rounds: u32 = 0;
     let mut attempt: u32 = 1;
     loop {
-        let prompt = match &rejection {
+        let mut prompt = match &rejection {
             Some(reason) => format!(
                 "{prompt}\n\nYour previous reply was rejected: {reason}\n\
                  Reply again with the full JSON object, corrected."
             ),
             None => prompt.clone(),
         };
-        let failure = match attempt_role(client, store, tools, params, prompt, attempt).await {
-            Ok(outcome) => return Ok(outcome),
-            Err(failure) => failure,
+        if let Some(request) = &chunk_request {
+            prompt = format!("{prompt}\n\n{request}");
+        }
+        let outcome = match attempt_role(client, store, tools, params, prompt, attempt).await {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                // `retries` is capped at validation (`MAX_RETRIES`), so `attempt` cannot overflow.
+                if failure.retry == Retry::No || attempt > params.role.retries {
+                    return Err(failure.error);
+                }
+                (params.on_retry)(attempt, &failure.error)?;
+                if failure.retry == Retry::WithFeedback {
+                    rejection = Some(failure.error.to_string());
+                }
+                attempt += 1;
+                continue;
+            }
         };
-        // `retries` is capped at validation (`MAX_RETRIES`), so `attempt` cannot overflow.
-        if failure.retry == Retry::No || attempt > params.role.retries {
-            return Err(failure.error);
+        // A chunk round is a re-call, not a retry: it does not use `retries`.
+        match &outcome.pending {
+            Some(pending) if chunk_rounds < params.max_chunk_rounds => {
+                chunk_rounds += 1;
+                chunk_request = Some(chunk_request_text(pending));
+                rejection = None;
+            }
+            _ => return Ok(outcome),
         }
-        (params.on_retry)(attempt, &failure.error)?;
-        if failure.retry == Retry::WithFeedback {
-            rejection = Some(failure.error.to_string());
-        }
-        attempt += 1;
     }
+}
+
+/// The feedback a role gets when its chunked write still lacks chunks.
+fn chunk_request_text(pending: &PendingChunks) -> String {
+    format!(
+        "The file {path} is not written yet: missing chunks {missing} of {total}. \
+         Reply with the full JSON object again. In \"content\", send only the missing \
+         chunks, each as a section that starts with `file: {path} chunk: N/{total}`.",
+        path = pending.path,
+        missing = pending.missing_list(),
+        total = pending.total,
+    )
 }
 
 /// One generate → parse → write → post-tools pass for a role.
@@ -288,6 +333,7 @@ where
 
     // Post-tools: apply the patch, write the file, or search-replace only for
     // verdicts that carry a deliverable.
+    let mut pending: Option<PendingChunks> = None;
     if matches!(output.verdict, Verdict::Continue | Verdict::Done) {
         // Once one edit tool has changed the repo, a later failure is not
         // retried: the retry would run the first tool again on changed files.
@@ -297,8 +343,8 @@ where
                 tool.as_str(),
                 "apply-patch" | "write-file" | "search-replace"
             ) {
-                tools
-                    .run(tool, params.repo, &output.content)
+                let report = tools
+                    .run_report(tool, params.repo, &output.content)
                     .await
                     .map_err(|error| {
                         keep_rejected();
@@ -309,12 +355,23 @@ where
                         };
                         Failure { error, retry }
                     })?;
+                if let Some(chunks) = &report.pending {
+                    (params.on_pending)(chunks).map_err(|error| Failure {
+                        error,
+                        retry: Retry::No,
+                    })?;
+                    pending = Some(chunks.clone());
+                }
                 edited = true;
             }
         }
     }
 
-    Ok(ExecuteOutcome { output, artifact })
+    Ok(ExecuteOutcome {
+        output,
+        artifact,
+        pending,
+    })
 }
 
 /// Assemble the system prompt: the role's job plus the output contract.
@@ -1305,6 +1362,7 @@ fn floor_char_boundary_bytes(buf: &[u8], mut max_bytes: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::rolegraph::config::DEFAULT_MAX_CHUNK_ROUNDS;
     use crate::domain::rolegraph::routing::Routing;
     use crate::domain::rolegraph::verdict::Verdict;
     use crate::ports::{
@@ -1356,7 +1414,189 @@ mod tests {
             context,
             artifacts: &[],
             on_retry: &ignore_retry,
+            max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+            on_pending: &ignore_pending,
         }
+    }
+
+    /// Reports chunks `missing` (of `total`) pending from `write-file` for the
+    /// first `pending_calls` calls, then reports the file written.
+    struct ChunkedTools {
+        pending_calls: std::sync::Mutex<u32>,
+        missing: Vec<usize>,
+        total: usize,
+    }
+
+    impl ChunkedTools {
+        fn new(pending_calls: u32, missing: Vec<usize>, total: usize) -> Self {
+            Self {
+                pending_calls: std::sync::Mutex::new(pending_calls),
+                missing,
+                total,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolRunner for ChunkedTools {
+        async fn run(&self, _tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+            Ok("wrote".into())
+        }
+
+        async fn run_report(
+            &self,
+            _tool: &str,
+            _repo: &Path,
+            _input: &str,
+        ) -> Result<crate::ports::ToolReport, Error> {
+            let mut left = self.pending_calls.lock().expect("calls");
+            if *left == 0 {
+                return Ok(crate::ports::ToolReport::plain("wrote a.md".into()));
+            }
+            *left -= 1;
+            Ok(crate::ports::ToolReport {
+                text: "stored chunks".into(),
+                pending: Some(PendingChunks {
+                    path: "a.md".into(),
+                    missing: self.missing.clone(),
+                    total: self.total,
+                }),
+            })
+        }
+    }
+
+    fn chunk_role() -> RoleSpec {
+        role_with_tools(None, &["write-file"])
+    }
+
+    #[tokio::test]
+    async fn missing_chunks_call_the_role_again_with_the_numbers() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 2/2\ntwo\n"}"#);
+        let tools = ChunkedTools::new(1, vec![2], 2);
+        let store = MemoryArtifactStore::default();
+        let run = Path::new("/tmp/run/x");
+        let role = chunk_role();
+        let ctx = context();
+        let outcome = execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        assert_eq!(outcome.pending, None, "the second call finished the file");
+        let calls = client.calls();
+        assert_eq!(calls.len(), 2, "one re-call for the missing chunk");
+        assert!(
+            calls[1].prompt.contains("missing chunks 2 of 2"),
+            "{}",
+            calls[1].prompt
+        );
+    }
+
+    #[tokio::test]
+    async fn each_buffered_chunk_write_is_reported_to_the_caller() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 2/2\ntwo\n"}"#);
+        let tools = ChunkedTools::new(2, vec![2], 2);
+        let store = MemoryArtifactStore::default();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let record = |chunks: &PendingChunks| {
+            seen.lock().expect("seen").push(chunks.clone());
+            Ok(())
+        };
+        let role = chunk_role();
+        let ctx = context();
+        let run = Path::new("/tmp/run/x");
+        execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                max_chunk_rounds: 2,
+                on_pending: &record,
+                ..params(run, &role, &ctx)
+            },
+        )
+        .await
+        .expect("execute");
+        let expected = PendingChunks {
+            path: "a.md".into(),
+            missing: vec![2],
+            total: 2,
+        };
+        assert_eq!(
+            *seen.lock().expect("seen"),
+            vec![expected.clone(), expected]
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_chunks_stop_at_the_round_cap_and_are_returned() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        let tools = ChunkedTools::new(u32::MAX, vec![2], 2);
+        let store = MemoryArtifactStore::default();
+        let role = chunk_role();
+        let ctx = context();
+        let run = Path::new("/tmp/run/x");
+        let outcome = execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                max_chunk_rounds: 1,
+                ..params(run, &role, &ctx)
+            },
+        )
+        .await
+        .expect("execute returns the pending outcome");
+        assert_eq!(client.calls().len(), 2, "first call plus one round");
+        assert_eq!(
+            outcome.pending,
+            Some(PendingChunks {
+                path: "a.md".into(),
+                missing: vec![2],
+                total: 2,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn done_with_missing_chunks_is_returned_as_pending_not_done() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"done","content":"file: a.md chunk: 1/2\none\n"}"#);
+        let tools = ChunkedTools::new(u32::MAX, vec![2], 2);
+        let store = MemoryArtifactStore::default();
+        let role = chunk_role();
+        let ctx = context();
+        let run = Path::new("/tmp/run/x");
+        let outcome = execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                max_chunk_rounds: 0,
+                ..params(run, &role, &ctx)
+            },
+        )
+        .await
+        .expect("execute");
+        assert!(
+            outcome.pending.is_some(),
+            "a done verdict must not hide pending chunks"
+        );
+        assert_eq!(client.calls().len(), 1, "cap 0 means no re-call");
     }
 
     #[tokio::test]
@@ -1409,6 +1649,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &["01_brief.md".into()],
                 on_retry: &ignore_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await
@@ -1650,6 +1892,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &[],
                 on_retry: &on_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await;
@@ -2405,6 +2649,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &[],
                 on_retry: &ignore_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await
@@ -2449,6 +2695,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &[],
                 on_retry: &ignore_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await
@@ -2492,6 +2740,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &[],
                 on_retry: &ignore_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await
@@ -2535,6 +2785,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &[],
                 on_retry: &ignore_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await
@@ -2589,6 +2841,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &[],
                 on_retry: &ignore_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await
@@ -2662,6 +2916,8 @@ mod tests {
                 context: &ctx,
                 artifacts: &[],
                 on_retry: &ignore_retry,
+                max_chunk_rounds: DEFAULT_MAX_CHUNK_ROUNDS,
+                on_pending: &ignore_pending,
             },
         )
         .await

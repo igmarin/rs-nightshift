@@ -14,7 +14,7 @@ use crate::adapters::test::{
 };
 use crate::domain::rolegraph::config::is_secret_path;
 use crate::error::{ArtifactError, Error};
-use crate::ports::{ContextProvider, ToolRunner};
+use crate::ports::{ContextProvider, PendingChunks, ToolReport, ToolRunner};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -97,7 +97,7 @@ impl CapabilityRunner {
     /// A chunked input (`file: <path> chunk: N/M` sections) is buffered in the
     /// run directory and written only once every chunk of the file is present;
     /// see [`write_chunk_section`].
-    async fn write_file(&self, repo: &Path, input: &str) -> Result<String, Error> {
+    async fn write_file(&self, repo: &Path, input: &str) -> Result<ToolReport, Error> {
         let repo = repo.to_path_buf();
         let content = input.to_string();
         let run_dir = self.run_dir.clone();
@@ -150,7 +150,9 @@ impl CapabilityRunner {
                 })?;
             }
             write_atomically(&file_path, &body, "write-file")?;
-            Ok(format!("wrote {path} ({body_len} bytes)"))
+            Ok(ToolReport::plain(format!(
+                "wrote {path} ({body_len} bytes)"
+            )))
         })
         .await
         .map_err(|error| {
@@ -594,8 +596,8 @@ fn is_chunked(input: &str) -> bool {
         .is_some_and(|rest| rest.contains(" chunk: "))
 }
 
-/// One reply's chunks of a single file, with every chunk body trimmed of
-/// trailing blank lines and joined with newlines.
+/// One reply's chunks of a single file. Each body is the raw bytes the reply
+/// sent after its header line, kept exactly: nothing is trimmed or re-joined.
 struct ChunkedWrite {
     /// The repo-relative path, as the model wrote it.
     path: String,
@@ -609,18 +611,20 @@ struct ChunkedWrite {
 /// per section, each followed by that chunk's content. All sections must
 /// name the same path and total, and no number may repeat within the reply.
 fn parse_chunked_write(input: &str) -> Result<ChunkedWrite, Error> {
-    // (path, number, total, body lines) per section.
-    let mut sections: Vec<(&str, usize, usize, Vec<&str>)> = Vec::new();
-    for line in input.lines() {
+    // (path, number, total, raw body) per section.
+    let mut sections: Vec<(&str, usize, usize, String)> = Vec::new();
+    // Split keeping each line's terminator, so bodies are copied byte for byte.
+    for raw in input.split_inclusive('\n') {
+        let line = raw.trim_end_matches(['\n', '\r']);
         // Same sentinels as a plain write: the model echoed a context marker.
         if line.starts_with("<!-- file:") || line.starts_with("<!-- end file content -->") {
             break;
         }
         if let Some(rest) = line.strip_prefix("file: ") {
             let (path, number, total) = parse_chunk_header(rest)?;
-            sections.push((path, number, total, Vec::new()));
+            sections.push((path, number, total, String::new()));
         } else if let Some(section) = sections.last_mut() {
-            section.3.push(line);
+            section.3.push_str(raw);
         } else {
             return Err(Error::from(ArtifactError::artifact(
                 "write-file: input must start with 'file: <path> chunk: N/M'",
@@ -633,7 +637,7 @@ fn parse_chunked_write(input: &str) -> Result<ChunkedWrite, Error> {
         )));
     };
     let mut chunks: Vec<(usize, String)> = Vec::with_capacity(sections.len());
-    for (section_path, number, section_total, mut lines) in sections {
+    for (section_path, number, section_total, body) in sections {
         if section_path != path || section_total != total {
             return Err(Error::from(ArtifactError::artifact(format!(
                 "write-file: a reply carries chunks of one file and one total; \
@@ -645,16 +649,13 @@ fn parse_chunked_write(input: &str) -> Result<ChunkedWrite, Error> {
                 "write-file: chunk {number}/{total} of {path} appears twice in one reply"
             ))));
         }
-        while lines.last().is_some_and(|line| line.trim().is_empty()) {
-            lines.pop();
-        }
-        if lines.is_empty() {
+        // Blank content is refused, but not trimmed: a chunk that is only
+        // whitespace is an empty chunk, and anything else is kept as sent.
+        if body.trim().is_empty() {
             return Err(Error::from(ArtifactError::artifact(format!(
                 "write-file: chunk {number}/{total} of {path} is empty"
             ))));
         }
-        let mut body = lines.join("\n");
-        body.push('\n');
         chunks.push((number, body));
     }
     Ok(ChunkedWrite {
@@ -688,7 +689,7 @@ fn parse_chunk_header(rest: &str) -> Result<(&str, usize, usize), Error> {
 /// Buffer one reply's chunks under the run directory and write the file once
 /// every chunk of its total is present. Until then nothing is written to the
 /// repo and the tool succeeds, reporting which chunks are still missing.
-fn write_chunk_section(repo: &Path, run: Option<&Path>, input: &str) -> Result<String, Error> {
+fn write_chunk_section(repo: &Path, run: Option<&Path>, input: &str) -> Result<ToolReport, Error> {
     let run = run.ok_or_else(|| {
         Error::from(ArtifactError::artifact(
             "write-file: chunked input needs a run directory; this runner has none",
@@ -707,17 +708,24 @@ fn write_chunk_section(repo: &Path, run: Option<&Path>, input: &str) -> Result<S
         write_atomically(&dir.join(number.to_string()), body, "write-file")?;
     }
 
-    let missing: Vec<String> = (1..=write.total)
+    let missing: Vec<usize> = (1..=write.total)
         .filter(|number| !dir.join(number.to_string()).is_file())
-        .map(|number| number.to_string())
         .collect();
     if !missing.is_empty() {
-        return Ok(format!(
-            "stored chunks of {}; file not written yet, missing {} of {}",
-            write.path,
-            missing.join(", "),
-            write.total
-        ));
+        let pending = PendingChunks {
+            path: write.path.clone(),
+            missing,
+            total: write.total,
+        };
+        return Ok(ToolReport {
+            text: format!(
+                "stored chunks of {}; file not written yet, missing {} of {}",
+                write.path,
+                pending.missing_list(),
+                write.total
+            ),
+            pending: Some(pending),
+        });
     }
 
     let mut body = String::new();
@@ -736,12 +744,12 @@ fn write_chunk_section(repo: &Path, run: Option<&Path>, input: &str) -> Result<S
     std::fs::remove_dir_all(&buffer).map_err(|error| {
         ArtifactError::artifact(format!("write-file: clear chunk buffer: {error}"))
     })?;
-    Ok(format!(
+    Ok(ToolReport::plain(format!(
         "wrote {} ({} bytes) from {} chunks",
         write.path,
         body.len(),
         write.total
-    ))
+    )))
 }
 
 /// A buffer directory name for `path`: its bytes in hex, so no path can
@@ -844,16 +852,24 @@ impl Default for CapabilityRunner {
 
 #[async_trait::async_trait]
 impl ToolRunner for CapabilityRunner {
-    /// Dispatch a declared capability for `repo`.
+    /// Dispatch a declared capability for `repo`, keeping only its text.
     async fn run(&self, tool: &str, repo: &Path, input: &str) -> Result<String, Error> {
         match tool {
             "run-tests" => self.run_tests(repo).await,
             "apply-patch" => self.apply_patch(repo, input).await,
-            "write-file" => self.write_file(repo, input).await,
+            "write-file" => self.write_file(repo, input).await.map(|report| report.text),
             "search-replace" => self.search_replace(repo, input).await,
             other => Err(Error::from(ArtifactError::artifact(format!(
                 "unknown tool {other:?}"
             )))),
+        }
+    }
+
+    /// Dispatch a declared capability for `repo`, with what it left pending.
+    async fn run_report(&self, tool: &str, repo: &Path, input: &str) -> Result<ToolReport, Error> {
+        match tool {
+            "write-file" => self.write_file(repo, input).await,
+            _ => self.run(tool, repo, input).await.map(ToolReport::plain),
         }
     }
 }
@@ -1526,6 +1542,57 @@ file: leftover.txt
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(left, 0, "buffer must be empty once the file is written");
+    }
+
+    #[tokio::test]
+    async fn write_file_keeps_chunk_bytes_exactly_including_trailing_blank_lines() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let input = format!(
+            "{}{}",
+            chunk("blank.md", 1, 2, "a\n\n\n"),
+            chunk("blank.md", 2, 2, "b\r\n\n")
+        );
+        runner
+            .run("write-file", repo.path(), &input)
+            .await
+            .expect("assemble");
+        let bytes = std::fs::read(repo.path().join("blank.md")).expect("read");
+        assert_eq!(bytes, b"a\n\n\nb\r\n\n", "bytes must be kept as sent");
+    }
+
+    #[tokio::test]
+    async fn write_file_report_names_the_missing_chunks_until_assembly() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let input = format!(
+            "{}{}",
+            chunk("gap.md", 1, 3, "first\n"),
+            chunk("gap.md", 3, 3, "third\n")
+        );
+        let report = runner
+            .run_report("write-file", repo.path(), &input)
+            .await
+            .expect("buffer");
+        assert_eq!(
+            report.pending,
+            Some(PendingChunks {
+                path: "gap.md".into(),
+                missing: vec![2],
+                total: 3,
+            })
+        );
+        let report = runner
+            .run_report(
+                "write-file",
+                repo.path(),
+                &chunk("gap.md", 2, 3, "second\n"),
+            )
+            .await
+            .expect("assemble");
+        assert_eq!(report.pending, None, "nothing pending once written");
     }
 
     #[tokio::test]

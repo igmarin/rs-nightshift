@@ -23,6 +23,9 @@ pub enum BlockReason {
     VersionMismatch,
     /// A loop or step cap was exhausted before the run could finish.
     BudgetExhausted,
+    /// A chunked `write-file` still lacked chunks after the role was called
+    /// again for them, so the file was never written.
+    PendingChunks,
 }
 
 /// A clarifying question a role can raise, with a blocking flag.

@@ -21,6 +21,7 @@ A config has four parts:
 | :--- | :--- | :--- |
 | `start` | (required) | the id of the first role |
 | `max_steps` | `30` | most role turns in one run; reaching it stops the run as `REQUIRES_HUMAN_REVIEW` (`budget_exhausted`) |
+| `max_chunk_rounds` | `3` | how many times a role is called again for the missing chunks of a chunked `write-file`, per role run; with chunks still missing after that, the run stops as `blocked` (`pending_chunks`). See [Chunked writes](#chunked-writes) |
 | `on_unclear` | `"halt"` | what blocking questions do; see [Routing](#routing-on) |
 | `profile` | none | the `[profiles.*]` to use; see [Machine profiles](#machine-profiles-slot-models) |
 
@@ -368,23 +369,37 @@ file: site/index.html chunk: 3/3
 - Each chunk opens with `file: <path> chunk: N/M`: `N` is the chunk number
   (1 to `M`) and `M` is the total (1 to 1000). A chunk runs until the next
   header. A reply may carry several chunks of one file, but they must all
-  share the same path and `M`. Blank lines at the end of a chunk are dropped;
-  blank lines inside it are kept.
+  share the same path and `M`. The bytes of a chunk are kept exactly as the
+  reply sent them: trailing blank lines and CRLF line endings stay, and no
+  newline is added.
 - Chunks are kept in the run directory (`<run>/chunks/`), so they survive
   between model calls of the same run. The repo is not touched until every
-  chunk from 1 to `M` is present. Then the chunks are joined in number order,
-  written as a plain write would be, and the buffer is cleared.
+  chunk from 1 to `M` is present. Then the chunks are concatenated in number
+  order, with no change to their bytes, and the buffer is cleared.
 - Chunks may arrive in any order and in any number of replies. A chunk sent
   again replaces the one stored before, so the last copy wins.
-- A missing chunk is not an error: the tool succeeds, reports which numbers
-  are missing (`missing 2 of 3`), and writes nothing to the repo. The graph
-  routes on the verdict as usual, so the role runs again only when a route
-  sends it back (for example `issues` to the developer); nothing re-calls it
-  for the missing chunks. Put the format in that role's prompt, because the
-  output contract does not mention chunks.
+- A missing chunk never lets the run move past the role. The tool reports the
+  missing numbers (`missing 2 of 3`) and writes nothing to the repo. If the
+  reply's verdict is `continue` or `done`, the harness calls the same role
+  again, with the missing numbers in the prompt, up to
+  [`max_chunk_rounds`](#run) times for that role run (default `3`). A re-call
+  is not a retry: it does not use `retries` or `max_loop`. Each buffered write
+  that does not yet assemble the file adds a `chunk_pending` event to
+  `actions.jsonl`, with the path and the missing numbers.
+- When the re-calls are used up with chunks still missing, the run stops as
+  `blocked` with the block reason `pending_chunks`, and exits with code 2.
+  `state.json` and `actions.jsonl` record it, and nothing is written to the
+  repo. `plan` exits 2 the same way and prints the missing numbers on stderr;
+  it keeps no state. A `done` verdict does not finish a run while chunks are missing.
+- A re-call whose verdict is `issues`, `questions` or `fail` is routed as
+  usual. The stored chunks stay in the run directory, and nothing is written
+  to the repo. Put the format in that role's prompt, because the output
+  contract does not mention chunks.
+- With `max_chunk_rounds = 0`, a missing chunk blocks the run on the first
+  reply.
 - Rejected at once, with nothing stored from that reply: a header that is not
   `file: <path> chunk: N/M` with whole numbers, `N` outside 1 to `M`, `M`
-  outside 1 to 1000, an empty chunk, a number used twice in one reply, chunks
+  outside 1 to 1000, a chunk that is only blank lines, a number used twice in one reply, chunks
   of two files or two totals in one reply, and a path that fails the plain
   write's path rules. The path is checked on the first chunk.
 - Buffers live in the run directory, so only the runners that `harness`,

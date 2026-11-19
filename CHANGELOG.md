@@ -10,6 +10,12 @@ All notable changes to this project are documented in this file.
   `file: <path> chunk: N/M` header. Chunks are kept in the run directory
   across model calls, and the file is written only once all `M` are present
   (#99). See [Chunked writes](docs/configuration.md#chunked-writes).
+- A role whose chunked `write-file` is still missing chunks is called again
+  for them, up to `[run] max_chunk_rounds` (default 3). When the re-calls run
+  out, the run stops as `blocked` with the block reason `pending_chunks` and
+  exits 2. Each buffered chunk adds a `chunk_pending` event to `actions.jsonl`.
+- Chunk bytes are kept exactly as the reply sent them: trailing blank lines
+  and CRLF endings are not trimmed or rewritten.
 
 - A machine file, `~/.config/nightshift/machine.toml` (or
   `$XDG_CONFIG_HOME/nightshift/machine.toml`, or `NIGHTSHIFT_MACHINE_CONFIG`),

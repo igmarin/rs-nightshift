@@ -337,6 +337,16 @@ async fn real_main() -> anyhow::Result<()> {
                         eprintln!("attempt {attempt} rejected, retrying: {error}");
                         Ok(())
                     },
+                    max_chunk_rounds: cfg.run.max_chunk_rounds,
+                    on_pending: &|chunks| {
+                        eprintln!(
+                            "{} is not written yet: missing chunks {} of {}",
+                            chunks.path,
+                            chunks.missing_list(),
+                            chunks.total
+                        );
+                        Ok(())
+                    },
                 };
                 let outcome =
                     execute(client.as_ref(), &store, &tools, &context_provider, &params).await?;
@@ -368,6 +378,11 @@ async fn real_main() -> anyhow::Result<()> {
             writeln!(io::stdout(), "{}", outcome.output.summary)?;
             if let Some(artifact) = &outcome.artifact {
                 writeln!(io::stdout(), "Wrote {}", artifact)?;
+            }
+            // A chunked file that is still missing chunks was never written:
+            // that is a blocked run, not a finished plan.
+            if outcome.pending.is_some() {
+                process::exit(2);
             }
             process::exit(0);
         }

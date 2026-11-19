@@ -162,7 +162,9 @@ the tools a role declares with `tools = [...]`
   after `continue` or `done`. The path must stay in the repo and must not
   be a secret-bearing path, also through a symlinked directory. A reply of
   `file: <path> chunk: N/M` sections is buffered under the run directory
-  until all `M` chunks are present ([Chunked writes](configuration.md#chunked-writes)).
+  until all `M` chunks are present. While chunks are missing, the role is
+  called again for them, and a run that runs out of re-calls blocks as
+  `pending_chunks` ([Chunked writes](configuration.md#chunked-writes)).
 - `search-replace`: exact `old:` / `new:` replacements in existing files.
   Each `old` must match exactly once, overlapping matches included; no
   match, or more than one, is an error and nothing is written.
