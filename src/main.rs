@@ -11,7 +11,9 @@ use rs_nightshift::adapters::state::FsStateStore;
 use rs_nightshift::adapters::test::ProcessTestRunner;
 use rs_nightshift::adapters::ProviderFactory;
 use rs_nightshift::application::executor::{execute, ExecuteParams, RoleContext};
-use rs_nightshift::application::orchestrator::{run_graph, RunRequest, RunResult};
+use rs_nightshift::application::orchestrator::{
+    record_chunk_pending, record_halt, run_graph, RunRequest, RunResult,
+};
 use rs_nightshift::application::report::{block_reason_description, render_report};
 use rs_nightshift::artifacts::{slugify, write_status, ArtifactStore};
 use rs_nightshift::bench::{render_report as render_bench_report, run_bench, BenchParams};
@@ -22,7 +24,7 @@ use rs_nightshift::doctor::{
 use rs_nightshift::domain::rolegraph::config::{
     load_role_graph_config_from, read_config, read_machine_config, NightshiftConfig,
 };
-use rs_nightshift::domain::rolegraph::state::RunStatus;
+use rs_nightshift::domain::rolegraph::state::{RunStatus, StatusSnapshot};
 use rs_nightshift::domain::rolegraph::verdict::{BlockReason, Verdict};
 use rs_nightshift::error::Error;
 use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest};
@@ -305,6 +307,7 @@ async fn real_main() -> anyhow::Result<()> {
             let factory = ProviderFactory;
             let store = FsArtifactStore::new(&out);
             let clock = SystemClock;
+            let state = FsStateStore::new();
             let context_provider = GraphContextProvider;
             let slug = run_slug(&clock, name.as_deref(), &goal, "plan");
             let run_dir = store.create_run(&clock.today(), &slug)?;
@@ -316,7 +319,7 @@ async fn real_main() -> anyhow::Result<()> {
                 &entry.options,
             )?;
             let mut clarifications: Vec<String> = Vec::new();
-            let mut rounds = 0;
+            let mut rounds: u32 = 0;
             let outcome = loop {
                 rounds += 1;
                 let ctx = RoleContext {
@@ -339,6 +342,15 @@ async fn real_main() -> anyhow::Result<()> {
                     },
                     max_chunk_rounds: cfg.run.max_chunk_rounds,
                     on_pending: &|chunks| {
+                        record_chunk_pending(
+                            &state,
+                            &clock,
+                            &run_dir,
+                            &entry.id,
+                            &entry.provider,
+                            &entry.model,
+                            chunks,
+                        )?;
                         eprintln!(
                             "{} is not written yet: missing chunks {} of {}",
                             chunks.path,
@@ -382,6 +394,19 @@ async fn real_main() -> anyhow::Result<()> {
             // A chunked file that is still missing chunks was never written:
             // that is a blocked run, not a finished plan.
             if outcome.pending.is_some() {
+                record_halt(
+                    &state,
+                    &clock,
+                    &run_dir,
+                    &StatusSnapshot {
+                        current_role: Some(entry.id.clone()),
+                        steps: rounds,
+                        last_verdict: Some(outcome.output.verdict),
+                        status: RunStatus::Blocked,
+                        block_reason: BlockReason::PendingChunks,
+                        loop_counters: Default::default(),
+                    },
+                )?;
                 process::exit(2);
             }
             process::exit(0);

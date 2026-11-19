@@ -389,8 +389,9 @@ file: site/index.html chunk: 3/3
 - When the re-calls are used up with chunks still missing, the run stops as
   `blocked` with the block reason `pending_chunks`, and exits with code 2.
   `state.json` and `actions.jsonl` record it, and nothing is written to the
-  repo. `plan` exits 2 the same way and prints the missing numbers on stderr;
-  it keeps no state. A `done` verdict does not finish a run while chunks are missing.
+  repo. `plan` exits 2 the same way, prints the missing numbers on stderr, and
+  writes the same `state.json` and `actions.jsonl` record in its run directory.
+  A `done` verdict does not finish a run while chunks are missing.
 - A re-call whose verdict is `issues`, `questions` or `fail` is routed as
   usual. The stored chunks stay in the run directory, and nothing is written
   to the repo. Put the format in that role's prompt, because the output

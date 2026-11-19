@@ -342,6 +342,54 @@ async fn harness_blocks_on_missing_chunks_after_the_round_cap() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn plan_stopped_on_missing_chunks_records_the_block() {
+    let server = MockServer::start().await;
+    // The first call and the one allowed re-call each leave chunk 2 missing.
+    let chunk = envelope("continue", "file: notes.md chunk: 1/2\none\n");
+    reply(&server, &chunk).await;
+    reply(&server, &chunk).await;
+
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    let out = work.path().join("artifacts");
+    let config = write_config(
+        work.path(),
+        &server,
+        "[run]\nstart = \"po\"\nmax_chunk_rounds = 1\n\n[[roles]]\nid = \"po\"\n\
+         provider = \"fake\"\nmodel = \"fake-planner\"\nretries = 0\n\
+         tools = [\"write-file\"]\n",
+    );
+
+    let output = nightshift(vec![
+        "plan".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Write the notes".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    assert_eq!(output.status.code(), Some(2), "{}", text(&output.stderr));
+
+    // `plan` keeps no action log of its own, but a stop must leave the same
+    // record the harness writes.
+    let run = run_dir(&out);
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("state.json")).expect("state"))
+            .expect("state JSON");
+    assert_eq!(state["status"], "blocked");
+    assert_eq!(state["block_reason"], "pending_chunks");
+    let actions = fs::read_to_string(run.join("actions.jsonl")).expect("actions");
+    assert!(actions.contains("\"chunk_pending\""), "{actions}");
+    assert!(actions.contains("pending_chunks"), "{actions}");
+    assert!(!repo.path().join("notes.md").exists(), "nothing written");
+    assert_eq!(git(repo.path(), &["status", "--porcelain"]).trim(), "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_passes_against_a_provider_from_the_config() {
     let server = MockServer::start().await;
     reply(&server, &envelope("done", "")).await;

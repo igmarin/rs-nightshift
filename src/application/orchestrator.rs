@@ -151,25 +151,14 @@ where
             )
         };
         let on_pending = |chunks: &PendingChunks| {
-            state.append_action(
+            record_chunk_pending(
+                state,
+                clock,
                 request.run,
-                &ActionEvent {
-                    ts: clock.now_iso(),
-                    event: EventKind::ChunkPending,
-                    role: current.clone(),
-                    provider: provider.clone(),
-                    model: model.clone(),
-                    verdict: None,
-                    artifact: None,
-                    block_reason: BlockReason::None,
-                    detail: Some(format!(
-                        "{} not written yet: missing chunks {} of {}",
-                        chunks.path,
-                        chunks.missing_list(),
-                        chunks.total
-                    )),
-                    call: None,
-                },
+                &current,
+                &provider,
+                &model,
+                chunks,
             )
         };
         let log_call = |call: ModelCall| -> Result<(), Error> {
@@ -445,22 +434,9 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
     loop_counters: &BTreeMap<String, u32>,
 ) -> Result<RunResult, Error> {
     let reason = BlockReason::BudgetExhausted;
-    state.append_action(
-        run,
-        &ActionEvent {
-            ts: clock.now_iso(),
-            event: EventKind::Halt,
-            role: current.to_string(),
-            provider: String::new(),
-            model: String::new(),
-            verdict: None,
-            artifact: None,
-            block_reason: reason,
-            detail: None,
-            call: None,
-        },
-    )?;
-    state.write_snapshot(
+    record_halt(
+        state,
+        clock,
         run,
         &StatusSnapshot {
             current_role: Some(current.to_string()),
@@ -476,6 +452,67 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
         block_reason: reason,
         steps,
     })
+}
+
+/// Record that a chunked `write-file` buffered its chunk without writing the
+/// file yet. The graph walk and `plan` both record it through here.
+pub fn record_chunk_pending<S: StateStore, K: Clock>(
+    state: &S,
+    clock: &K,
+    run: &Path,
+    role: &str,
+    provider: &str,
+    model: &str,
+    chunks: &PendingChunks,
+) -> Result<(), Error> {
+    state.append_action(
+        run,
+        &ActionEvent {
+            ts: clock.now_iso(),
+            event: EventKind::ChunkPending,
+            role: role.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            verdict: None,
+            artifact: None,
+            block_reason: BlockReason::None,
+            detail: Some(format!(
+                "{} not written yet: missing chunks {} of {}",
+                chunks.path,
+                chunks.missing_list(),
+                chunks.total
+            )),
+            call: None,
+        },
+    )
+}
+
+/// Record a run that stops blocked: a `halt` event carrying the snapshot's block
+/// reason, then the snapshot. `snapshot.status` must already be `Blocked`. The
+/// graph walk and `plan` both stop this way, so a blocked run always leaves the
+/// same record on disk.
+pub fn record_halt<S: StateStore, K: Clock>(
+    state: &S,
+    clock: &K,
+    run: &Path,
+    snapshot: &StatusSnapshot,
+) -> Result<(), Error> {
+    state.append_action(
+        run,
+        &ActionEvent {
+            ts: clock.now_iso(),
+            event: EventKind::Halt,
+            role: snapshot.current_role.clone().unwrap_or_default(),
+            provider: String::new(),
+            model: String::new(),
+            verdict: None,
+            artifact: None,
+            block_reason: snapshot.block_reason,
+            detail: None,
+            call: None,
+        },
+    )?;
+    state.write_snapshot(run, snapshot)
 }
 
 /// Record a `Fail` action event and a `Failed` snapshot when `execute` or

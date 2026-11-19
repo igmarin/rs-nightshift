@@ -14,6 +14,8 @@ All notable changes to this project are documented in this file.
   for them, up to `[run] max_chunk_rounds` (default 3). When the re-calls run
   out, the run stops as `blocked` with the block reason `pending_chunks` and
   exits 2. Each buffered chunk adds a `chunk_pending` event to `actions.jsonl`.
+  `nightshift plan` stops the same way and records it in `state.json` and
+  `actions.jsonl` too.
 - Chunk bytes are kept exactly as the reply sent them: trailing blank lines
   and CRLF endings are not trimmed or rewritten.
 
