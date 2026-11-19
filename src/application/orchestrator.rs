@@ -517,8 +517,9 @@ pub fn record_halt<S: StateStore, K: Clock>(
 
 /// Record a `Fail` action event and a `Failed` snapshot when `execute` or
 /// `factory.build` returns an error, so the persisted state does not stay
-/// stuck at `Running` after the process exits.
-fn record_failure<S: StateStore, K: Clock>(
+/// stuck at `Running` after the process exits. The harness and `plan` both
+/// record a failure through here.
+pub fn record_failure<S: StateStore, K: Clock>(
     state: &S,
     clock: &K,
     run: &Path,
@@ -557,13 +558,13 @@ fn record_failure<S: StateStore, K: Clock>(
 }
 
 /// Role context for [`record_failure`]: the active role id, provider, and model.
-struct FailureCtx {
+pub struct FailureCtx {
     /// Role id.
-    current: String,
+    pub current: String,
     /// Provider name.
-    provider: String,
+    pub provider: String,
     /// Model tag.
-    model: String,
+    pub model: String,
 }
 
 /// Wraps the role's [`ModelClient`]: times each call, failed ones too, and passes

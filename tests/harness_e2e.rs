@@ -390,6 +390,51 @@ async fn plan_stopped_on_missing_chunks_records_the_block() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn plan_error_records_a_failed_run() {
+    let server = MockServer::start().await;
+    // The first call returns a reply that is not JSON, and retries are off.
+    reply(&server, "BANANA").await;
+
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    let out = work.path().join("artifacts");
+    let config = write_config(
+        work.path(),
+        &server,
+        "[run]\nstart = \"po\"\n\n[[roles]]\nid = \"po\"\nprovider = \"fake\"\n\
+         model = \"fake-planner\"\nretries = 0\n",
+    );
+
+    let output = nightshift(vec![
+        "plan".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Greet the world".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stderr).contains("JSON"),
+        "{}",
+        text(&output.stderr)
+    );
+
+    let run = run_dir(&out);
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("state.json")).expect("state"))
+            .expect("state JSON");
+    assert_eq!(state["status"], "failed");
+    let actions = fs::read_to_string(run.join("actions.jsonl")).expect("actions");
+    assert!(actions.contains("\"fail\""), "{actions}");
+    assert_eq!(git(repo.path(), &["status", "--porcelain"]).trim(), "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_passes_against_a_provider_from_the_config() {
     let server = MockServer::start().await;
     reply(&server, &envelope("done", "")).await;
