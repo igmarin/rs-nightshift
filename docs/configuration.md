@@ -492,6 +492,19 @@ harness compatibility: pass
 A `json-validity` failure usually means a thinking model spent `max_tokens`
 on reasoning: raise `max_tokens` or use a non-thinking variant.
 
+## The run directory
+
+Each harness run writes to its own directory under `--out` (default
+`./artifacts`), named `{date}_{slug}`. A run that is resumed reuses it.
+
+Keep `--out` outside `--repo`, or add the `--out` folder to the repo's
+`.gitignore`. A run directory inside `--repo` that git does not ignore
+changes the target tree on every step, so every resume would refuse. The
+harness checks this before the run starts (`git check-ignore`, read-only) and
+exits 1 with the run directory, the repo and the fix, without creating
+anything. The check looks at the run directory's own path, so a rule such as
+`artifacts/` covers it. A run directory outside the repo is never checked.
+
 ## Goal queue (`nightshift queue`)
 
 `nightshift harness` runs one goal and exits. `nightshift queue` runs a list

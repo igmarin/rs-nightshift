@@ -1,11 +1,13 @@
 //! `nightshift` CLI entry point.
 
 use clap::Parser;
-use rs_nightshift::adapters::artifact_store::FsArtifactStore;
+use rs_nightshift::adapters::artifact_store::{run_dir_name, FsArtifactStore};
 use rs_nightshift::adapters::capabilities::{CapabilityRunner, GraphContextProvider};
 use rs_nightshift::adapters::clock::SystemClock;
 use rs_nightshift::adapters::context::PathProbe;
-use rs_nightshift::adapters::git::{head_commit, working_tree_dirty, GitRepoState};
+use rs_nightshift::adapters::git::{
+    check_run_dir_ignored, head_commit, working_tree_dirty, GitRepoState,
+};
 use rs_nightshift::adapters::ollama::{redact_ollama_url, validate_ollama_url, OllamaClient};
 use rs_nightshift::adapters::state::{config_fingerprint, FsStateStore};
 use rs_nightshift::adapters::test::ProcessTestRunner;
@@ -415,6 +417,9 @@ async fn real_main() -> anyhow::Result<()> {
 }
 
 /// Load the config and create the run directory for one harness job.
+///
+/// A run directory inside `repo` that git does not ignore is refused before
+/// anything is created: every resume would see the tree change.
 fn prepare_run(
     config: &Path,
     profile: Option<&str>,
@@ -428,7 +433,9 @@ fn prepare_run(
     let identity = run_identity(config, profile, repo)?;
     let clock = SystemClock;
     let slug = run_slug(&clock, name, goal, "run");
-    let run_dir = FsArtifactStore::new(out).create_run(&clock.today(), &slug)?;
+    let date = clock.today();
+    check_run_dir_ignored(repo, &out.join(run_dir_name(&date, &slug)))?;
+    let run_dir = FsArtifactStore::new(out).create_run(&date, &slug)?;
     Ok((cfg, run_dir, identity))
 }
 

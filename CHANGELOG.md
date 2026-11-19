@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `nightshift harness` refuses to start, exit 1 and no run directory, when
+  its run directory is inside `--repo` and git does not ignore it, because
+  every resume would refuse the changed tree. The error names the run
+  directory, the repo and the fix: `--out` outside the repo, or the `--out`
+  folder in the repo's `.gitignore`. `nightshift queue` jobs get the same
+  check (#111).
+
 - `nightshift harness --resume <run-dir>` continues a run that a crash,
   reboot or power cut stopped, from its last completed role, with the same
   step and loop counters. A `failed` or `blocked` run is retried: the resume

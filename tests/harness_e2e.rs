@@ -742,3 +742,75 @@ async fn harness_force_resume_without_resume_is_refused() {
         text(&output.stderr)
     );
 }
+
+/// One role that answers `done`, so a run ends after one call.
+const ONE_ROLE: &str = "[run]\nstart = \"po\"\n\n[[roles]]\nid = \"po\"\nprovider = \"fake\"\n\
+     model = \"fake-planner\"\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_refuses_a_run_dir_inside_the_repo_that_git_does_not_ignore() {
+    let server = MockServer::start().await;
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    // Inside the repo, and no .gitignore covers it.
+    let out = repo.path().join("artifacts");
+    let config = write_config(work.path(), &server, ONE_ROLE);
+
+    let output = nightshift(vec![
+        "harness".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Greet the world".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("git does not ignore it"), "{stderr}");
+    assert!(stderr.contains("--out outside the repo"), "{stderr}");
+    assert!(stderr.contains("artifacts/"), "{stderr}");
+    // A refusal at start records nothing: no run directory, no model call.
+    assert!(!out.exists(), "a refused run created {}", out.display());
+    assert_eq!(server.received_requests().await.expect("requests").len(), 0);
+    assert_eq!(git(repo.path(), &["status", "--porcelain"]).trim(), "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn harness_starts_a_run_dir_inside_the_repo_when_git_ignores_it() {
+    let server = MockServer::start().await;
+    reply(&server, &envelope("done", "Looks good.")).await;
+    let work = tempdir().expect("tempdir");
+    let repo = repo_with_hello();
+    fs::write(repo.path().join(".gitignore"), "artifacts/\n").expect("gitignore");
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-q", "-m", "ignore runs"]);
+    let out = repo.path().join("artifacts");
+    let config = write_config(work.path(), &server, ONE_ROLE);
+
+    let output = nightshift(vec![
+        "harness".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--goal".into(),
+        "Greet the world".into(),
+        "--repo".into(),
+        repo.path().display().to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ])
+    .await;
+    let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir(&out).join("state.json")).expect("state"))
+            .expect("state JSON");
+    assert_eq!(state["status"], "done");
+    assert_eq!(git(repo.path(), &["status", "--porcelain"]).trim(), "");
+}
