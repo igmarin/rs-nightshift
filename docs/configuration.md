@@ -368,10 +368,12 @@ file: site/index.html chunk: 3/3
 
 - Each chunk opens with `file: <path> chunk: N/M`: `N` is the chunk number
   (1 to `M`) and `M` is the total (1 to 1000). A chunk runs until the next
-  header. Only a `file: <path> chunk: N/M` line ends a chunk: a line such as
-  `<!-- file: example -->` or `<!-- end file content -->` is chunk body text
-  and is written as sent. (A plain `write-file`, without `chunk:`, still stops
-  at those marker lines.) A reply may carry several chunks of one file, but
+  header. Only a line that starts with `file: ` and contains ` chunk:` ends a
+  chunk, and it must be a valid header. Any other line is body text, so a
+  chunk may contain `file: example.txt`, `<!-- file: example -->` or
+  `<!-- end file content -->` and they are written as sent. A malformed header
+  such as `file: a.md chunk: x/2` is an error. (A plain `write-file`, without
+  `chunk:`, still stops at those marker lines.) A reply may carry several chunks of one file, but
   they must all share the same path and `M`. The bytes of a chunk are kept
   exactly as the reply sent them: trailing blank lines and CRLF line endings
   stay, and no newline is added.
@@ -385,6 +387,14 @@ file: site/index.html chunk: 3/3
   is cleared.
 - Chunks may arrive in any order and in any number of replies. A chunk sent
   again replaces the one stored before, so the last copy wins.
+- A plain `write-file` of the same file (`file: <path>`, no `chunk:`) replaces
+  the file and clears its buffer, so chunks stored before it are not assembled
+  over it later. Chunks sent after it start a new buffer.
+- Paths are compared by identity: empty and `.` segments are dropped, so
+  `./a.md`, `a.md` and `a//a.md` name one file in the buffer, the pending
+  entry, the report of a written file and the role's outstanding writes. The
+  path rules still check the path as written, so `..` and absolute paths are
+  refused.
 - A missing chunk never lets the run move past the role. The tool reports the
   missing numbers (`missing 2 of 3`) and writes nothing to the repo. If the
   reply's verdict is `continue` or `done`, the harness calls the same role
@@ -404,10 +414,13 @@ file: site/index.html chunk: 3/3
   is called again for `a.md` while the cap allows. Each path has one entry, and
   a later report for that path replaces it. A file counts as written only when
   the tool wrote the whole file, whether by chunks or by a plain `write-file`.
-- A re-call whose verdict is `issues`, `questions` or `fail` is routed as
-  usual. The stored chunks stay in the run directory, and nothing is written
-  to the repo. Put the format in that role's prompt, because the output
-  contract does not mention chunks.
+- A reply whose verdict is `issues`, `questions` or `fail` is not called again
+  for chunks. Its pending entry is returned with the outcome, the stored chunks
+  stay in the run directory, and nothing is written to the repo. The run then
+  stops as `blocked` with `pending_chunks`, before the verdict is routed, so
+  it does not loop back or finish while a file is missing chunks. Put the
+  format in that role's prompt, because the output contract does not mention
+  chunks.
 - With `max_chunk_rounds = 0`, a missing chunk blocks the run on the first
   reply.
 - Rejected at once, with nothing stored from that reply: a header that is not

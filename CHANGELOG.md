@@ -145,6 +145,17 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Chunked `write-file` (#99): a plain write of a file clears the chunks
+  buffered for it, so a stale chunk no longer overwrites the plain content.
+- Chunked `write-file` (#99): only a `file: ` line that contains ` chunk:` is
+  a chunk header. An ordinary `file:` line inside a chunk body is written as
+  body text instead of rejecting the write.
+- Chunked `write-file` (#99): `./a.md` and `a.md` name one file, in the chunk
+  buffer, the pending entry and the written report, so a plain write of
+  `./a.md` clears a pending `a.md`.
+- Chunked `write-file` (#99): a reply whose verdict is `issues`, `questions`
+  or `fail` is not called again for chunks. Its pending chunks block the run
+  as `pending_chunks`, with the buffer kept on disk.
 - `nightshift doctor` checks Ollama at the config's `[providers.ollama]
   base_url`, the address `harness` calls. Before, it always checked
   `--ollama-url`, so with Ollama on another address doctor could pass while

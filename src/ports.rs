@@ -302,6 +302,18 @@ impl PendingChunks {
     }
 }
 
+/// The identity of a repo-relative destination path: its segments with empty
+/// and `.` segments dropped, joined with `/`. So `./a.md`, `a.md` and `a//a.md`
+/// name one file. This is identity only; the path rules still check the path
+/// as written, so `..` and absolute paths are refused before any file is named.
+#[must_use]
+pub fn normalize_repo_path(path: &str) -> String {
+    path.split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// A tool's reply: its output text, and whether it left a file unwritten
 /// because chunks are still missing.
 #[derive(Debug, Clone, PartialEq, Eq)]

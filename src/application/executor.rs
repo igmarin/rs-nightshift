@@ -4,7 +4,8 @@ use crate::domain::rolegraph::config::{is_secret_path, RoleSpec, DEFAULT_GENERAT
 use crate::domain::rolegraph::verdict::{RoleOutput, Verdict};
 use crate::error::{ArtifactError, Error, ProviderError};
 use crate::ports::{
-    ArtifactStore, ContextProvider, GenerateRequest, ModelClient, PendingChunks, ToolRunner,
+    normalize_repo_path, ArtifactStore, ContextProvider, GenerateRequest, ModelClient,
+    PendingChunks, ToolRunner,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -244,8 +245,15 @@ where
         };
         // A write completed by this call leaves the list. A write still missing
         // chunks replaces the entry for its own path, or joins the list.
-        outstanding.retain(|entry| !outcome.completed.contains(&entry.path));
-        if let Some(pending) = outcome.pending.take() {
+        // Paths are compared by destination identity (`./a.md` is `a.md`).
+        let completed: Vec<String> = outcome
+            .completed
+            .iter()
+            .map(|path| normalize_repo_path(path))
+            .collect();
+        outstanding.retain(|entry| !completed.contains(&entry.path));
+        if let Some(mut pending) = outcome.pending.take() {
+            pending.path = normalize_repo_path(&pending.path);
             match outstanding
                 .iter_mut()
                 .find(|entry| entry.path == pending.path)
@@ -255,9 +263,12 @@ where
             }
         }
         outcome.pending = outstanding.first().cloned();
+        // Only `continue` and `done` hold a role for chunks. Any other verdict
+        // returns now, with its pending entry, so the orchestrator blocks on it.
+        let holds_for_chunks = matches!(outcome.output.verdict, Verdict::Continue | Verdict::Done);
         // A chunk round is a re-call, not a retry: it does not use `retries`.
         match &outcome.pending {
-            Some(pending) if chunk_rounds < params.max_chunk_rounds => {
+            Some(pending) if holds_for_chunks && chunk_rounds < params.max_chunk_rounds => {
                 chunk_rounds += 1;
                 chunk_request = Some(chunk_request_text(pending));
                 rejection = None;
@@ -1763,6 +1774,78 @@ mod tests {
             }),
             "a.md is still outstanding when the cap is reached"
         );
+    }
+
+    #[tokio::test]
+    async fn issues_verdict_with_a_pending_write_is_not_recalled() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"issues","content":"the draft needs work"}"#);
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 2/2\ntwo\n"}"#);
+        let tools = ScriptedWrites::new(vec![
+            pending_report("a.md", vec![2], 2),
+            written_report("a.md"),
+        ]);
+        let store = MemoryArtifactStore::default();
+        let role = chunk_role();
+        let ctx = context();
+        let run = Path::new("/tmp/run/x");
+        let outcome = execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        assert_eq!(
+            client.calls().len(),
+            2,
+            "an issues verdict is returned after one call, not re-called for chunks"
+        );
+        assert_eq!(outcome.output.verdict, Verdict::Issues);
+        assert_eq!(
+            outcome.pending,
+            Some(PendingChunks {
+                path: "a.md".into(),
+                missing: vec![2],
+                total: 2,
+            }),
+            "the pending write from the earlier call is kept, not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_write_of_a_dot_path_clears_the_pending_entry() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"done","content":"file: ./a.md\ntwo\n"}"#);
+        client.push_text(r#"{"verdict":"done","content":"file: a.md\nthree\n"}"#);
+        let tools = ScriptedWrites::new(vec![
+            pending_report("a.md", vec![2], 2),
+            written_report("./a.md"),
+            written_report("a.md"),
+        ]);
+        let store = MemoryArtifactStore::default();
+        let role = chunk_role();
+        let ctx = context();
+        let run = Path::new("/tmp/run/x");
+        let outcome = execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &params(run, &role, &ctx),
+        )
+        .await
+        .expect("execute");
+        assert_eq!(
+            client.calls().len(),
+            2,
+            "./a.md is the same file as a.md, so the pending entry is cleared"
+        );
+        assert_eq!(outcome.pending, None);
     }
 
     #[tokio::test]
