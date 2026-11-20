@@ -11,7 +11,9 @@ use rs_nightshift::adapters::state::FsStateStore;
 use rs_nightshift::adapters::test::ProcessTestRunner;
 use rs_nightshift::adapters::ProviderFactory;
 use rs_nightshift::application::executor::{execute, ExecuteParams, RoleContext};
-use rs_nightshift::application::orchestrator::{run_graph, RunRequest, RunResult};
+use rs_nightshift::application::orchestrator::{
+    record_chunk_pending, record_failure, record_halt, run_graph, FailureCtx, RunRequest, RunResult,
+};
 use rs_nightshift::application::report::{block_reason_description, render_report};
 use rs_nightshift::artifacts::{slugify, write_status, ArtifactStore};
 use rs_nightshift::bench::{render_report as render_bench_report, run_bench, BenchParams};
@@ -22,7 +24,7 @@ use rs_nightshift::doctor::{
 use rs_nightshift::domain::rolegraph::config::{
     load_role_graph_config_from, read_config, read_machine_config, NightshiftConfig,
 };
-use rs_nightshift::domain::rolegraph::state::RunStatus;
+use rs_nightshift::domain::rolegraph::state::{RunStatus, StatusSnapshot};
 use rs_nightshift::domain::rolegraph::verdict::{BlockReason, Verdict};
 use rs_nightshift::error::Error;
 use rs_nightshift::pipeline::{local_date, run, RunRequest as PipelineRunRequest};
@@ -305,71 +307,135 @@ async fn real_main() -> anyhow::Result<()> {
             let factory = ProviderFactory;
             let store = FsArtifactStore::new(&out);
             let clock = SystemClock;
-            let tools = CapabilityRunner::new();
+            let state = FsStateStore::new();
             let context_provider = GraphContextProvider;
             let slug = run_slug(&clock, name.as_deref(), &goal, "plan");
             let run_dir = store.create_run(&clock.today(), &slug)?;
-
-            let client = factory.build(
-                &entry.provider,
-                cfg.providers.get(&entry.provider),
-                &entry.options,
-            )?;
-            let mut clarifications: Vec<String> = Vec::new();
-            let mut rounds = 0;
-            let outcome = loop {
-                rounds += 1;
-                let ctx = RoleContext {
-                    goal: goal.clone(),
-                    findings: Vec::new(),
-                    questions: Vec::new(),
-                    clarifications: clarifications.clone(),
-                };
-                let params = ExecuteParams {
-                    run: &run_dir,
-                    repo: &repo,
-                    role: entry,
-                    context: &ctx,
-                    artifacts: &[],
-                    // `plan` is interactive and keeps no action log, so a
-                    // retry is reported on stderr.
-                    on_retry: &|attempt, error| {
-                        eprintln!("attempt {attempt} rejected, retrying: {error}");
-                        Ok(())
-                    },
-                };
-                let outcome =
-                    execute(client.as_ref(), &store, &tools, &context_provider, &params).await?;
-                let more = outcome.output.verdict == Verdict::Questions
-                    && !outcome.output.questions.is_empty()
-                    && rounds < 5;
-                if !more {
-                    break outcome;
-                }
-                writeln!(io::stdout(), "The entry role has clarifying questions:")?;
-                let mut answers = Vec::new();
-                let mut eof = false;
-                for question in &outcome.output.questions {
-                    writeln!(io::stdout(), "  Q: {}", question.text)?;
-                    print!("  A: ");
-                    io::stdout().flush()?;
-                    let mut line = String::new();
-                    if io::stdin().read_line(&mut line)? == 0 {
-                        eof = true;
-                        break;
+            let tools = CapabilityRunner::new().with_run_dir(&run_dir);
+            let mut rounds: u32 = 0;
+            // Everything after the run directory exists runs in this block, so
+            // an error here is recorded as a failed run before it propagates.
+            let code: Result<i32, Error> = async {
+                let client = factory.build(
+                    &entry.provider,
+                    cfg.providers.get(&entry.provider),
+                    &entry.options,
+                )?;
+                let mut clarifications: Vec<String> = Vec::new();
+                let outcome = loop {
+                    rounds += 1;
+                    let ctx = RoleContext {
+                        goal: goal.clone(),
+                        findings: Vec::new(),
+                        questions: Vec::new(),
+                        clarifications: clarifications.clone(),
+                    };
+                    let params = ExecuteParams {
+                        run: &run_dir,
+                        repo: &repo,
+                        role: entry,
+                        context: &ctx,
+                        artifacts: &[],
+                        // `plan` is interactive and keeps no action log, so a
+                        // retry is reported on stderr.
+                        on_retry: &|attempt, error| {
+                            eprintln!("attempt {attempt} rejected, retrying: {error}");
+                            Ok(())
+                        },
+                        max_chunk_rounds: cfg.run.max_chunk_rounds,
+                        on_pending: &|chunks| {
+                            record_chunk_pending(
+                                &state,
+                                &clock,
+                                &run_dir,
+                                &entry.id,
+                                &entry.provider,
+                                &entry.model,
+                                chunks,
+                            )?;
+                            eprintln!(
+                                "{} is not written yet: missing chunks {} of {}",
+                                chunks.path,
+                                chunks.missing_list(),
+                                chunks.total
+                            );
+                            Ok(())
+                        },
+                    };
+                    let outcome =
+                        execute(client.as_ref(), &store, &tools, &context_provider, &params)
+                            .await?;
+                    let more = outcome.output.verdict == Verdict::Questions
+                        && !outcome.output.questions.is_empty()
+                        && rounds < 5;
+                    if !more {
+                        break outcome;
                     }
-                    answers.push(format!("Q: {}\nA: {}", question.text, line.trim()));
+                    writeln!(io::stdout(), "The entry role has clarifying questions:")?;
+                    let mut answers = Vec::new();
+                    let mut eof = false;
+                    for question in &outcome.output.questions {
+                        writeln!(io::stdout(), "  Q: {}", question.text)?;
+                        print!("  A: ");
+                        io::stdout().flush()?;
+                        let mut line = String::new();
+                        if io::stdin().read_line(&mut line)? == 0 {
+                            eof = true;
+                            break;
+                        }
+                        answers.push(format!("Q: {}\nA: {}", question.text, line.trim()));
+                    }
+                    clarifications.extend(answers);
+                    if eof {
+                        break outcome;
+                    }
+                };
+                writeln!(io::stdout(), "{}", outcome.output.summary)?;
+                if let Some(artifact) = &outcome.artifact {
+                    writeln!(io::stdout(), "Wrote {artifact}")?;
                 }
-                clarifications.extend(answers);
-                if eof {
-                    break outcome;
+                // A chunked file that is still missing chunks was never written:
+                // that is a blocked run, not a finished plan.
+                if outcome.pending.is_some() {
+                    record_halt(
+                        &state,
+                        &clock,
+                        &run_dir,
+                        &StatusSnapshot {
+                            current_role: Some(entry.id.clone()),
+                            steps: rounds,
+                            last_verdict: Some(outcome.output.verdict),
+                            status: RunStatus::Blocked,
+                            block_reason: BlockReason::PendingChunks,
+                            loop_counters: Default::default(),
+                            config_hash: String::new(),
+                            repo_head: None,
+                        },
+                    )?;
+                    return Ok(2);
+                }
+                Ok(0)
+            }
+            .await;
+            let code = match code {
+                Ok(code) => code,
+                Err(error) => {
+                    record_failure(
+                        &state,
+                        &clock,
+                        &run_dir,
+                        &FailureCtx {
+                            current: entry.id.clone(),
+                            provider: entry.provider.clone(),
+                            model: entry.model.clone(),
+                        },
+                        rounds,
+                        &Default::default(),
+                    )?;
+                    return Err(error.into());
                 }
             };
-            writeln!(io::stdout(), "{}", outcome.output.summary)?;
-            if let Some(artifact) = &outcome.artifact {
-                writeln!(io::stdout(), "Wrote {artifact}")?;
-            }
-            process::exit(0);
+            process::exit(code);
         }
     }
     Ok(())
@@ -405,7 +471,7 @@ async fn execute_run(
         &FsArtifactStore::new(out),
         &state,
         &SystemClock,
-        &CapabilityRunner::new(),
+        &CapabilityRunner::new().with_run_dir(run_dir),
         &GraphContextProvider,
         &RunRequest {
             run: run_dir,

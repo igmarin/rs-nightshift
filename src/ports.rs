@@ -278,6 +278,67 @@ pub trait ModelClientFactory: Send + Sync {
     ) -> Result<Box<dyn ModelClient>, Error>;
 }
 
+/// Chunks of a chunked `write-file` that are buffered but not yet assembled
+/// into the file, so the file is not written yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingChunks {
+    /// The repo-relative path the chunks are for.
+    pub path: String,
+    /// The chunk numbers still missing, in ascending order (1-based).
+    pub missing: Vec<usize>,
+    /// The total chunk count `M`.
+    pub total: usize,
+}
+
+impl PendingChunks {
+    /// The missing numbers as a comma-separated list, such as `2, 3`.
+    #[must_use]
+    pub fn missing_list(&self) -> String {
+        self.missing
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The identity of a repo-relative destination path: its segments with empty
+/// and `.` segments dropped, joined with `/`. So `./a.md`, `a.md` and `a//a.md`
+/// name one file. This is identity only; the path rules still check the path
+/// as written, so `..` and absolute paths are refused before any file is named.
+#[must_use]
+pub fn normalize_repo_path(path: &str) -> String {
+    path.split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A tool's reply: its output text, and whether it left a file unwritten
+/// because chunks are still missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolReport {
+    /// The tool's output text.
+    pub text: String,
+    /// Set when a chunked write buffered its chunk but did not write the file.
+    pub pending: Option<PendingChunks>,
+    /// The repo-relative path this tool wrote in full, set only when the file
+    /// was written (a chunked write that is still missing chunks leaves it unset).
+    pub written: Option<String>,
+}
+
+impl ToolReport {
+    /// A report with text and nothing pending or written.
+    #[must_use]
+    pub fn plain(text: String) -> Self {
+        Self {
+            text,
+            pending: None,
+            written: None,
+        }
+    }
+}
+
 /// Runs a declared capability (`run-tests`, `apply-patch`, `write-file`,
 /// `search-replace`, `gather-context`).
 #[async_trait::async_trait]
@@ -285,6 +346,12 @@ pub trait ToolRunner: Send + Sync {
     /// Run `tool` against `repo`, using `input` (the role's artifact text, or
     /// empty when the tool needs no input). Returns the tool's output.
     async fn run(&self, tool: &str, repo: &Path, input: &str) -> Result<String, Error>;
+
+    /// Run `tool` and report what it left pending. Tools that never buffer
+    /// work only need [`ToolRunner::run`]; this default wraps its text.
+    async fn run_report(&self, tool: &str, repo: &Path, input: &str) -> Result<ToolReport, Error> {
+        self.run(tool, repo, input).await.map(ToolReport::plain)
+    }
 }
 
 /// Gathers repo context (codegraph/graphify) for context injection.

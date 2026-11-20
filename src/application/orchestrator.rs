@@ -9,7 +9,8 @@ use crate::domain::rolegraph::state::{
 use crate::domain::rolegraph::verdict::{BlockReason, Verdict};
 use crate::error::Error;
 use crate::ports::{
-    ArtifactStore, Clock, ContextProvider, ModelClient, ModelClientFactory, StateStore, ToolRunner,
+    ArtifactStore, Clock, ContextProvider, ModelClient, ModelClientFactory, PendingChunks,
+    StateStore, ToolRunner,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -149,6 +150,17 @@ where
                 },
             )
         };
+        let on_pending = |chunks: &PendingChunks| {
+            record_chunk_pending(
+                state,
+                clock,
+                request.run,
+                &current,
+                &provider,
+                &model,
+                chunks,
+            )
+        };
         let log_call = |call: ModelCall| -> Result<(), Error> {
             state.append_action(
                 request.run,
@@ -182,6 +194,8 @@ where
                 context: &context,
                 artifacts: &artifacts,
                 on_retry: &on_retry,
+                max_chunk_rounds: request.config.run.max_chunk_rounds,
+                on_pending: &on_pending,
             },
         )
         .await
@@ -344,6 +358,11 @@ fn route(
     role: &RoleSpec,
     outcome: &executor::ExecuteOutcome,
 ) -> RoutingDecision {
+    // A file still missing chunks was never written, so no verdict (not even
+    // `done`) may move the run past this role.
+    if outcome.pending.is_some() {
+        return RoutingDecision::Terminal(RunStatus::Blocked, BlockReason::PendingChunks);
+    }
     let output = &outcome.output;
     match output.verdict {
         Verdict::Done => RoutingDecision::Terminal(RunStatus::Done, BlockReason::None),
@@ -419,22 +438,9 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
     loop_counters: &BTreeMap<String, u32>,
 ) -> Result<RunResult, Error> {
     let reason = BlockReason::BudgetExhausted;
-    state.append_action(
-        run,
-        &ActionEvent {
-            ts: clock.now_iso(),
-            event: EventKind::Halt,
-            role: current.to_string(),
-            provider: String::new(),
-            model: String::new(),
-            verdict: None,
-            artifact: None,
-            block_reason: reason,
-            detail: None,
-            call: None,
-        },
-    )?;
-    state.write_snapshot(
+    record_halt(
+        state,
+        clock,
         run,
         &StatusSnapshot {
             current_role: Some(current.to_string()),
@@ -454,10 +460,72 @@ fn halt_budget_exhausted<S: StateStore, K: Clock>(
     })
 }
 
+/// Record that a chunked `write-file` buffered its chunk without writing the
+/// file yet. The graph walk and `plan` both record it through here.
+pub fn record_chunk_pending<S: StateStore, K: Clock>(
+    state: &S,
+    clock: &K,
+    run: &Path,
+    role: &str,
+    provider: &str,
+    model: &str,
+    chunks: &PendingChunks,
+) -> Result<(), Error> {
+    state.append_action(
+        run,
+        &ActionEvent {
+            ts: clock.now_iso(),
+            event: EventKind::ChunkPending,
+            role: role.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            verdict: None,
+            artifact: None,
+            block_reason: BlockReason::None,
+            detail: Some(format!(
+                "{} not written yet: missing chunks {} of {}",
+                chunks.path,
+                chunks.missing_list(),
+                chunks.total
+            )),
+            call: None,
+        },
+    )
+}
+
+/// Record a run that stops blocked: a `halt` event carrying the snapshot's block
+/// reason, then the snapshot. `snapshot.status` must already be `Blocked`. The
+/// graph walk and `plan` both stop this way, so a blocked run always leaves the
+/// same record on disk.
+pub fn record_halt<S: StateStore, K: Clock>(
+    state: &S,
+    clock: &K,
+    run: &Path,
+    snapshot: &StatusSnapshot,
+) -> Result<(), Error> {
+    state.append_action(
+        run,
+        &ActionEvent {
+            ts: clock.now_iso(),
+            event: EventKind::Halt,
+            role: snapshot.current_role.clone().unwrap_or_default(),
+            provider: String::new(),
+            model: String::new(),
+            verdict: None,
+            artifact: None,
+            block_reason: snapshot.block_reason,
+            detail: None,
+            call: None,
+        },
+    )?;
+    state.write_snapshot(run, snapshot)
+}
+
 /// Record a `Fail` action event and a `Failed` snapshot when `execute` or
 /// `factory.build` returns an error, so the persisted state does not stay
-/// stuck at `Running` after the process exits.
-fn record_failure<S: StateStore, K: Clock>(
+/// stuck at `Running` after the process exits. The harness and `plan` both
+/// record a failure through here.
+pub fn record_failure<S: StateStore, K: Clock>(
     state: &S,
     clock: &K,
     run: &Path,
@@ -498,13 +566,13 @@ fn record_failure<S: StateStore, K: Clock>(
 }
 
 /// Role context for [`record_failure`]: the active role id, provider, and model.
-struct FailureCtx {
+pub struct FailureCtx {
     /// Role id.
-    current: String,
+    pub current: String,
     /// Provider name.
-    provider: String,
+    pub provider: String,
     /// Model tag.
-    model: String,
+    pub model: String,
 }
 
 /// Wraps the role's [`ModelClient`]: times each call, failed ones too, and passes
@@ -652,6 +720,193 @@ id = "dev"
 provider = "ollama"
 model = "phi4"
 "#;
+
+    /// A `po` role that writes `a.md` in two chunks, then hands on to `dev`.
+    /// `max_chunk_rounds` is the cap under test.
+    fn chunk_writer_config(max_chunk_rounds: u32) -> NightshiftConfig {
+        config(&format!(
+            r#"
+[run]
+start = "po"
+max_chunk_rounds = {max_chunk_rounds}
+
+[[roles]]
+id = "po"
+provider = "ollama"
+model = "phi4"
+tools = ["write-file"]
+on = {{ continue = "dev" }}
+
+[[roles]]
+id = "dev"
+provider = "ollama"
+model = "phi4"
+"#
+        ))
+    }
+
+    /// Reports chunk 2 of `a.md` pending for its first `pending_calls`
+    /// `write-file` calls, then reports the file written.
+    struct ChunkTools {
+        pending_calls: Mutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolRunner for ChunkTools {
+        async fn run(&self, _tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+
+        async fn run_report(
+            &self,
+            _tool: &str,
+            _repo: &Path,
+            _input: &str,
+        ) -> Result<crate::ports::ToolReport, Error> {
+            let mut left = self.pending_calls.lock().expect("calls");
+            if *left == 0 {
+                return Ok(crate::ports::ToolReport {
+                    text: "wrote a.md".into(),
+                    pending: None,
+                    written: Some("a.md".into()),
+                });
+            }
+            *left -= 1;
+            Ok(crate::ports::ToolReport {
+                text: "stored chunks".into(),
+                pending: Some(crate::ports::PendingChunks {
+                    path: "a.md".into(),
+                    missing: vec![2],
+                    total: 2,
+                }),
+                written: None,
+            })
+        }
+    }
+
+    const CHUNK_ONE: &str = r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#;
+
+    #[tokio::test]
+    async fn pending_chunks_at_the_round_cap_block_the_run() {
+        // The first call and two re-calls each leave chunk 2 missing.
+        let factory = QueueFactory::new();
+        for _ in 0..3 {
+            factory.push(CHUNK_ONE);
+        }
+        let store = MemoryArtifactStore::default();
+        let state = MemoryStateStore::default();
+        let run = Path::new("/tmp/run/x");
+        let result = run_graph(
+            &factory,
+            &store,
+            &state,
+            &clock(),
+            &ChunkTools {
+                pending_calls: Mutex::new(u32::MAX),
+            },
+            &StubContextProvider::default(),
+            &RunRequest {
+                run,
+                repo: Path::new("/repo"),
+                config: &chunk_writer_config(2),
+                goal: "goal",
+            },
+        )
+        .await
+        .expect("run");
+        assert_eq!(result.status, RunStatus::Blocked);
+        assert_eq!(result.block_reason, BlockReason::PendingChunks);
+        assert_eq!(result.steps, 1, "dev must not run past the pending file");
+
+        let events = state.events();
+        let pending: Vec<&ActionEvent> = events
+            .iter()
+            .filter(|e| e.event == EventKind::ChunkPending)
+            .collect();
+        assert_eq!(pending.len(), 3, "one event per buffered write");
+        let detail = pending[0].detail.as_deref().expect("detail");
+        assert!(detail.contains("a.md"), "{detail}");
+        assert!(detail.contains("missing chunks 2 of 2"), "{detail}");
+        let halt = events
+            .iter()
+            .find(|e| e.event == EventKind::Halt)
+            .expect("halt event");
+        assert_eq!(halt.block_reason, BlockReason::PendingChunks);
+        let snapshot = state.read_snapshot(run).expect("snapshot");
+        assert_eq!(snapshot.status, RunStatus::Blocked);
+        assert_eq!(snapshot.block_reason, BlockReason::PendingChunks);
+    }
+
+    #[tokio::test]
+    async fn done_with_pending_chunks_does_not_finish_the_run() {
+        let factory = QueueFactory::new();
+        factory.push(r#"{"verdict":"done","content":"file: a.md chunk: 1/2\none\n"}"#);
+        let store = MemoryArtifactStore::default();
+        let state = MemoryStateStore::default();
+        let run = Path::new("/tmp/run/x");
+        let result = run_graph(
+            &factory,
+            &store,
+            &state,
+            &clock(),
+            &ChunkTools {
+                pending_calls: Mutex::new(u32::MAX),
+            },
+            &StubContextProvider::default(),
+            &RunRequest {
+                run,
+                repo: Path::new("/repo"),
+                config: &chunk_writer_config(0),
+                goal: "goal",
+            },
+        )
+        .await
+        .expect("run");
+        assert_eq!(result.status, RunStatus::Blocked, "not done");
+        assert_eq!(result.block_reason, BlockReason::PendingChunks);
+        let snapshot = state.read_snapshot(run).expect("snapshot");
+        assert_eq!(snapshot.status, RunStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn a_re_call_that_completes_the_file_lets_the_run_continue() {
+        let factory = QueueFactory::new();
+        factory.push(CHUNK_ONE);
+        factory.push(r#"{"verdict":"continue","content":"file: a.md chunk: 2/2\ntwo\n"}"#);
+        factory.push(r#"{"verdict":"done","content":""}"#);
+        let store = MemoryArtifactStore::default();
+        let state = MemoryStateStore::default();
+        let result = run_graph(
+            &factory,
+            &store,
+            &state,
+            &clock(),
+            &ChunkTools {
+                pending_calls: Mutex::new(1),
+            },
+            &StubContextProvider::default(),
+            &RunRequest {
+                run: Path::new("/tmp/run/x"),
+                repo: Path::new("/repo"),
+                config: &chunk_writer_config(3),
+                goal: "goal",
+            },
+        )
+        .await
+        .expect("run");
+        assert_eq!(result.status, RunStatus::Done);
+        assert_eq!(result.block_reason, BlockReason::None);
+        assert_eq!(
+            result.steps, 2,
+            "po and dev, the re-call is inside po's step"
+        );
+        let pending = state
+            .events()
+            .iter()
+            .filter(|e| e.event == EventKind::ChunkPending)
+            .count();
+        assert_eq!(pending, 1, "only the first write was pending");
+    }
 
     #[tokio::test]
     async fn linear_graph_runs_to_done() {

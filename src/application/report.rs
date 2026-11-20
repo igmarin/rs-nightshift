@@ -30,6 +30,9 @@ pub fn block_reason_description(reason: BlockReason) -> &'static str {
         BlockReason::BudgetExhausted => {
             "a loop or step budget was exhausted before the run finished"
         }
+        BlockReason::PendingChunks => {
+            "a chunked file was still missing chunks after the role was called again"
+        }
     }
 }
 

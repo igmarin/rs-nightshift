@@ -14,7 +14,7 @@ use crate::adapters::test::{
 };
 use crate::domain::rolegraph::config::is_secret_path;
 use crate::error::{ArtifactError, Error};
-use crate::ports::{ContextProvider, ToolRunner};
+use crate::ports::{normalize_repo_path, ContextProvider, PendingChunks, ToolReport, ToolRunner};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,8 @@ use std::time::Duration;
 pub struct CapabilityRunner {
     /// Per-run test timeout.
     test_timeout: Duration,
+    /// The run directory that holds `write-file` chunk buffers.
+    run_dir: Option<PathBuf>,
 }
 
 impl CapabilityRunner {
@@ -33,13 +35,25 @@ impl CapabilityRunner {
     pub fn new() -> Self {
         Self {
             test_timeout: DEFAULT_TEST_TIMEOUT,
+            run_dir: None,
         }
     }
 
     /// A runner with an explicit test timeout (used in tests).
     #[must_use]
     pub fn with_test_timeout(test_timeout: Duration) -> Self {
-        Self { test_timeout }
+        Self {
+            test_timeout,
+            run_dir: None,
+        }
+    }
+
+    /// A runner that keeps `write-file` chunk buffers under `run`, the run
+    /// directory, so they survive between model calls of the same run.
+    #[must_use]
+    pub fn with_run_dir(mut self, run: &Path) -> Self {
+        self.run_dir = Some(run.to_path_buf());
+        self
     }
 
     /// Detect, run, and format the test command for `repo`.
@@ -79,10 +93,18 @@ impl CapabilityRunner {
     /// like another context marker (`<!-- file:`, `<!-- end file content -->`,
     /// or `file:`) because small models sometimes echo the injected context
     /// markers.
-    async fn write_file(&self, repo: &Path, input: &str) -> Result<String, Error> {
+    ///
+    /// A chunked input (`file: <path> chunk: N/M` sections) is buffered in the
+    /// run directory and written only once every chunk of the file is present;
+    /// see [`write_chunk_section`].
+    async fn write_file(&self, repo: &Path, input: &str) -> Result<ToolReport, Error> {
         let repo = repo.to_path_buf();
         let content = input.to_string();
+        let run_dir = self.run_dir.clone();
         tokio::task::spawn_blocking(move || {
+            if is_chunked(&content) {
+                return write_chunk_section(&repo, run_dir.as_deref(), &content);
+            }
             // Parse the "file: <path>" header line
             let mut lines = content.lines();
             let header = lines
@@ -128,7 +150,15 @@ impl CapabilityRunner {
                 })?;
             }
             write_atomically(&file_path, &body, "write-file")?;
-            Ok(format!("wrote {path} ({body_len} bytes)"))
+            let destination = normalize_repo_path(path);
+            // The file now holds this plain content, so chunks buffered for it
+            // are stale and must not assemble over it later.
+            retire_chunk_buffer(run_dir.as_deref(), &destination)?;
+            Ok(ToolReport {
+                text: format!("wrote {path} ({body_len} bytes)"),
+                pending: None,
+                written: Some(destination),
+            })
         })
         .await
         .map_err(|error| {
@@ -560,6 +590,255 @@ fn write_atomically(path: &Path, body: &str, tool: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// The most chunks one file may be split into.
+const MAX_CHUNKS: usize = 1000;
+
+/// The text after `file: ` when `line` is a chunk header. Only a line that
+/// starts with `file: ` and contains ` chunk:` is a header. Any other
+/// `file:` line is body text, and a malformed header is refused by
+/// [`parse_chunk_header`].
+fn chunk_header_rest(line: &str) -> Option<&str> {
+    line.strip_prefix("file: ")
+        .filter(|rest| rest.contains(" chunk:"))
+}
+
+/// True when `input` opens with a chunked `file: <path> chunk: N/M` header.
+fn is_chunked(input: &str) -> bool {
+    input.lines().next().and_then(chunk_header_rest).is_some()
+}
+
+/// One reply's chunks of a single file. Each body is the raw bytes the reply
+/// sent after its header line, kept exactly: nothing is trimmed or re-joined.
+struct ChunkedWrite {
+    /// The repo-relative path, as the model wrote it.
+    path: String,
+    /// The total chunk count `M` every section declares.
+    total: usize,
+    /// `(N, body)` for each section, in the order the reply gave them.
+    chunks: Vec<(usize, String)>,
+}
+
+/// Parse a chunked `write-file` input: one `file: <path> chunk: N/M` header
+/// per section, each followed by that chunk's content. All sections must
+/// name the same path and total, and no number may repeat within the reply.
+fn parse_chunked_write(input: &str) -> Result<ChunkedWrite, Error> {
+    // (path, number, total, raw body) per section.
+    let mut sections: Vec<(&str, usize, usize, String)> = Vec::new();
+    // Split keeping each line's terminator, so bodies are copied byte for byte.
+    // Only a `file: ... chunk: N/M` header ends a chunk's body. A context-marker
+    // line is body text: a chunk may contain `<!-- file: ... -->` or
+    // `<!-- end file content -->` as content, and cutting there drops bytes.
+    for raw in input.split_inclusive('\n') {
+        let line = raw.trim_end_matches(['\n', '\r']);
+        if let Some(rest) = chunk_header_rest(line) {
+            let (path, number, total) = parse_chunk_header(rest)?;
+            sections.push((path, number, total, String::new()));
+        } else if let Some(section) = sections.last_mut() {
+            section.3.push_str(raw);
+        } else {
+            return Err(Error::from(ArtifactError::artifact(
+                "write-file: input must start with 'file: <path> chunk: N/M'",
+            )));
+        }
+    }
+    let Some(&(path, _, total, _)) = sections.first() else {
+        return Err(Error::from(ArtifactError::artifact(
+            "write-file: input must start with 'file: <path> chunk: N/M'",
+        )));
+    };
+    let mut chunks: Vec<(usize, String)> = Vec::with_capacity(sections.len());
+    for (section_path, number, section_total, body) in sections {
+        if normalize_repo_path(section_path) != normalize_repo_path(path) || section_total != total
+        {
+            return Err(Error::from(ArtifactError::artifact(format!(
+                "write-file: a reply carries chunks of one file and one total; \
+                 got {path} chunk N/{total} and {section_path} chunk N/{section_total}"
+            ))));
+        }
+        if chunks.iter().any(|(seen, _)| *seen == number) {
+            return Err(Error::from(ArtifactError::artifact(format!(
+                "write-file: chunk {number}/{total} of {path} appears twice in one reply"
+            ))));
+        }
+        // Blank content is refused, but not trimmed: a chunk that is only
+        // whitespace is an empty chunk, and anything else is kept as sent.
+        if body.trim().is_empty() {
+            return Err(Error::from(ArtifactError::artifact(format!(
+                "write-file: chunk {number}/{total} of {path} is empty"
+            ))));
+        }
+        chunks.push((number, body));
+    }
+    Ok(ChunkedWrite {
+        path: path.to_string(),
+        total,
+        chunks,
+    })
+}
+
+/// Parse the text after `file: ` in a chunk header: `<path> chunk: N/M`.
+fn parse_chunk_header(rest: &str) -> Result<(&str, usize, usize), Error> {
+    let bad = || {
+        Error::from(ArtifactError::artifact(format!(
+            "write-file: chunk header must be 'file: <path> chunk: N/M' with whole numbers, got: {rest}"
+        )))
+    };
+    let (path, spec) = rest.rsplit_once(" chunk: ").ok_or_else(bad)?;
+    let (number, total) = spec.trim().split_once('/').ok_or_else(bad)?;
+    let number: usize = number.trim().parse().map_err(|_| bad())?;
+    let total: usize = total.trim().parse().map_err(|_| bad())?;
+    let path = path.trim();
+    if number == 0 || number > total || total == 0 || total > MAX_CHUNKS {
+        return Err(Error::from(ArtifactError::artifact(format!(
+            "write-file: chunk {number}/{total} of {path} is out of range: \
+             the number runs from 1 to the total, and the total from 1 to {MAX_CHUNKS}"
+        ))));
+    }
+    Ok((path, number, total))
+}
+
+/// Buffer one reply's chunks under the run directory and write the file once
+/// every chunk of its total is present. Until then nothing is written to the
+/// repo and the tool succeeds, reporting which chunks are still missing.
+fn write_chunk_section(repo: &Path, run: Option<&Path>, input: &str) -> Result<ToolReport, Error> {
+    let run = run.ok_or_else(|| {
+        Error::from(ArtifactError::artifact(
+            "write-file: chunked input needs a run directory; this runner has none",
+        ))
+    })?;
+    let write = parse_chunked_write(input)?;
+    // The path rules run before anything is buffered, so a rejected path
+    // leaves no chunks behind.
+    let file_path = resolve_writable_repo_file(repo, &write.path)?;
+    // From here on the path is the destination's identity, so `./a.md` and
+    // `a.md` share one buffer, one pending entry and one written report.
+    let write = ChunkedWrite {
+        path: normalize_repo_path(&write.path),
+        ..write
+    };
+
+    let buffer = run.join("chunks").join(buffer_key(&write.path));
+    claim_buffer(&buffer, &write.path)?;
+    let dir = buffer.join(write.total.to_string());
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| ArtifactError::artifact(format!("write-file: chunk buffer: {error}")))?;
+    for (number, body) in &write.chunks {
+        write_atomically(&dir.join(number.to_string()), body, "write-file")?;
+    }
+
+    let missing: Vec<usize> = (1..=write.total)
+        .filter(|number| !dir.join(number.to_string()).is_file())
+        .collect();
+    if !missing.is_empty() {
+        let pending = PendingChunks {
+            path: write.path.clone(),
+            missing,
+            total: write.total,
+        };
+        return Ok(ToolReport {
+            text: format!(
+                "stored chunks of {}; file not written yet, missing {} of {}",
+                write.path,
+                pending.missing_list(),
+                write.total
+            ),
+            pending: Some(pending),
+            written: None,
+        });
+    }
+
+    let mut body = String::new();
+    for number in 1..=write.total {
+        let part = std::fs::read_to_string(dir.join(number.to_string())).map_err(|error| {
+            ArtifactError::artifact(format!("write-file: read chunk {number}: {error}"))
+        })?;
+        body.push_str(&part);
+    }
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ArtifactError::artifact(format!("write-file: create directory: {error}"))
+        })?;
+    }
+    write_atomically(&file_path, &body, "write-file")?;
+    std::fs::remove_dir_all(&buffer).map_err(|error| {
+        ArtifactError::artifact(format!("write-file: clear chunk buffer: {error}"))
+    })?;
+    Ok(ToolReport {
+        text: format!(
+            "wrote {} ({} bytes) from {} chunks",
+            write.path,
+            body.len(),
+            write.total
+        ),
+        pending: None,
+        written: Some(write.path.clone()),
+    })
+}
+
+/// Remove the chunk buffer for `path` under `run`, if it holds `path`. Called
+/// after a plain write replaced the file, so its buffered chunks are stale.
+/// A buffer that holds another path (a hash collision) is left alone.
+fn retire_chunk_buffer(run: Option<&Path>, path: &str) -> Result<(), Error> {
+    let Some(run) = run else {
+        return Ok(());
+    };
+    let buffer = run.join("chunks").join(buffer_key(path));
+    match std::fs::read_to_string(buffer.join(BUFFER_PATH_FILE)) {
+        Ok(stored) if stored == path => std::fs::remove_dir_all(&buffer).map_err(|error| {
+            Error::from(ArtifactError::artifact(format!(
+                "write-file: clear chunk buffer: {error}"
+            )))
+        }),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::from(ArtifactError::artifact(format!(
+            "write-file: chunk buffer: {error}"
+        )))),
+    }
+}
+
+/// The file, inside a chunk buffer, that records the path the buffer holds.
+const BUFFER_PATH_FILE: &str = "path";
+
+/// The buffer directory name for `path`: its 64-bit FNV-1a hash as 16 hex
+/// characters, so the name stays short whatever the path length. Two paths
+/// can share a key, so [`claim_buffer`] checks the recorded path on every write.
+fn buffer_key(path: &str) -> String {
+    format!("{:016x}", fnv1a_64(path.as_bytes()))
+}
+
+/// 64-bit FNV-1a hash of `bytes`.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    bytes.iter().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    })
+}
+
+/// Create the chunk buffer at `buffer` for `path`, or check that it already
+/// holds `path`. A buffer that holds another path is refused, so a hash
+/// collision never mixes two files' chunks. Runs before every chunk write.
+fn claim_buffer(buffer: &Path, path: &str) -> Result<(), Error> {
+    std::fs::create_dir_all(buffer)
+        .map_err(|error| ArtifactError::artifact(format!("write-file: chunk buffer: {error}")))?;
+    let record = buffer.join(BUFFER_PATH_FILE);
+    match std::fs::read_to_string(&record) {
+        Ok(stored) if stored == path => Ok(()),
+        Ok(stored) => Err(Error::from(ArtifactError::artifact(format!(
+            "write-file: chunk buffer belongs to another path ({stored} is buffered in {}); \
+             remove that directory, then write {path} again",
+            buffer.display()
+        )))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_atomically(&record, path, "write-file")
+        }
+        Err(error) => Err(Error::from(ArtifactError::artifact(format!(
+            "write-file: chunk buffer: {error}"
+        )))),
+    }
+}
+
 fn apply_search_replace(repo: &Path, input: &str) -> Result<String, Error> {
     let replacements = parse_search_replace(input)?;
     let mut abs_by_rel: HashMap<String, PathBuf> = HashMap::new();
@@ -654,16 +933,24 @@ impl Default for CapabilityRunner {
 
 #[async_trait::async_trait]
 impl ToolRunner for CapabilityRunner {
-    /// Dispatch a declared capability for `repo`.
+    /// Dispatch a declared capability for `repo`, keeping only its text.
     async fn run(&self, tool: &str, repo: &Path, input: &str) -> Result<String, Error> {
         match tool {
             "run-tests" => self.run_tests(repo).await,
             "apply-patch" => self.apply_patch(repo, input).await,
-            "write-file" => self.write_file(repo, input).await,
+            "write-file" => self.write_file(repo, input).await.map(|report| report.text),
             "search-replace" => self.search_replace(repo, input).await,
             other => Err(Error::from(ArtifactError::artifact(format!(
                 "unknown tool {other:?}"
             )))),
+        }
+    }
+
+    /// Dispatch a declared capability for `repo`, with what it left pending.
+    async fn run_report(&self, tool: &str, repo: &Path, input: &str) -> Result<ToolReport, Error> {
+        match tool {
+            "write-file" => self.write_file(repo, input).await,
+            _ => self.run(tool, repo, input).await.map(ToolReport::plain),
         }
     }
 }
@@ -1187,5 +1474,500 @@ file: leftover.txt
         assert!(text.contains("old_text not found in f.rs"), "{text}");
         assert!(text.contains("from line 2 for 1 line(s)"), "{text}");
         assert!(text.contains("file line 3: let x = 1;"), "{text}");
+    }
+
+    /// One chunk section: the header line plus its body.
+    fn chunk(path: &str, n: usize, m: usize, body: &str) -> String {
+        format!("file: {path} chunk: {n}/{m}\n{body}")
+    }
+
+    /// A runner whose chunk buffers live under `run`.
+    fn chunk_runner(run: &Path) -> CapabilityRunner {
+        CapabilityRunner::new().with_run_dir(run)
+    }
+
+    #[tokio::test]
+    async fn write_file_assembles_two_chunks_in_one_call() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let input = format!(
+            "{}{}",
+            chunk("site/index.html", 1, 2, "<html>\n"),
+            chunk("site/index.html", 2, 2, "</html>\n")
+        );
+        let out = runner
+            .run("write-file", repo.path(), &input)
+            .await
+            .expect("assemble");
+        assert!(out.contains("site/index.html"), "{out}");
+        let body = std::fs::read_to_string(repo.path().join("site/index.html")).expect("read");
+        assert_eq!(body, "<html>\n</html>\n");
+    }
+
+    #[tokio::test]
+    async fn write_file_assembles_three_chunks_across_three_calls() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        runner
+            .run("write-file", repo.path(), &chunk("big.md", 1, 3, "one\n"))
+            .await
+            .expect("first call");
+        assert!(!repo.path().join("big.md").exists(), "after chunk 1/3");
+        runner
+            .run("write-file", repo.path(), &chunk("big.md", 2, 3, "two\n"))
+            .await
+            .expect("second call");
+        assert!(!repo.path().join("big.md").exists(), "after chunk 2/3");
+        runner
+            .run("write-file", repo.path(), &chunk("big.md", 3, 3, "three\n"))
+            .await
+            .expect("third call");
+        let body = std::fs::read_to_string(repo.path().join("big.md")).expect("read");
+        assert_eq!(body, "one\ntwo\nthree\n");
+    }
+
+    #[tokio::test]
+    async fn write_file_does_not_write_while_a_chunk_is_missing() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let input = format!(
+            "{}{}",
+            chunk("gap.md", 1, 3, "first\n"),
+            chunk("gap.md", 3, 3, "third\n")
+        );
+        let out = runner
+            .run("write-file", repo.path(), &input)
+            .await
+            .expect("buffer");
+        assert!(!repo.path().join("gap.md").exists(), "must not write");
+        assert!(out.contains("missing 2"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn write_file_assembles_out_of_order_chunks() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        // Last chunk first, in its own call.
+        runner
+            .run("write-file", repo.path(), &chunk("ooo.md", 3, 3, "c\n"))
+            .await
+            .expect("chunk 3");
+        runner
+            .run("write-file", repo.path(), &chunk("ooo.md", 1, 3, "a\n"))
+            .await
+            .expect("chunk 1");
+        assert!(
+            !repo.path().join("ooo.md").exists(),
+            "chunk 2 still missing"
+        );
+        runner
+            .run("write-file", repo.path(), &chunk("ooo.md", 2, 3, "b\n"))
+            .await
+            .expect("chunk 2");
+        let body = std::fs::read_to_string(repo.path().join("ooo.md")).expect("read");
+        assert_eq!(body, "a\nb\nc\n", "assembled by number, not arrival");
+
+        // Reversed inside one reply.
+        let input = format!(
+            "{}{}",
+            chunk("rev.md", 2, 2, "second\n"),
+            chunk("rev.md", 1, 2, "first\n")
+        );
+        runner
+            .run("write-file", repo.path(), &input)
+            .await
+            .expect("reversed");
+        let body = std::fs::read_to_string(repo.path().join("rev.md")).expect("read");
+        assert_eq!(body, "first\nsecond\n");
+    }
+
+    #[tokio::test]
+    async fn write_file_later_chunk_replaces_an_earlier_one() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        runner
+            .run("write-file", repo.path(), &chunk("re.md", 1, 2, "old\n"))
+            .await
+            .expect("first try");
+        runner
+            .run("write-file", repo.path(), &chunk("re.md", 1, 2, "new\n"))
+            .await
+            .expect("resent");
+        runner
+            .run("write-file", repo.path(), &chunk("re.md", 2, 2, "end\n"))
+            .await
+            .expect("last");
+        let body = std::fs::read_to_string(repo.path().join("re.md")).expect("read");
+        assert_eq!(body, "new\nend\n");
+    }
+
+    #[tokio::test]
+    async fn write_file_clears_the_chunk_buffer_after_assembly() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        runner
+            .run("write-file", repo.path(), &chunk("gone.md", 1, 2, "a\n"))
+            .await
+            .expect("buffer");
+        runner
+            .run("write-file", repo.path(), &chunk("gone.md", 2, 2, "b\n"))
+            .await
+            .expect("assemble");
+        let left = std::fs::read_dir(run.path().join("chunks"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(left, 0, "buffer must be empty once the file is written");
+    }
+
+    #[tokio::test]
+    async fn write_file_keeps_chunk_bytes_exactly_including_trailing_blank_lines() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let input = format!(
+            "{}{}",
+            chunk("blank.md", 1, 2, "a\n\n\n"),
+            chunk("blank.md", 2, 2, "b\r\n\n")
+        );
+        runner
+            .run("write-file", repo.path(), &input)
+            .await
+            .expect("assemble");
+        let bytes = std::fs::read(repo.path().join("blank.md")).expect("read");
+        assert_eq!(bytes, b"a\n\n\nb\r\n\n", "bytes must be kept as sent");
+    }
+
+    #[tokio::test]
+    async fn write_file_report_names_the_missing_chunks_until_assembly() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let input = format!(
+            "{}{}",
+            chunk("gap.md", 1, 3, "first\n"),
+            chunk("gap.md", 3, 3, "third\n")
+        );
+        let report = runner
+            .run_report("write-file", repo.path(), &input)
+            .await
+            .expect("buffer");
+        assert_eq!(
+            report.pending,
+            Some(PendingChunks {
+                path: "gap.md".into(),
+                missing: vec![2],
+                total: 3,
+            })
+        );
+        let report = runner
+            .run_report(
+                "write-file",
+                repo.path(),
+                &chunk("gap.md", 2, 3, "second\n"),
+            )
+            .await
+            .expect("assemble");
+        assert_eq!(report.pending, None, "nothing pending once written");
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_bad_chunk_headers() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        for (input, expected) in [
+            (chunk("x.md", 0, 2, "a\n"), "chunk 0/2"),
+            (chunk("x.md", 3, 2, "a\n"), "chunk 3/2"),
+            (chunk("x.md", 1, 0, "a\n"), "chunk 1/0"),
+            ("file: x.md chunk: one/2\na\n".to_string(), "chunk"),
+            ("file: x.md chunk: 1\na\n".to_string(), "chunk"),
+            (chunk("x.md", 1, 2, ""), "empty"),
+        ] {
+            let err = runner
+                .run("write-file", repo.path(), &input)
+                .await
+                .expect_err(&input);
+            assert!(err.to_string().contains(expected), "{input:?}: {err}");
+        }
+        assert!(!repo.path().join("x.md").exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_mixed_or_duplicate_chunks_in_one_call() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let mixed_totals = format!(
+            "{}{}",
+            chunk("m.md", 1, 2, "a\n"),
+            chunk("m.md", 2, 3, "b\n")
+        );
+        let err = runner
+            .run("write-file", repo.path(), &mixed_totals)
+            .await
+            .expect_err("mixed totals");
+        assert!(err.to_string().contains("one file and one total"), "{err}");
+
+        let mixed_paths = format!(
+            "{}{}",
+            chunk("m.md", 1, 2, "a\n"),
+            chunk("n.md", 2, 2, "b\n")
+        );
+        let err = runner
+            .run("write-file", repo.path(), &mixed_paths)
+            .await
+            .expect_err("mixed paths");
+        assert!(err.to_string().contains("one file and one total"), "{err}");
+
+        let duplicate = format!(
+            "{}{}",
+            chunk("d.md", 1, 2, "a\n"),
+            chunk("d.md", 1, 2, "b\n")
+        );
+        let err = runner
+            .run("write-file", repo.path(), &duplicate)
+            .await
+            .expect_err("duplicate");
+        assert!(err.to_string().contains("twice in one reply"), "{err}");
+        assert!(!repo.path().join("d.md").exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_chunks_keep_the_path_rules() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        for path in [".git/config", "config/.env", "../outside.md"] {
+            let err = runner
+                .run("write-file", repo.path(), &chunk(path, 1, 2, "x\n"))
+                .await
+                .expect_err(path);
+            let text = err.to_string();
+            assert!(
+                text.contains("secret") || text.contains("escapes"),
+                "{path}: {text}"
+            );
+        }
+        // A rejected path never reaches the buffer.
+        assert!(!run.path().join("chunks").exists(), "no buffer");
+    }
+
+    #[tokio::test]
+    async fn write_file_chunks_need_a_run_directory() {
+        let repo = init_repo();
+        let runner = CapabilityRunner::new();
+        let err = runner
+            .run("write-file", repo.path(), &chunk("n.md", 1, 2, "x\n"))
+            .await
+            .expect_err("no run dir");
+        assert!(err.to_string().contains("run directory"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn write_file_chunk_body_keeps_context_marker_lines() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let body = "before\n<!-- file: example -->\nafter\n<!-- end file content -->\n";
+        runner
+            .run("write-file", repo.path(), &chunk("marker.md", 1, 1, body))
+            .await
+            .expect("write");
+        let bytes = std::fs::read(repo.path().join("marker.md")).expect("read");
+        assert_eq!(bytes, body.as_bytes(), "every body byte must be written");
+    }
+
+    #[tokio::test]
+    async fn write_file_assembles_a_200_byte_path() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let path = format!("{}/{}.md", "d".repeat(100), "e".repeat(96));
+        assert_eq!(path.len(), 200);
+        runner
+            .run("write-file", repo.path(), &chunk(&path, 1, 2, "one\n"))
+            .await
+            .expect("first chunk");
+        runner
+            .run("write-file", repo.path(), &chunk(&path, 2, 2, "two\n"))
+            .await
+            .expect("second chunk");
+        let body = std::fs::read_to_string(repo.path().join(&path)).expect("read");
+        assert_eq!(body, "one\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn chunk_buffers_for_two_paths_stay_apart() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        for input in [
+            chunk("one.md", 1, 2, "a1\n"),
+            chunk("two.md", 1, 2, "b1\n"),
+            chunk("one.md", 2, 2, "a2\n"),
+        ] {
+            runner
+                .run("write-file", repo.path(), &input)
+                .await
+                .expect("buffer");
+        }
+        assert!(!repo.path().join("two.md").exists(), "two.md lacks chunk 2");
+        runner
+            .run("write-file", repo.path(), &chunk("two.md", 2, 2, "b2\n"))
+            .await
+            .expect("assemble two.md");
+        let one = std::fs::read_to_string(repo.path().join("one.md")).expect("one");
+        let two = std::fs::read_to_string(repo.path().join("two.md")).expect("two");
+        assert_eq!(one, "a1\na2\n");
+        assert_eq!(two, "b1\nb2\n");
+    }
+
+    #[tokio::test]
+    async fn chunk_buffer_holding_another_path_is_refused() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        // A buffer keyed for `mine.md` that records another path, as a hash collision would leave it.
+        let buffer = run.path().join("chunks").join(buffer_key("mine.md"));
+        std::fs::create_dir_all(&buffer).expect("buffer dir");
+        std::fs::write(buffer.join("path"), "other.md").expect("path record");
+        let err = runner
+            .run("write-file", repo.path(), &chunk("mine.md", 1, 2, "x\n"))
+            .await
+            .expect_err("collision must fail closed");
+        assert!(
+            err.to_string()
+                .contains("write-file: chunk buffer belongs to another path"),
+            "{err}"
+        );
+        assert!(!repo.path().join("mine.md").exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_report_names_the_path_only_when_the_file_is_written() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let first = runner
+            .run_report("write-file", repo.path(), &chunk("r.md", 1, 2, "one\n"))
+            .await
+            .expect("first chunk");
+        assert_eq!(first.written, None, "chunk 1/2 leaves r.md unwritten");
+        let second = runner
+            .run_report("write-file", repo.path(), &chunk("r.md", 2, 2, "two\n"))
+            .await
+            .expect("second chunk");
+        assert_eq!(second.written.as_deref(), Some("r.md"));
+        let plain = runner
+            .run_report("write-file", repo.path(), "file: p.md\nplain\n")
+            .await
+            .expect("plain write");
+        assert_eq!(plain.written.as_deref(), Some("p.md"));
+    }
+
+    #[tokio::test]
+    async fn plain_write_retires_the_chunk_buffer_for_its_path() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        runner
+            .run("write-file", repo.path(), &chunk("a.md", 1, 2, "one\n"))
+            .await
+            .expect("chunk 1/2");
+        runner
+            .run("write-file", repo.path(), "file: a.md\nplain\n")
+            .await
+            .expect("plain write");
+        runner
+            .run("write-file", repo.path(), &chunk("a.md", 2, 2, "two\n"))
+            .await
+            .expect("chunk 2/2");
+        let bytes = std::fs::read(repo.path().join("a.md")).expect("a.md");
+        assert_eq!(
+            bytes, b"plain\n",
+            "a stale chunk 1 must not assemble over the plain write"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_body_keeps_ordinary_file_lines() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let body = "before\nfile: example.txt\nafter\n";
+        runner
+            .run("write-file", repo.path(), &chunk("example.md", 1, 1, body))
+            .await
+            .expect("a file: line without chunk: is body text");
+        let bytes = std::fs::read(repo.path().join("example.md")).expect("example.md");
+        assert_eq!(bytes, body.as_bytes(), "every body byte must be written");
+    }
+
+    #[tokio::test]
+    async fn malformed_chunk_header_is_still_an_error() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let error = runner
+            .run("write-file", repo.path(), "file: a.md chunk: x/2\na\n")
+            .await
+            .expect_err("a chunk header with a word for N is refused");
+        assert!(
+            error.to_string().contains("chunk header"),
+            "names the header: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dot_segment_paths_name_one_chunked_file() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let first = runner
+            .run_report("write-file", repo.path(), &chunk("./a.md", 1, 2, "one\n"))
+            .await
+            .expect("chunk 1/2");
+        assert_eq!(
+            first.pending.map(|pending| pending.path),
+            Some("a.md".to_string()),
+            "the pending entry names the normalized path"
+        );
+        let second = runner
+            .run_report("write-file", repo.path(), &chunk("a.md", 2, 2, "two\n"))
+            .await
+            .expect("chunk 2/2");
+        assert_eq!(second.written.as_deref(), Some("a.md"));
+        let bytes = std::fs::read(repo.path().join("a.md")).expect("a.md");
+        assert_eq!(bytes, b"one\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn plain_write_reports_the_normalized_path() {
+        let repo = init_repo();
+        let run = tempfile::tempdir().expect("run");
+        let runner = chunk_runner(run.path());
+        let plain = runner
+            .run_report("write-file", repo.path(), "file: ./p.md\nplain\n")
+            .await
+            .expect("plain write");
+        assert_eq!(plain.written.as_deref(), Some("p.md"));
+    }
+
+    #[test]
+    fn normalize_repo_path_drops_dot_and_empty_segments() {
+        assert_eq!(normalize_repo_path("./a.md"), "a.md");
+        assert_eq!(normalize_repo_path("a//b/./c.md"), "a/b/c.md");
+        assert_eq!(normalize_repo_path("a.md"), "a.md");
+        assert_eq!(
+            buffer_key(&normalize_repo_path("./a.md")),
+            buffer_key("a.md"),
+            "./a.md and a.md share one chunk buffer"
+        );
     }
 }

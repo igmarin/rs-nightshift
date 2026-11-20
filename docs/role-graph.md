@@ -204,6 +204,8 @@ and never uses model output as a command or its arguments.
   `nightshift queue` skips a job whose repo has them.
 - `write-file`: writes `content` that starts with `file: <path>` as the
   whole file. Creates the file and its directories when they do not exist.
+  `file: <path> chunk: N/M` sections are buffered until all `M` are present
+  (see [Chunked writes](configuration.md#chunked-writes)).
 - `search-replace`: exact `old:` / `new:` replacements in existing files.
   Each `old` must match exactly once; no match, or more than one, is an
   error and nothing is written. Never creates files.

@@ -6,6 +6,28 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `write-file` accepts a large file in numbered chunks, each under a
+  `file: <path> chunk: N/M` header. Chunks are kept in the run directory
+  across model calls, and the file is written only once all `M` are present
+  (#99). See [Chunked writes](docs/configuration.md#chunked-writes).
+- A role whose chunked `write-file` is still missing chunks is called again
+  for them, up to `[run] max_chunk_rounds` (default 3). When the re-calls run
+  out, the run stops as `blocked` with the block reason `pending_chunks` and
+  exits 2. Each buffered chunk adds a `chunk_pending` event to `actions.jsonl`.
+  `nightshift plan` stops the same way and records it in `state.json` and
+  `actions.jsonl` too.
+- Chunk bytes are kept exactly as the reply sent them: trailing blank lines
+  and CRLF endings are not trimmed or rewritten. A chunk body may contain
+  `<!-- file: ... -->` or `<!-- end file content -->` lines; they are written
+  as body text. Before, a chunk was cut at those lines and the write still
+  reported success.
+- Chunk buffers are named by a 16-character hash of the path, so a long path
+  (up to the filesystem's name limit) buffers and assembles. Each buffer
+  records its path, and a buffer that holds another path is refused.
+- Missing chunks of one file are kept across re-calls: a call that completes
+  another file no longer drops them, and the role is called again for the
+  first file still missing chunks, up to `max_chunk_rounds`.
+
 - A machine file, `~/.config/nightshift/machine.toml` (or
   `$XDG_CONFIG_HOME/nightshift/machine.toml`, or `NIGHTSHIFT_MACHINE_CONFIG`),
   holds one machine's `[providers.*]` and `[profiles.*]` outside the repo.
@@ -123,6 +145,17 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Chunked `write-file` (#99): a plain write of a file clears the chunks
+  buffered for it, so a stale chunk no longer overwrites the plain content.
+- Chunked `write-file` (#99): only a `file: ` line that contains ` chunk:` is
+  a chunk header. An ordinary `file:` line inside a chunk body is written as
+  body text instead of rejecting the write.
+- Chunked `write-file` (#99): `./a.md` and `a.md` name one file, in the chunk
+  buffer, the pending entry and the written report, so a plain write of
+  `./a.md` clears a pending `a.md`.
+- Chunked `write-file` (#99): a reply whose verdict is `issues`, `questions`
+  or `fail` is not called again for chunks. Its pending chunks block the run
+  as `pending_chunks`, with the buffer kept on disk.
 - `nightshift doctor` checks Ollama at the config's `[providers.ollama]
   base_url`, the address `harness` calls. Before, it always checked
   `--ollama-url`, so with Ollama on another address doctor could pass while
