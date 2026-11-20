@@ -28,3 +28,5 @@ target
 # .codegraph/ must stay absent in a fresh clone, or nightshift skips `codegraph init`.
 graphify-out/
 .codegraph/
+.claude/
+founder/
