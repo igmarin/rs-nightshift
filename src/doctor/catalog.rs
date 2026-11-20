@@ -181,6 +181,16 @@ pub(crate) mod tests {
                     }))
                 }
                 Err(Error::RoleGraph(msg)) => Err(Error::RoleGraph(msg.clone())),
+                Err(Error::Resume(msg)) => Err(Error::Resume(msg.clone())),
+                Err(Error::RunDirNotIgnored {
+                    run_dir,
+                    repo,
+                    entry,
+                }) => Err(Error::RunDirNotIgnored {
+                    run_dir: run_dir.clone(),
+                    repo: repo.clone(),
+                    entry: entry.clone(),
+                }),
                 Err(Error::Provider(ProviderError::InvalidOllamaUrl { url })) => {
                     Err(Error::from(ProviderError::InvalidOllamaUrl {
                         url: url.clone(),

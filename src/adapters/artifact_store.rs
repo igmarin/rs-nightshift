@@ -15,6 +15,15 @@ pub struct FsArtifactStore {
     root: PathBuf,
 }
 
+/// The directory name a run gets under the store root: `{date}_{slug}`.
+///
+/// The harness checks this path against the target repo before it creates the
+/// run, so the check and [`FsArtifactStore::create_run`] share one definition.
+#[must_use]
+pub fn run_dir_name(date: &str, slug: &str) -> String {
+    format!("{date}_{slug}")
+}
+
 impl FsArtifactStore {
     /// A store rooted at `root`.
     #[must_use]
@@ -34,7 +43,7 @@ impl ArtifactStore for FsArtifactStore {
             )))
         };
         std::fs::create_dir_all(&self.root).map_err(|error| failed(&self.root, error))?;
-        let mut dir = self.root.join(format!("{date}_{slug}"));
+        let mut dir = self.root.join(run_dir_name(date, slug));
         let mut copy = 2u32;
         loop {
             // `create_dir` fails when the directory exists, so two runs
@@ -42,7 +51,9 @@ impl ArtifactStore for FsArtifactStore {
             match std::fs::create_dir(&dir) {
                 Ok(()) => return Ok(dir),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    dir = self.root.join(format!("{date}_{slug}-{copy}"));
+                    dir = self
+                        .root
+                        .join(format!("{}-{copy}", run_dir_name(date, slug)));
                     copy += 1;
                 }
                 Err(error) => return Err(failed(&dir, error)),

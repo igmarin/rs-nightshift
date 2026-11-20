@@ -6,6 +6,29 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `nightshift harness` refuses to start, exit 1 and no run directory, when
+  its run directory is inside `--repo` and git does not ignore it, because
+  every resume would refuse the changed tree. The error names the run
+  directory, the repo and the fix: `--out` outside the repo, or the `--out`
+  folder in the repo's `.gitignore`. `nightshift queue` jobs get the same
+  check (#111).
+
+- `nightshift harness --resume <run-dir>` continues a run that a crash,
+  reboot or power cut stopped, from its last completed role, with the same
+  step and loop counters. A `failed` or `blocked` run is retried: the resume
+  re-runs the role that ended it, and that failed attempt still counts toward
+  `max_steps`. A `done` run is not run again; the resume prints its report and
+  exits with the code a fresh run of that status gives: `done` 0, `failed` 1,
+  `blocked` 2. This changes the first design, which exited 0 for any finished
+  run. A resume refuses, exit 1 and a `resume_refused` event, when the repo
+  config, `machine.toml`, the profile, the target repo's `HEAD` or the target
+  working tree differs from the checkpoint. The working tree is fingerprinted
+  from `git status`, the diff against `HEAD` and the contents of untracked
+  files, so a crashed role's edits refuse the resume. `--force-resume`
+  overrides any of these and is recorded in the `resumed` event. Each
+  checkpoint records the config fingerprint, the repo `HEAD` and the target
+  tree in `state.json` (#111).
+
 - `write-file` accepts a large file in numbered chunks, each under a
   `file: <path> chunk: N/M` header. Chunks are kept in the run directory
   across model calls, and the file is written only once all `M` are present

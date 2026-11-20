@@ -63,6 +63,29 @@ pub enum Error {
     #[error("invalid role graph: {0}")]
     RoleGraph(String),
 
+    /// A run could not be resumed from its checkpoint (config or repo changed,
+    /// or the checkpoint is unusable).
+    #[error("cannot resume: {0}")]
+    Resume(String),
+
+    /// A run directory sits inside the target repo and git does not ignore
+    /// it. Each step writes into the run directory, so every resume would see
+    /// the tree change and refuse. `entry` is the `.gitignore` line that fixes
+    /// it.
+    #[error(
+        "run directory {run_dir} is inside repo {repo}, and git does not ignore it, \
+         so every resume would refuse the changed tree. Use --out outside the repo, \
+         or add {entry} to {repo}/.gitignore"
+    )]
+    RunDirNotIgnored {
+        /// The run directory the run would use.
+        run_dir: String,
+        /// The target repo.
+        repo: String,
+        /// The `.gitignore` entry that covers the run directory.
+        entry: String,
+    },
+
     /// An I/O operation failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

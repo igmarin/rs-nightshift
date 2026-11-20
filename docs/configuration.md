@@ -226,7 +226,8 @@ prompt = "..."
 A machine's own providers and profiles can live outside the repo, in
 `~/.config/nightshift/machine.toml` (`$XDG_CONFIG_HOME/nightshift/machine.toml`
 when `XDG_CONFIG_HOME` is set to an absolute path, or the path in
-`NIGHTSHIFT_MACHINE_CONFIG`):
+`NIGHTSHIFT_MACHINE_CONFIG`). A run records the file's bytes when it starts,
+so `harness --resume` refuses to continue if the file changed since then:
 
 ```toml
 # ~/.config/nightshift/machine.toml on the Linux box
@@ -571,6 +572,19 @@ harness compatibility: pass
 
 A `json-validity` failure usually means a thinking model spent `max_tokens`
 on reasoning: raise `max_tokens` or use a non-thinking variant.
+
+## The run directory
+
+Each harness run writes to its own directory under `--out` (default
+`./artifacts`), named `{date}_{slug}`. A run that is resumed reuses it.
+
+Keep `--out` outside `--repo`, or add the `--out` folder to the repo's
+`.gitignore`. A run directory inside `--repo` that git does not ignore
+changes the target tree on every step, so every resume would refuse. The
+harness checks this before the run starts (`git check-ignore`, read-only) and
+exits 1 with the run directory, the repo and the fix, without creating
+anything. The check looks at the run directory's own path, so a rule such as
+`artifacts/` covers it. A run directory outside the repo is never checked.
 
 ## Goal queue (`nightshift queue`)
 

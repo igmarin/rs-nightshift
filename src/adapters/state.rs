@@ -1,6 +1,6 @@
 //! Filesystem [`StateStore`] adapter: append-only JSONL action log + JSON snapshot.
 
-use crate::domain::rolegraph::state::{ActionEvent, StatusSnapshot};
+use crate::domain::rolegraph::state::{fingerprint, ActionEvent, StatusSnapshot};
 use crate::error::{ArtifactError, Error};
 use crate::ports::StateStore;
 use std::io::Write;
@@ -11,6 +11,22 @@ pub const ACTIONS_FILE: &str = "actions.jsonl";
 
 /// Status-snapshot file name under the run directory.
 pub const SNAPSHOT_FILE: &str = "state.json";
+
+/// Fingerprint of the config a run starts with: the bytes of the repo config,
+/// the bytes of the machine file when one exists (`None` when it does not),
+/// and the profile name. A resume compares it, so an edit to any of the three
+/// refuses it. Built on [`fingerprint`].
+#[must_use]
+pub fn config_fingerprint(config: &[u8], machine: Option<&[u8]>, profile: Option<&str>) -> String {
+    // A presence byte tells "no machine file" from an empty one.
+    let machine_present = [u8::from(machine.is_some())];
+    fingerprint(&[
+        config,
+        &machine_present,
+        machine.unwrap_or_default(),
+        profile.unwrap_or_default().as_bytes(),
+    ])
+}
 
 /// Append-only JSONL action log plus a JSON status snapshot, under a run dir.
 ///
@@ -187,9 +203,50 @@ mod tests {
             loop_counters: std::collections::BTreeMap::new(),
             config_hash: String::new(),
             repo_head: None,
+            goal: String::new(),
+            artifacts: Vec::new(),
+            findings: Vec::new(),
+            questions: Vec::new(),
+            tree: None,
         };
         store.write_snapshot(tmp.path(), &snap).expect("write");
         assert_eq!(store.read_snapshot(tmp.path()).expect("read"), snap);
+    }
+
+    #[test]
+    fn config_fingerprint_is_stable_and_sees_bytes_machine_and_profile() {
+        let base = config_fingerprint(b"[run]\n", None, Some("mac"));
+        assert_eq!(base, config_fingerprint(b"[run]\n", None, Some("mac")));
+        assert_ne!(base, config_fingerprint(b"[run] \n", None, Some("mac")));
+        assert_ne!(base, config_fingerprint(b"[run]\n", None, Some("linux")));
+        assert_ne!(base, config_fingerprint(b"[run]\n", None, None));
+        assert_eq!(base.len(), 16, "{base}");
+    }
+
+    #[test]
+    fn config_fingerprint_sees_the_machine_file_when_it_exists() {
+        let base = config_fingerprint(b"[run]\n", None, Some("mac"));
+        let with_machine = config_fingerprint(b"[run]\n", Some(b"[providers.x]\n"), Some("mac"));
+        assert_ne!(base, with_machine, "a machine file that appears");
+        assert_ne!(
+            with_machine,
+            config_fingerprint(b"[run]\n", Some(b"[providers.y]\n"), Some("mac")),
+            "a machine file whose bytes change"
+        );
+        assert_ne!(
+            config_fingerprint(b"[run]\n", Some(b""), None),
+            config_fingerprint(b"[run]\n", None, None),
+            "an empty machine file is still a file"
+        );
+    }
+
+    #[test]
+    fn config_fingerprint_does_not_confuse_where_one_part_ends() {
+        // The same bytes split between the config and the profile hash differently.
+        assert_ne!(
+            config_fingerprint(b"a", None, Some("b")),
+            config_fingerprint(b"ab", None, Some(""))
+        );
     }
 
     #[test]

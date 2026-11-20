@@ -233,6 +233,11 @@ mod tests {
             loop_counters: std::collections::BTreeMap::new(),
             config_hash: String::new(),
             repo_head: None,
+            goal: String::new(),
+            artifacts: Vec::new(),
+            findings: Vec::new(),
+            questions: Vec::new(),
+            tree: None,
         }
     }
 

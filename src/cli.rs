@@ -79,10 +79,14 @@ pub enum Command {
         until: Option<Until>,
     },
     /// Run a role-graph job from a config file (the new harness).
+    ///
+    /// With `--resume <run-dir>`, continue an interrupted run from its last
+    /// checkpoint instead of starting a new one. A failed or blocked run re-runs
+    /// the role that ended it; a done run prints its status.
     Harness {
-        /// Business goal for the run.
-        #[arg(long)]
-        goal: String,
+        /// Business goal for the run (required unless `--resume`).
+        #[arg(long, required_unless_present = "resume")]
+        goal: Option<String>,
         /// Role-graph config file (default: `nightshift.toml`).
         #[arg(long, default_value = "nightshift.toml")]
         config: PathBuf,
@@ -95,6 +99,13 @@ pub enum Command {
         /// Target repo for capabilities (e.g. apply-patch).
         #[arg(long)]
         repo: PathBuf,
+        /// Run directory of an interrupted run to continue from its last checkpoint.
+        #[arg(long, value_name = "RUN_DIR", conflicts_with_all = ["goal", "name"])]
+        resume: Option<PathBuf>,
+        /// With `--resume`: continue even though the config, `machine.toml`, the
+        /// repo HEAD or the target working tree changed since the checkpoint.
+        #[arg(long)]
+        force_resume: bool,
     },
     /// Run a list of jobs back to back from a queue file (unattended).
     ///
@@ -379,15 +390,67 @@ mod tests {
                 out,
                 name,
                 repo,
+                resume,
+                force_resume,
             } => {
-                assert_eq!(goal, "add /health");
+                assert_eq!(goal.as_deref(), Some("add /health"));
                 assert_eq!(config, PathBuf::from("nightshift.toml"));
                 assert_eq!(out, PathBuf::from("artifacts"));
                 assert_eq!(name, None);
                 assert_eq!(repo, PathBuf::from("."));
+                assert_eq!(resume, None);
+                assert!(!force_resume);
             }
             other => panic!("expected Harness, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn harness_resume_takes_a_run_dir_instead_of_a_goal() {
+        let cli = Cli::try_parse_from([
+            "nightshift",
+            "harness",
+            "--resume",
+            "artifacts/2026-11-18_add-health-run-x",
+            "--repo",
+            ".",
+            "--force-resume",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Harness {
+                goal,
+                resume,
+                force_resume,
+                ..
+            } => {
+                assert_eq!(goal, None);
+                assert_eq!(
+                    resume,
+                    Some(PathBuf::from("artifacts/2026-11-18_add-health-run-x"))
+                );
+                assert!(force_resume);
+            }
+            other => panic!("expected Harness, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn harness_needs_a_goal_unless_resuming_and_resume_takes_no_goal() {
+        let without_goal = Cli::try_parse_from(["nightshift", "harness", "--repo", "."]);
+        assert!(without_goal.is_err(), "a fresh run needs --goal");
+
+        let both = Cli::try_parse_from([
+            "nightshift",
+            "harness",
+            "--resume",
+            "run-dir",
+            "--goal",
+            "x",
+            "--repo",
+            ".",
+        ]);
+        assert!(both.is_err(), "--resume and --goal conflict");
     }
 
     #[test]
