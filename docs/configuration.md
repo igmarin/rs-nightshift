@@ -368,14 +368,21 @@ file: site/index.html chunk: 3/3
 
 - Each chunk opens with `file: <path> chunk: N/M`: `N` is the chunk number
   (1 to `M`) and `M` is the total (1 to 1000). A chunk runs until the next
-  header. A reply may carry several chunks of one file, but they must all
-  share the same path and `M`. The bytes of a chunk are kept exactly as the
-  reply sent them: trailing blank lines and CRLF line endings stay, and no
-  newline is added.
-- Chunks are kept in the run directory (`<run>/chunks/`), so they survive
-  between model calls of the same run. The repo is not touched until every
-  chunk from 1 to `M` is present. Then the chunks are concatenated in number
-  order, with no change to their bytes, and the buffer is cleared.
+  header. Only a `file: <path> chunk: N/M` line ends a chunk: a line such as
+  `<!-- file: example -->` or `<!-- end file content -->` is chunk body text
+  and is written as sent. (A plain `write-file`, without `chunk:`, still stops
+  at those marker lines.) A reply may carry several chunks of one file, but
+  they must all share the same path and `M`. The bytes of a chunk are kept
+  exactly as the reply sent them: trailing blank lines and CRLF line endings
+  stay, and no newline is added.
+- Chunks are kept in the run directory (`<run>/chunks/<key>/`), so they survive
+  between model calls of the same run. The `<key>` is a 16-character hash of
+  the path, and the buffer holds a `path` file that names the path. A buffer
+  that names another path is refused with `write-file: chunk buffer belongs to
+  another path`, so a hash collision never mixes two files. The repo is not
+  touched until every chunk from 1 to `M` is present. Then the chunks are
+  concatenated in number order, with no change to their bytes, and the buffer
+  is cleared.
 - Chunks may arrive in any order and in any number of replies. A chunk sent
   again replaces the one stored before, so the last copy wins.
 - A missing chunk never lets the run move past the role. The tool reports the
@@ -392,6 +399,11 @@ file: site/index.html chunk: 3/3
   repo. `plan` exits 2 the same way, prints the missing numbers on stderr, and
   writes the same `state.json` and `actions.jsonl` record in its run directory.
   A `done` verdict does not finish a run while chunks are missing.
+- Missing chunks of several files stay outstanding across re-calls. A call
+  that completes `b.md` does not drop the missing chunks of `a.md`: the role
+  is called again for `a.md` while the cap allows. Each path has one entry, and
+  a later report for that path replaces it. A file counts as written only when
+  the tool wrote the whole file, whether by chunks or by a plain `write-file`.
 - A re-call whose verdict is `issues`, `questions` or `fail` is routed as
   usual. The stored chunks stay in the run directory, and nothing is written
   to the repo. Put the format in that role's prompt, because the output

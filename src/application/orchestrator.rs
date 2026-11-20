@@ -765,7 +765,11 @@ model = "phi4"
         ) -> Result<crate::ports::ToolReport, Error> {
             let mut left = self.pending_calls.lock().expect("calls");
             if *left == 0 {
-                return Ok(crate::ports::ToolReport::plain("wrote a.md".into()));
+                return Ok(crate::ports::ToolReport {
+                    text: "wrote a.md".into(),
+                    pending: None,
+                    written: Some("a.md".into()),
+                });
             }
             *left -= 1;
             Ok(crate::ports::ToolReport {
@@ -775,6 +779,7 @@ model = "phi4"
                     missing: vec![2],
                     total: 2,
                 }),
+                written: None,
             })
         }
     }

@@ -77,6 +77,8 @@ pub struct ExecuteOutcome {
     /// Chunks of a chunked `write-file` still missing when the role ended. The
     /// run must not move past the role while this is set.
     pub pending: Option<PendingChunks>,
+    /// Paths whose `write-file` wrote the whole file during the last model call.
+    pub completed: Vec<String>,
 }
 
 /// Per-execution inputs (borrowed data; ports are passed separately).
@@ -209,6 +211,9 @@ where
     let mut rejection: Option<String> = None;
     // Set while a chunked write still lacks chunks: the next call asks for them.
     let mut chunk_request: Option<String> = None;
+    // Chunked writes still missing chunks, one entry per path, kept across calls
+    // so a call that completes another file does not drop them.
+    let mut outstanding: Vec<PendingChunks> = Vec::new();
     let mut chunk_rounds: u32 = 0;
     let mut attempt: u32 = 1;
     loop {
@@ -222,7 +227,7 @@ where
         if let Some(request) = &chunk_request {
             prompt = format!("{prompt}\n\n{request}");
         }
-        let outcome = match attempt_role(client, store, tools, params, prompt, attempt).await {
+        let mut outcome = match attempt_role(client, store, tools, params, prompt, attempt).await {
             Ok(outcome) => outcome,
             Err(failure) => {
                 // `retries` is capped at validation (`MAX_RETRIES`), so `attempt` cannot overflow.
@@ -237,6 +242,19 @@ where
                 continue;
             }
         };
+        // A write completed by this call leaves the list. A write still missing
+        // chunks replaces the entry for its own path, or joins the list.
+        outstanding.retain(|entry| !outcome.completed.contains(&entry.path));
+        if let Some(pending) = outcome.pending.take() {
+            match outstanding
+                .iter_mut()
+                .find(|entry| entry.path == pending.path)
+            {
+                Some(entry) => *entry = pending,
+                None => outstanding.push(pending),
+            }
+        }
+        outcome.pending = outstanding.first().cloned();
         // A chunk round is a re-call, not a retry: it does not use `retries`.
         match &outcome.pending {
             Some(pending) if chunk_rounds < params.max_chunk_rounds => {
@@ -340,6 +358,7 @@ where
     // Post-tools: apply the patch, write the file, or search-replace only for
     // verdicts that carry a deliverable.
     let mut pending: Option<PendingChunks> = None;
+    let mut completed: Vec<String> = Vec::new();
     if matches!(output.verdict, Verdict::Continue | Verdict::Done) {
         // Once one edit tool has changed the repo, a later failure is not
         // retried: the retry would run the first tool again on changed files.
@@ -368,6 +387,9 @@ where
                     })?;
                     pending = Some(chunks.clone());
                 }
+                if let Some(path) = report.written {
+                    completed.push(path);
+                }
                 edited = true;
             }
         }
@@ -377,6 +399,7 @@ where
         output,
         artifact,
         pending,
+        completed,
     })
 }
 
@@ -1451,7 +1474,11 @@ mod tests {
         ) -> Result<crate::ports::ToolReport, Error> {
             let mut left = self.pending_calls.lock().expect("calls");
             if *left == 0 {
-                return Ok(crate::ports::ToolReport::plain("wrote a.md".into()));
+                return Ok(crate::ports::ToolReport {
+                    text: "wrote a.md".into(),
+                    pending: None,
+                    written: Some("a.md".into()),
+                });
             }
             *left -= 1;
             Ok(crate::ports::ToolReport {
@@ -1461,7 +1488,73 @@ mod tests {
                     missing: self.missing.clone(),
                     total: self.total,
                 }),
+                written: None,
             })
+        }
+    }
+
+    /// Answers each `write-file` call with the next scripted report, in order,
+    /// and records the paths of the reports that wrote a whole file.
+    struct ScriptedWrites {
+        reports: std::sync::Mutex<std::collections::VecDeque<crate::ports::ToolReport>>,
+        written: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ScriptedWrites {
+        fn new(reports: Vec<crate::ports::ToolReport>) -> Self {
+            Self {
+                reports: std::sync::Mutex::new(reports.into()),
+                written: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn written_paths(&self) -> Vec<String> {
+            self.written.lock().expect("written").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolRunner for ScriptedWrites {
+        async fn run(&self, _tool: &str, _repo: &Path, _input: &str) -> Result<String, Error> {
+            Ok("wrote".into())
+        }
+
+        async fn run_report(
+            &self,
+            _tool: &str,
+            _repo: &Path,
+            _input: &str,
+        ) -> Result<crate::ports::ToolReport, Error> {
+            let report = self
+                .reports
+                .lock()
+                .expect("reports")
+                .pop_front()
+                .expect("a scripted report for each call");
+            if let Some(path) = &report.written {
+                self.written.lock().expect("written").push(path.clone());
+            }
+            Ok(report)
+        }
+    }
+
+    fn pending_report(path: &str, missing: Vec<usize>, total: usize) -> crate::ports::ToolReport {
+        crate::ports::ToolReport {
+            text: "stored chunks".into(),
+            pending: Some(PendingChunks {
+                path: path.into(),
+                missing,
+                total,
+            }),
+            written: None,
+        }
+    }
+
+    fn written_report(path: &str) -> crate::ports::ToolReport {
+        crate::ports::ToolReport {
+            text: format!("wrote {path}"),
+            pending: None,
+            written: Some(path.into()),
         }
     }
 
@@ -1597,6 +1690,79 @@ mod tests {
             "a done verdict must not hide pending chunks"
         );
         assert_eq!(client.calls().len(), 1, "cap 0 means no re-call");
+    }
+
+    #[tokio::test]
+    async fn pending_write_survives_a_call_that_completes_another_file() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"done","content":"file: b.md chunk: 1/1\nbee\n"}"#);
+        client.push_text(r#"{"verdict":"done","content":"file: a.md chunk: 2/2\ntwo\n"}"#);
+        let tools = ScriptedWrites::new(vec![
+            pending_report("a.md", vec![2], 2),
+            written_report("b.md"),
+            written_report("a.md"),
+        ]);
+        let store = MemoryArtifactStore::default();
+        let role = chunk_role();
+        let ctx = context();
+        let run = Path::new("/tmp/run/x");
+        let outcome = execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                max_chunk_rounds: 3,
+                ..params(run, &role, &ctx)
+            },
+        )
+        .await
+        .expect("execute");
+        assert_eq!(
+            client.calls().len(),
+            3,
+            "call 2 wrote b.md but left a.md pending, so the role is called again"
+        );
+        assert_eq!(outcome.pending, None, "a.md was completed on call 3");
+        assert_eq!(tools.written_paths(), vec!["b.md", "a.md"]);
+    }
+
+    #[tokio::test]
+    async fn pending_write_is_returned_when_the_round_cap_is_reached() {
+        let client = ScriptedModelClient::new();
+        client.push_text(r#"{"verdict":"continue","content":"file: a.md chunk: 1/2\none\n"}"#);
+        client.push_text(r#"{"verdict":"done","content":"file: b.md chunk: 1/1\nbee\n"}"#);
+        let tools = ScriptedWrites::new(vec![
+            pending_report("a.md", vec![2], 2),
+            written_report("b.md"),
+        ]);
+        let store = MemoryArtifactStore::default();
+        let role = chunk_role();
+        let ctx = context();
+        let run = Path::new("/tmp/run/x");
+        let outcome = execute(
+            &client,
+            &store,
+            &tools,
+            &StubContextProvider::default(),
+            &ExecuteParams {
+                max_chunk_rounds: 1,
+                ..params(run, &role, &ctx)
+            },
+        )
+        .await
+        .expect("execute");
+        assert_eq!(client.calls().len(), 2, "first call plus one round");
+        assert_eq!(
+            outcome.pending,
+            Some(PendingChunks {
+                path: "a.md".into(),
+                missing: vec![2],
+                total: 2,
+            }),
+            "a.md is still outstanding when the cap is reached"
+        );
     }
 
     #[tokio::test]

@@ -17,7 +17,16 @@ All notable changes to this project are documented in this file.
   `nightshift plan` stops the same way and records it in `state.json` and
   `actions.jsonl` too.
 - Chunk bytes are kept exactly as the reply sent them: trailing blank lines
-  and CRLF endings are not trimmed or rewritten.
+  and CRLF endings are not trimmed or rewritten. A chunk body may contain
+  `<!-- file: ... -->` or `<!-- end file content -->` lines; they are written
+  as body text. Before, a chunk was cut at those lines and the write still
+  reported success.
+- Chunk buffers are named by a 16-character hash of the path, so a long path
+  (up to the filesystem's name limit) buffers and assembles. Each buffer
+  records its path, and a buffer that holds another path is refused.
+- Missing chunks of one file are kept across re-calls: a call that completes
+  another file no longer drops them, and the role is called again for the
+  first file still missing chunks, up to `max_chunk_rounds`.
 
 - A machine file, `~/.config/nightshift/machine.toml` (or
   `$XDG_CONFIG_HOME/nightshift/machine.toml`, or `NIGHTSHIFT_MACHINE_CONFIG`),

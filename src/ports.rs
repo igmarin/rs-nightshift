@@ -310,15 +310,19 @@ pub struct ToolReport {
     pub text: String,
     /// Set when a chunked write buffered its chunk but did not write the file.
     pub pending: Option<PendingChunks>,
+    /// The repo-relative path this tool wrote in full, set only when the file
+    /// was written (a chunked write that is still missing chunks leaves it unset).
+    pub written: Option<String>,
 }
 
 impl ToolReport {
-    /// A report with text and nothing pending.
+    /// A report with text and nothing pending or written.
     #[must_use]
     pub fn plain(text: String) -> Self {
         Self {
             text,
             pending: None,
+            written: None,
         }
     }
 }
