@@ -21,6 +21,7 @@ A config has four parts:
 | :--- | :--- | :--- |
 | `start` | (required) | the id of the first role |
 | `max_steps` | `30` | most role turns in one run; reaching it stops the run as `REQUIRES_HUMAN_REVIEW` (`budget_exhausted`) |
+| `max_chunk_rounds` | `3` | how many times a role is called again for the missing chunks of a chunked `write-file`, per role run; with chunks still missing after that, the run stops as `blocked` (`pending_chunks`). See [Chunked writes](#chunked-writes) |
 | `on_unclear` | `"halt"` | what blocking questions do; see [Routing](#routing-on) |
 | `profile` | none | the `[profiles.*]` to use; see [Machine profiles](#machine-profiles-slot-models) |
 
@@ -319,7 +320,7 @@ load.
 | `gather-context` | Before the model call | Adds codegraph and graphify context, and the `context_files`, to the prompt |
 | `run-tests` | Before the model call | Runs the repo's test command and adds the result to the prompt |
 | `apply-patch` | After `continue` / `done` | Applies the reply's `content` as a unified diff |
-| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the whole file |
+| `write-file` | After `continue` / `done` | Writes `content` that starts with `file: <path>` as the whole file, or buffers `file: <path> chunk: N/M` chunks and writes once all are present |
 | `search-replace` | After `continue` / `done` | Replaces unique `old:` snippets with `new:` text in existing files |
 
 ### apply-patch
@@ -351,6 +352,86 @@ body stops at the next line that starts with `file: `, `<!-- file:` or
 trailing blank lines are dropped; the file ends with one newline. One file
 per reply. Paths must stay in the repo and secret-bearing paths are refused,
 also through a symlinked directory.
+
+#### Chunked writes
+
+A reply can carry a large file in numbered chunks, so that each model call
+stays short enough to finish within the role's `timeout_secs`:
+
+```text
+file: site/index.html chunk: 1/3
+<first part of the file>
+file: site/index.html chunk: 2/3
+<second part>
+file: site/index.html chunk: 3/3
+<last part>
+```
+
+- Each chunk opens with `file: <path> chunk: N/M`: `N` is the chunk number
+  (1 to `M`) and `M` is the total (1 to 1000). A chunk runs until the next
+  header. Only a line that starts with `file: ` and contains ` chunk:` ends a
+  chunk, and it must be a valid header. Any other line is body text, so a
+  chunk may contain `file: example.txt`, `<!-- file: example -->` or
+  `<!-- end file content -->` and they are written as sent. A malformed header
+  such as `file: a.md chunk: x/2` is an error. (A plain `write-file`, without
+  `chunk:`, still stops at those marker lines.) A reply may carry several chunks of one file, but
+  they must all share the same path and `M`. The bytes of a chunk are kept
+  exactly as the reply sent them: trailing blank lines and CRLF line endings
+  stay, and no newline is added.
+- Chunks are kept in the run directory (`<run>/chunks/<key>/`), so they survive
+  between model calls of the same run. The `<key>` is a 16-character hash of
+  the path, and the buffer holds a `path` file that names the path. A buffer
+  that names another path is refused with `write-file: chunk buffer belongs to
+  another path`, so a hash collision never mixes two files. The repo is not
+  touched until every chunk from 1 to `M` is present. Then the chunks are
+  concatenated in number order, with no change to their bytes, and the buffer
+  is cleared.
+- Chunks may arrive in any order and in any number of replies. A chunk sent
+  again replaces the one stored before, so the last copy wins.
+- A plain `write-file` of the same file (`file: <path>`, no `chunk:`) replaces
+  the file and clears its buffer, so chunks stored before it are not assembled
+  over it later. Chunks sent after it start a new buffer.
+- Paths are compared by identity: empty and `.` segments are dropped, so
+  `./a.md`, `a.md` and `a//a.md` name one file in the buffer, the pending
+  entry, the report of a written file and the role's outstanding writes. The
+  path rules still check the path as written, so `..` and absolute paths are
+  refused.
+- A missing chunk never lets the run move past the role. The tool reports the
+  missing numbers (`missing 2 of 3`) and writes nothing to the repo. If the
+  reply's verdict is `continue` or `done`, the harness calls the same role
+  again, with the missing numbers in the prompt, up to
+  [`max_chunk_rounds`](#run) times for that role run (default `3`). A re-call
+  is not a retry: it does not use `retries` or `max_loop`. Each buffered write
+  that does not yet assemble the file adds a `chunk_pending` event to
+  `actions.jsonl`, with the path and the missing numbers.
+- When the re-calls are used up with chunks still missing, the run stops as
+  `blocked` with the block reason `pending_chunks`, and exits with code 2.
+  `state.json` and `actions.jsonl` record it, and nothing is written to the
+  repo. `plan` exits 2 the same way, prints the missing numbers on stderr, and
+  writes the same `state.json` and `actions.jsonl` record in its run directory.
+  A `done` verdict does not finish a run while chunks are missing.
+- Missing chunks of several files stay outstanding across re-calls. A call
+  that completes `b.md` does not drop the missing chunks of `a.md`: the role
+  is called again for `a.md` while the cap allows. Each path has one entry, and
+  a later report for that path replaces it. A file counts as written only when
+  the tool wrote the whole file, whether by chunks or by a plain `write-file`.
+- A reply whose verdict is `issues`, `questions` or `fail` is not called again
+  for chunks. Its pending entry is returned with the outcome, the stored chunks
+  stay in the run directory, and nothing is written to the repo. The run then
+  stops as `blocked` with `pending_chunks`, before the verdict is routed, so
+  it does not loop back or finish while a file is missing chunks. Put the
+  format in that role's prompt, because the output contract does not mention
+  chunks.
+- With `max_chunk_rounds = 0`, a missing chunk blocks the run on the first
+  reply.
+- Rejected at once, with nothing stored from that reply: a header that is not
+  `file: <path> chunk: N/M` with whole numbers, `N` outside 1 to `M`, `M`
+  outside 1 to 1000, a chunk that is only blank lines, a number used twice in one reply, chunks
+  of two files or two totals in one reply, and a path that fails the plain
+  write's path rules. The path is checked on the first chunk.
+- Buffers live in the run directory, so only the runners that `harness`,
+  `queue` and `plan` build (each with its run directory) accept chunked
+  input. Any other runner refuses it with an error.
 
 ### run-tests
 

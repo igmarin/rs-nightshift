@@ -12,6 +12,10 @@ pub const DEFAULT_MAX_STEPS: u32 = 30;
 /// Default per-role cap on how many times a back-edge may fire.
 pub const DEFAULT_MAX_LOOP: u32 = 3;
 
+/// Default cap on how many times a role is called again to supply the chunks
+/// a chunked `write-file` still lacks, before the run blocks as `pending_chunks`.
+pub const DEFAULT_MAX_CHUNK_ROUNDS: u32 = 3;
+
 /// Default per-role generate timeout in seconds when `timeout_secs` is omitted.
 pub const DEFAULT_GENERATE_TIMEOUT_SECS: u64 = 3600;
 
@@ -40,6 +44,10 @@ pub struct RunOptions {
     /// Global cap on total role executions.
     #[serde(default = "default_max_steps")]
     pub max_steps: u32,
+    /// How many times a role is called again for the missing chunks of a
+    /// chunked `write-file`, per role execution. `0` blocks at once.
+    #[serde(default = "default_max_chunk_rounds")]
+    pub max_chunk_rounds: u32,
     /// Default `[profiles.<name>]` for `@slot` models. `--profile` and
     /// `NIGHTSHIFT_PROFILE` override it. After
     /// [`NightshiftConfig::resolve_profile`], holds the profile in use.
@@ -174,6 +182,7 @@ impl From<MachineConfig> for NightshiftConfig {
                 start: String::new(),
                 on_unclear: OnUnclear::default(),
                 max_steps: default_max_steps(),
+                max_chunk_rounds: default_max_chunk_rounds(),
                 profile: None,
             },
             providers: machine.providers,
@@ -185,6 +194,10 @@ impl From<MachineConfig> for NightshiftConfig {
 
 fn default_max_steps() -> u32 {
     DEFAULT_MAX_STEPS
+}
+
+fn default_max_chunk_rounds() -> u32 {
+    DEFAULT_MAX_CHUNK_ROUNDS
 }
 
 fn default_retries() -> u32 {
@@ -619,7 +632,15 @@ on = { issues = "developer" }
         let config = parse_example();
         assert_eq!(config.run.max_steps, DEFAULT_MAX_STEPS);
         assert_eq!(config.run.on_unclear, OnUnclear::Halt);
+        assert_eq!(config.run.max_chunk_rounds, DEFAULT_MAX_CHUNK_ROUNDS);
         assert!(config.roles.iter().all(|r| r.max_loop == DEFAULT_MAX_LOOP));
+    }
+
+    #[test]
+    fn max_chunk_rounds_parses_from_run_table() {
+        let text = EXAMPLE.replace("[run]\n", "[run]\nmax_chunk_rounds = 0\n");
+        let config: NightshiftConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(config.run.max_chunk_rounds, 0);
     }
 
     #[test]

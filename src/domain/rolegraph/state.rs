@@ -42,6 +42,9 @@ pub enum EventKind {
     Resumed,
     /// A resume was refused. The run is left as it was; nothing continued.
     ResumeRefused,
+    /// A chunked write buffered a chunk; the file is not written yet. The
+    /// detail names the path and the missing chunk numbers.
+    ChunkPending,
     /// The run halted for human review.
     Halt,
     /// The run finished successfully.
